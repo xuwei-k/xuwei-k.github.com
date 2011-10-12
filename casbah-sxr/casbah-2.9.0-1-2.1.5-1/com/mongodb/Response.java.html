@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>com/mongodb/Response.java</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">// Response.java</span>
+
+<span class="comment">/**
+ *      Copyright (C) 2008 10gen Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */</span>
+
+<span class="keyword">package</span> com.mongodb;
+
+<span class="keyword">import</span> java.io.*;
+<span class="keyword">import</span> java.util.*;
+
+<span class="keyword">import</span> org.bson.*;
+<span class="keyword">import</span> org.bson.io.*;
+
+<span class="keyword">class</span> <a title="object com.mongodb.Response" id="7938">Response</a> <span class="delimiter">{</span>
+
+    Response<span class="delimiter">(</span> ServerAddress addr , DBCollection collection ,  InputStream in, BSONDecoder decoder<span class="delimiter">)</span>
+        throws IOException <span class="delimiter">{</span>
+
+        _host = addr;
+
+        byte<span class="delimiter">[</span><span class="delimiter">]</span> b = <span class="keyword">new</span> byte<span class="delimiter">[</span><span class="int">36</span><span class="delimiter">]</span>;
+        Bits.readFully<span class="delimiter">(</span>in, b<span class="delimiter">)</span>;
+
+        ByteArrayInputStream bin = <span class="keyword">new</span> ByteArrayInputStream<span class="delimiter">(</span> b <span class="delimiter">)</span>;
+        _len = Bits.readInt<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> _len &gt; <span class="delimiter">(</span> <span class="int">32</span> * <span class="int">1024</span> * <span class="int">1024</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+        	<span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span> <span class="string">&quot;response too long: &quot;</span> + _len <span class="delimiter">)</span>;
+
+        _id = Bits.readInt<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+        _responseTo = Bits.readInt<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+        _operation = Bits.readInt<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+        _flags = Bits.readInt<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+        _cursor = Bits.readLong<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+        _startingFrom = Bits.readInt<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+        _num = Bits.readInt<span class="delimiter">(</span> bin <span class="delimiter">)</span>;
+
+        MyInputStream user = <span class="keyword">new</span> MyInputStream<span class="delimiter">(</span> in , _len - b.length <span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> _num &lt; <span class="int">2</span> <span class="delimiter">)</span>
+            _objects = <span class="keyword">new</span> LinkedList&lt;DBObject&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">else</span>
+            _objects = <span class="keyword">new</span> ArrayList&lt;DBObject&gt;<span class="delimiter">(</span> _num <span class="delimiter">)</span>;
+
+        DBCallback c = collection.getDB<span class="delimiter">(</span><span class="delimiter">)</span>.getMongo<span class="delimiter">(</span><span class="delimiter">)</span>.getMongoOptions<span class="delimiter">(</span><span class="delimiter">)</span>.dbCallbackFactory.create<span class="delimiter">(</span> collection <span class="delimiter">)</span>;
+
+        <span class="keyword">for</span> <span class="delimiter">(</span> int i=<span class="int">0</span>; i &lt; _num; i++ <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> user._toGo &lt; <span class="int">5</span> <span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> IOException<span class="delimiter">(</span> <span class="string">&quot;should have more objects, but only &quot;</span> + user._toGo + <span class="string">&quot; bytes left&quot;</span> <span class="delimiter">)</span>;
+            c.reset<span class="delimiter">(</span><span class="delimiter">)</span>;
+            decoder.decode<span class="delimiter">(</span> user , c <span class="delimiter">)</span>;
+
+            <span class="comment">// TODO: By moving to generics, you can remove these casts (and requirement to impl DBOBject).</span>
+            _objects.add<span class="delimiter">(</span> <span class="delimiter">(</span>DBObject<span class="delimiter">)</span>c.get<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> user._toGo != <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IOException<span class="delimiter">(</span> <span class="string">&quot;finished reading objects but still have: &quot;</span> + user._toGo + <span class="string">&quot; bytes to read!' &quot;</span> <span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> _num != _objects.size<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;something is really broken&quot;</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public int size<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _num;
+    <span class="delimiter">}</span>
+
+    public DBObject get<span class="delimiter">(</span> int i <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _objects.get<span class="delimiter">(</span> i <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public Iterator&lt;DBObject&gt; iterator<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _objects.iterator<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public boolean hasGetMore<span class="delimiter">(</span> int queryOptions <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _cursor == <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">false</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> _num &gt; <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">true</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> <span class="delimiter">(</span> queryOptions &amp; Bytes.QUERYOPTION_TAILABLE <span class="delimiter">)</span> == <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">false</span>;
+
+        <span class="comment">// have a tailable cursor</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> <span class="delimiter">(</span> _flags &amp; Bytes.RESULTFLAG_AWAITCAPABLE <span class="delimiter">)</span> &gt; <span class="int">0</span> &amp;&amp; <span class="delimiter">(</span> queryOptions &amp; Bytes.QUERYOPTION_AWAITDATA <span class="delimiter">)</span> &gt; <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">true</span>;
+
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            Thread.sleep<span class="delimiter">(</span> <span class="int">500</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">catch</span> <span class="delimiter">(</span> Exception e <span class="delimiter">)</span><span class="delimiter">{</span><span class="delimiter">}</span>
+
+        <span class="keyword">return</span> <span class="keyword">true</span>;
+    <span class="delimiter">}</span>
+
+    public long cursor<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _cursor;
+    <span class="delimiter">}</span>
+
+    public ServerError getError<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _num != <span class="int">1</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">null</span>;
+
+        DBObject obj = get<span class="delimiter">(</span><span class="int">0</span><span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> ServerError.getMsg<span class="delimiter">(</span> obj , <span class="keyword">null</span> <span class="delimiter">)</span> == <span class="keyword">null</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">null</span>;
+
+        <span class="keyword">return</span> <span class="keyword">new</span> ServerError<span class="delimiter">(</span> obj <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    static <span class="keyword">class</span> <a title="object com.mongodb.Response.MyInputStream" id="145491">MyInputStream</a> <span class="keyword">extends</span> InputStream <span class="delimiter">{</span>
+        MyInputStream<span class="delimiter">(</span> InputStream in , int max <span class="delimiter">)</span><span class="delimiter">{</span>
+            _in = in;
+            _toGo = max;
+        <span class="delimiter">}</span>
+
+        public int available<span class="delimiter">(</span><span class="delimiter">)</span>
+            throws IOException <span class="delimiter">{</span>
+            <span class="keyword">return</span> _in.available<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public int read<span class="delimiter">(</span><span class="delimiter">)</span>
+            throws IOException <span class="delimiter">{</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> _toGo &lt;= <span class="int">0</span> <span class="delimiter">)</span>
+                <span class="keyword">return</span> -<span class="int">1</span>;
+
+            int <span class="keyword">val</span> = _in.read<span class="delimiter">(</span><span class="delimiter">)</span>;
+            _toGo--;
+
+            <span class="keyword">return</span> <span class="keyword">val</span>;
+        <span class="delimiter">}</span>
+
+        public int read<span class="delimiter">(</span>byte<span class="delimiter">[</span><span class="delimiter">]</span> b, int off, int len<span class="delimiter">)</span>
+            throws IOException <span class="delimiter">{</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> _toGo &lt;= <span class="int">0</span> <span class="delimiter">)</span>
+                <span class="keyword">return</span> -<span class="int">1</span>;
+
+            int n = _in.read<span class="delimiter">(</span>b, off, Math.min<span class="delimiter">(</span>_toGo, len<span class="delimiter">)</span><span class="delimiter">)</span>;
+            _toGo -= n;
+            <span class="keyword">return</span> n;
+        <span class="delimiter">}</span>
+
+        public void close<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;can't close thos&quot;</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">final</span> InputStream _in;
+        <span class="keyword">private</span> int _toGo;
+    <span class="delimiter">}</span>
+
+    public String toString<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="string">&quot;flags:&quot;</span> + _flags + <span class="string">&quot; _cursor:&quot;</span> + _cursor + <span class="string">&quot; _startingFrom:&quot;</span> + _startingFrom + <span class="string">&quot; _num:&quot;</span> + _num ;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">final</span> ServerAddress _host;
+
+    <span class="keyword">final</span> int _len;
+    <span class="keyword">final</span> int _id;
+    <span class="keyword">final</span> int _responseTo;
+    <span class="keyword">final</span> int _operation;
+
+    <span class="keyword">final</span> int _flags;
+    long _cursor;
+    <span class="keyword">final</span> int _startingFrom;
+    <span class="keyword">final</span> int _num;
+
+    <span class="keyword">final</span> List&lt;DBObject&gt; _objects;
+
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

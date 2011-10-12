@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>com/mongodb/DBTCPConnector.java</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">// DBTCPConnector.java</span>
+
+<span class="comment">/**
+ *      Copyright (C) 2008 10gen Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */</span>
+
+<span class="keyword">package</span> com.mongodb;
+
+<span class="keyword">import</span> java.io.IOException;
+<span class="keyword">import</span> java.net.SocketTimeoutException;
+<span class="keyword">import</span> java.util.*;
+<span class="keyword">import</span> java.util.logging.Level;
+<span class="keyword">import</span> java.util.logging.Logger;
+
+public <span class="keyword">class</span> <a title="object com.mongodb.DBTCPConnector" id="7971">DBTCPConnector</a> implements DBConnector <span class="delimiter">{</span>
+
+    static Logger <a title="java.util.logging.Logger" id="145326">_logger</a> = Logger.getLogger<span class="delimiter">(</span> Bytes.LOGGER.getName<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="string">&quot;.tcp&quot;</span> <span class="delimiter">)</span>;
+    static Logger <a title="java.util.logging.Logger" id="145327">_createLogger</a> = Logger.getLogger<span class="delimiter">(</span> _logger.getName<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="string">&quot;.connect&quot;</span> <span class="delimiter">)</span>;
+
+    public DBTCPConnector<span class="delimiter">(</span> Mongo m , ServerAddress addr <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        _mongo = m;
+        _portHolder = <span class="keyword">new</span> DBPortPool.Holder<span class="delimiter">(</span> m._options <span class="delimiter">)</span>;
+        _checkAddress<span class="delimiter">(</span> addr <span class="delimiter">)</span>;
+
+        _createLogger.info<span class="delimiter">(</span> addr.toString<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> addr.isPaired<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            _allHosts = <span class="keyword">new</span> ArrayList&lt;ServerAddress&gt;<span class="delimiter">(</span> addr.explode<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+            _rsStatus = <span class="keyword">new</span> ReplicaSetStatus<span class="delimiter">(</span> m, _allHosts <span class="delimiter">)</span>;
+            _createLogger.info<span class="delimiter">(</span> <span class="string">&quot;switching to replica set mode : &quot;</span> + _allHosts + <span class="string">&quot; -&gt; &quot;</span> + getAddress<span class="delimiter">(</span><span class="delimiter">)</span>  <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="delimiter">{</span>
+            _set<span class="delimiter">(</span> addr <span class="delimiter">)</span>;
+            _allHosts = <span class="keyword">null</span>;
+            _rsStatus = <span class="keyword">null</span>;
+        <span class="delimiter">}</span>
+
+    <span class="delimiter">}</span>
+
+    public DBTCPConnector<span class="delimiter">(</span> Mongo m , ServerAddress ... all <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        <span class="keyword">this</span><span class="delimiter">(</span> m , Arrays.asList<span class="delimiter">(</span> all <span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public DBTCPConnector<span class="delimiter">(</span> Mongo m , List&lt;ServerAddress&gt; all <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        _portHolder = <span class="keyword">new</span> DBPortPool.Holder<span class="delimiter">(</span> m._options <span class="delimiter">)</span>;
+        _checkAddress<span class="delimiter">(</span> all <span class="delimiter">)</span>;
+
+        _allHosts = <span class="keyword">new</span> ArrayList&lt;ServerAddress&gt;<span class="delimiter">(</span> all <span class="delimiter">)</span>; <span class="comment">// make a copy so it can't be modified</span>
+        _rsStatus = <span class="keyword">new</span> ReplicaSetStatus<span class="delimiter">(</span> m, _allHosts <span class="delimiter">)</span>;
+
+        _createLogger.info<span class="delimiter">(</span> all  + <span class="string">&quot; -&gt; &quot;</span> + getAddress<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public void start<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>_rsStatus != <span class="keyword">null</span><span class="delimiter">)</span>
+            _rsStatus.start<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static <a href="ServerAddress.java.html#7911" title="com.mongodb.ServerAddress">ServerAddress</a> <a title="(addr: com.mongodb.ServerAddress)com.mongodb.ServerAddress" id="145328">_checkAddress</a><span class="delimiter">(</span> <a href="ServerAddress.java.html#7911" title="com.mongodb.ServerAddress">ServerAddress</a> <a title="com.mongodb.ServerAddress" id="145330">addr</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> addr == <span class="keyword">null</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span> <span class="string">&quot;address can't be null&quot;</span> <span class="delimiter">)</span>;
+        <span class="keyword">return</span> addr;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static <a href="ServerAddress.java.html#7911" title="com.mongodb.ServerAddress">ServerAddress</a> <a title="(addrs: java.util.List[com.mongodb.ServerAddress])com.mongodb.ServerAddress" id="145329">_checkAddress</a><span class="delimiter">(</span> List&lt;<a href="ServerAddress.java.html#7911" title="com.mongodb.ServerAddress">ServerAddress</a>&gt; <a title="java.util.List[com.mongodb.ServerAddress]" id="145332">addrs</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> addrs == <span class="keyword">null</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span> <span class="string">&quot;addresses can't be null&quot;</span> <span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> addrs.size<span class="delimiter">(</span><span class="delimiter">)</span> == <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span> <span class="string">&quot;need to specify at least 1 address&quot;</span> <span class="delimiter">)</span>;
+        <span class="keyword">return</span> addrs.get<span class="delimiter">(</span><span class="int">0</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Start a &quot;request&quot;.
+     *
+     * A &quot;request&quot; is a group of operations in which order matters. Examples
+     * include inserting a document and then performing a query which expects
+     * that document to have been inserted, or performing an operation and
+     * then using com.mongodb.Mongo.getLastError to perform error-checking
+     * on that operation. When a thread performs operations in a &quot;request&quot;, all
+     * operations will be performed on the same socket, so they will be
+     * correctly ordered.
+     */</span>
+    public void requestStart<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _myPort.get<span class="delimiter">(</span><span class="delimiter">)</span>.requestStart<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * End the current &quot;request&quot;, if this thread is in one.
+     *
+     * By ending a request when it is safe to do so the built-in connection-
+     * pool is allowed to reassign requests to different sockets in order to
+     * more effectively balance load. See requestStart for more information.
+     */</span>
+    public void requestDone<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _myPort.get<span class="delimiter">(</span><span class="delimiter">)</span>.requestDone<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public void requestEnsureConnection<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _myPort.get<span class="delimiter">(</span><span class="delimiter">)</span>.requestEnsureConnection<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    void _checkClosed<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _closed <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalStateException<span class="delimiter">(</span> <span class="string">&quot;this Mongo has been closed&quot;</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    WriteResult _checkWriteError<span class="delimiter">(</span> DB db , MyPort mp , DBPort port , WriteConcern concern <span class="delimiter">)</span>
+        throws MongoException, IOException <span class="delimiter">{</span>
+        CommandResult e = <span class="keyword">null</span>;
+        e = port.runCommand<span class="delimiter">(</span> db , concern.getCommand<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> ! e.hasErr<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">new</span> WriteResult<span class="delimiter">(</span> e , concern <span class="delimiter">)</span>;
+        
+        e.throwOnError<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> <span class="keyword">null</span>;
+    <span class="delimiter">}</span>
+
+    public WriteResult say<span class="delimiter">(</span> DB db , OutMessage m , WriteConcern concern <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        <span class="keyword">return</span> say<span class="delimiter">(</span> db , m , concern , <span class="keyword">null</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public WriteResult say<span class="delimiter">(</span> DB db , OutMessage m , WriteConcern concern , ServerAddress hostNeeded <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+
+        _checkClosed<span class="delimiter">(</span><span class="delimiter">)</span>;
+        checkMaster<span class="delimiter">(</span> <span class="keyword">false</span> , <span class="keyword">true</span> <span class="delimiter">)</span>;
+
+        MyPort mp = _myPort.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+        DBPort port = mp.get<span class="delimiter">(</span> <span class="keyword">true</span> , <span class="keyword">false</span> , hostNeeded <span class="delimiter">)</span>;
+
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            port.checkAuth<span class="delimiter">(</span> db <span class="delimiter">)</span>;
+            port.say<span class="delimiter">(</span> m <span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> concern.callGetLastError<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">return</span> _checkWriteError<span class="delimiter">(</span> db , mp , port , concern <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">else</span> <span class="delimiter">{</span>
+                <span class="keyword">return</span> <span class="keyword">new</span> WriteResult<span class="delimiter">(</span> db , port , concern <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">catch</span> <span class="delimiter">(</span> IOException ioe <span class="delimiter">)</span><span class="delimiter">{</span>
+            mp.error<span class="delimiter">(</span> port , ioe <span class="delimiter">)</span>;
+            _error<span class="delimiter">(</span> ioe, <span class="keyword">false</span> <span class="delimiter">)</span>;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> concern.raiseNetworkErrors<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> MongoException.Network<span class="delimiter">(</span> <span class="string">&quot;can't say something&quot;</span> , ioe <span class="delimiter">)</span>;
+            
+            CommandResult res = <span class="keyword">new</span> CommandResult<span class="delimiter">(</span><span class="delimiter">)</span>;
+            res.put<span class="delimiter">(</span> <span class="string">&quot;ok&quot;</span> , <span class="keyword">false</span> <span class="delimiter">)</span>;
+            res.put<span class="delimiter">(</span> <span class="string">&quot;$err&quot;</span> , <span class="string">&quot;NETWORK ERROR&quot;</span> <span class="delimiter">)</span>;
+            <span class="keyword">return</span> <span class="keyword">new</span> WriteResult<span class="delimiter">(</span> res , concern <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">catch</span> <span class="delimiter">(</span> MongoException me <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">throw</span> me;
+        <span class="delimiter">}</span>
+        <span class="keyword">catch</span> <span class="delimiter">(</span> RuntimeException re <span class="delimiter">)</span><span class="delimiter">{</span>
+            mp.error<span class="delimiter">(</span> port , re <span class="delimiter">)</span>;
+            <span class="keyword">throw</span> re;
+        <span class="delimiter">}</span>
+        <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mp.done<span class="delimiter">(</span> port <span class="delimiter">)</span>;
+            m.doneWithMessage<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    
+    public Response call<span class="delimiter">(</span> DB db , DBCollection coll , OutMessage m <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        <span class="keyword">return</span> call<span class="delimiter">(</span> db , coll , m , <span class="keyword">null</span> , <span class="int">2</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public Response call<span class="delimiter">(</span> DB db , DBCollection coll , OutMessage m , ServerAddress hostNeeded <span class="delimiter">)</span> 
+        throws MongoException <span class="delimiter">{</span>
+        <span class="keyword">return</span> call<span class="delimiter">(</span> db , coll , m , hostNeeded , <span class="int">2</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public Response call<span class="delimiter">(</span> DB db , DBCollection coll , OutMessage m , ServerAddress hostNeeded , int retries <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        boolean slaveOk = m.hasOption<span class="delimiter">(</span> Bytes.QUERYOPTION_SLAVEOK <span class="delimiter">)</span>;
+        _checkClosed<span class="delimiter">(</span><span class="delimiter">)</span>;
+        checkMaster<span class="delimiter">(</span> <span class="keyword">false</span> , !slaveOk <span class="delimiter">)</span>;
+        
+        <span class="keyword">final</span> MyPort mp = _myPort.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">final</span> DBPort port = mp.get<span class="delimiter">(</span> <span class="keyword">false</span> , slaveOk, hostNeeded <span class="delimiter">)</span>;
+                
+        Response res = <span class="keyword">null</span>;
+        boolean retry = <span class="keyword">false</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            port.checkAuth<span class="delimiter">(</span> db <span class="delimiter">)</span>;
+            res = port.call<span class="delimiter">(</span> m , coll <span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> res._responseTo != m.getId<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> MongoException<span class="delimiter">(</span> <span class="string">&quot;ids don't match&quot;</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">catch</span> <span class="delimiter">(</span> IOException ioe <span class="delimiter">)</span><span class="delimiter">{</span>
+            mp.error<span class="delimiter">(</span> port , ioe <span class="delimiter">)</span>;
+            retry = retries &gt; <span class="int">0</span> &amp;&amp; !coll._name.equals<span class="delimiter">(</span> <span class="string">&quot;$cmd&quot;</span> <span class="delimiter">)</span>
+                    &amp;&amp; !<span class="delimiter">(</span>ioe instanceof SocketTimeoutException<span class="delimiter">)</span> &amp;&amp; _error<span class="delimiter">(</span> ioe, slaveOk <span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> !retry <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> MongoException.Network<span class="delimiter">(</span> <span class="string">&quot;can't call something&quot;</span> , ioe <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">catch</span> <span class="delimiter">(</span> RuntimeException re <span class="delimiter">)</span><span class="delimiter">{</span>
+            mp.error<span class="delimiter">(</span> port , re <span class="delimiter">)</span>;
+            <span class="keyword">throw</span> re;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mp.done<span class="delimiter">(</span> port <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span>retry<span class="delimiter">)</span>
+            <span class="keyword">return</span> call<span class="delimiter">(</span> db , coll , m , hostNeeded , retries - <span class="int">1</span> <span class="delimiter">)</span>;
+
+        ServerError err = res.getError<span class="delimiter">(</span><span class="delimiter">)</span>;
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span> err != <span class="keyword">null</span> &amp;&amp; err.isNotMasterError<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            checkMaster<span class="delimiter">(</span> <span class="keyword">true</span> , <span class="keyword">true</span> <span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> retries &lt;= <span class="int">0</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> MongoException<span class="delimiter">(</span> <span class="string">&quot;not talking to master and retries used up&quot;</span> <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> call<span class="delimiter">(</span> db , coll , m , hostNeeded , retries -<span class="int">1</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+        m.doneWithMessage<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> res;
+    <span class="delimiter">}</span>
+
+    public ServerAddress getAddress<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        DBPortPool pool = _masterPortPool;
+        <span class="keyword">return</span> pool != <span class="keyword">null</span> ? pool.getServerAddress<span class="delimiter">(</span><span class="delimiter">)</span> : <span class="keyword">null</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Gets the list of seed server addresses
+     * @return
+     */</span>
+    public List&lt;ServerAddress&gt; getAllAddress<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> _allHosts;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Gets the list of server addresses currently seen by the connector.
+     * This includes addresses auto-discovered from a replica set.
+     * @return
+     */</span>
+    public List&lt;ServerAddress&gt; getServerAddressList<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>_rsStatus != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> _rsStatus.getServerAddressList<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+        ServerAddress master = getAddress<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>master != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="comment">// single server</span>
+            List&lt;ServerAddress&gt; list = <span class="keyword">new</span> ArrayList&lt;ServerAddress&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+            list.add<span class="delimiter">(</span>master<span class="delimiter">)</span>;
+            <span class="keyword">return</span> list;
+        <span class="delimiter">}</span>
+        <span class="keyword">return</span> <span class="keyword">null</span>;
+    <span class="delimiter">}</span>
+
+    public ReplicaSetStatus getReplicaSetStatus<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> _rsStatus;
+    <span class="delimiter">}</span>
+
+    public String getConnectPoint<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        ServerAddress master = getAddress<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> master != <span class="keyword">null</span> ? master.toString<span class="delimiter">(</span><span class="delimiter">)</span> : <span class="keyword">null</span>;
+    <span class="delimiter">}</span>
+
+    boolean _error<span class="delimiter">(</span> Throwable t, boolean slaveOk <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _rsStatus.hasServerUp<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="comment">// the replset has at least 1 server up, try to see if should switch master</span>
+            checkMaster<span class="delimiter">(</span> <span class="keyword">true</span> , !slaveOk <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">return</span> _rsStatus.hasServerUp<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">class</span> MyPort <span class="delimiter">{</span>
+
+        DBPort get<span class="delimiter">(</span> boolean keep , boolean slaveOk , ServerAddress hostNeeded <span class="delimiter">)</span><span class="delimiter">{</span>
+            
+            <span class="keyword">if</span> <span class="delimiter">(</span> hostNeeded != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="comment">// asked for a specific host</span>
+                <span class="keyword">return</span> _portHolder.get<span class="delimiter">(</span> hostNeeded <span class="delimiter">)</span>.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> _requestPort != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="comment">// we are within a request, and have a port, should stick to it</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span> _requestPort.getPool<span class="delimiter">(</span><span class="delimiter">)</span> == _masterPortPool || !keep <span class="delimiter">)</span> <span class="delimiter">{</span>
+                    <span class="comment">// if keep is false, it's a read, so we use port even if master changed</span>
+                    <span class="keyword">return</span> _requestPort;
+                <span class="delimiter">}</span>
+
+                <span class="comment">// it's write and master has changed</span>
+                <span class="comment">// we fall back on new master and try to go on with request</span>
+                <span class="comment">// this may not be best behavior if spec of request is to stick with same server</span>
+                _requestPort.getPool<span class="delimiter">(</span><span class="delimiter">)</span>.done<span class="delimiter">(</span>_requestPort<span class="delimiter">)</span>;
+                _requestPort = <span class="keyword">null</span>;
+            <span class="delimiter">}</span>
+            
+            <span class="keyword">if</span> <span class="delimiter">(</span> slaveOk &amp;&amp; _rsStatus != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="comment">// if slaveOk, try to use a secondary</span>
+                ServerAddress slave = _rsStatus.getASecondary<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span> slave != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                    <span class="keyword">return</span> _portHolder.get<span class="delimiter">(</span> slave <span class="delimiter">)</span>.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span>_masterPortPool == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="comment">// this should only happen in rare case that no master was ever found</span>
+                <span class="comment">// may get here at startup if it's a read, slaveOk=true, and ALL servers are down</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> MongoException<span class="delimiter">(</span><span class="string">&quot;Rare case where master=null, probably all servers are down&quot;</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+
+            <span class="comment">// use master</span>
+            DBPort p = _masterPortPool.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> keep &amp;&amp; _inRequest <span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="comment">// if within request, remember port to stick to same server</span>
+                _requestPort = p;
+            <span class="delimiter">}</span>
+
+            <span class="keyword">return</span> p;
+        <span class="delimiter">}</span>
+        
+        void done<span class="delimiter">(</span> DBPort p <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="comment">// keep request port</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> p != _requestPort <span class="delimiter">)</span><span class="delimiter">{</span>
+                p.getPool<span class="delimiter">(</span><span class="delimiter">)</span>.done<span class="delimiter">(</span>p<span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        <span class="comment">/**
+         * call this method when there is an IOException or other low level error on port.
+         * @param p
+         * @param e
+         */</span>
+        void error<span class="delimiter">(</span> DBPort p , Exception e <span class="delimiter">)</span><span class="delimiter">{</span>
+            p.close<span class="delimiter">(</span><span class="delimiter">)</span>;
+            _requestPort = <span class="keyword">null</span>;
+<span class="comment">//            _logger.log( Level.SEVERE , &quot;MyPort.error called&quot; , e );</span>
+
+            <span class="comment">// depending on type of error, may need to close other connections in pool</span>
+            p.getPool<span class="delimiter">(</span><span class="delimiter">)</span>.gotError<span class="delimiter">(</span>e<span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+        void requestEnsureConnection<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> ! _inRequest <span class="delimiter">)</span>
+                <span class="keyword">return</span>;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> _requestPort != <span class="keyword">null</span> <span class="delimiter">)</span>
+                <span class="keyword">return</span>;
+            
+            _requestPort = _masterPortPool.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        void requestStart<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            _inRequest = <span class="keyword">true</span>;
+        <span class="delimiter">}</span>
+
+        void requestDone<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> _requestPort != <span class="keyword">null</span> <span class="delimiter">)</span>
+                _requestPort.getPool<span class="delimiter">(</span><span class="delimiter">)</span>.done<span class="delimiter">(</span> _requestPort <span class="delimiter">)</span>;
+            _requestPort = <span class="keyword">null</span>;
+            _inRequest = <span class="keyword">false</span>;
+        <span class="delimiter">}</span>
+
+        DBPort _requestPort;
+<span class="comment">//        DBPortPool _requestPool;</span>
+        boolean _inRequest;
+    <span class="delimiter">}</span>
+    
+    void checkMaster<span class="delimiter">(</span> boolean force , boolean failIfNoMaster <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span> _rsStatus != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> _masterPortPool == <span class="keyword">null</span> || force <span class="delimiter">)</span><span class="delimiter">{</span>
+                ReplicaSetStatus.Node n = _rsStatus.ensureMaster<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span> n == <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                    <span class="keyword">if</span> <span class="delimiter">(</span> failIfNoMaster <span class="delimiter">)</span>
+                        <span class="keyword">throw</span> <span class="keyword">new</span> MongoException<span class="delimiter">(</span> <span class="string">&quot;can't find a master&quot;</span> <span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="delimiter">{</span>
+                    _set<span class="delimiter">(</span> n._addr <span class="delimiter">)</span>;
+                    maxBsonObjectSize = _rsStatus.getMaxBsonObjectSize<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+            <span class="comment">// single server, may have to obtain max bson size</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>maxBsonObjectSize == <span class="int">0</span><span class="delimiter">)</span>
+                    maxBsonObjectSize = fetchMaxBsonObjectSize<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Fetches the maximum size for a BSON object from the current master server
+     * @return the size, or 0 if it could not be obtained
+     */</span>
+    int fetchMaxBsonObjectSize<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>_masterPortPool == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="int">0</span>;
+        DBPort port = _masterPortPool.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            CommandResult res = port.runCommand<span class="delimiter">(</span>_mongo.getDB<span class="delimiter">(</span><span class="string">&quot;admin&quot;</span><span class="delimiter">)</span>, <span class="keyword">new</span> BasicDBObject<span class="delimiter">(</span><span class="string">&quot;isMaster&quot;</span>, <span class="int">1</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+            <span class="comment">// max size was added in 1.8</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>res.containsField<span class="delimiter">(</span><span class="string">&quot;maxBsonObjectSize&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                maxBsonObjectSize = <span class="delimiter">(</span><span class="delimiter">(</span>Integer<span class="delimiter">)</span> res.get<span class="delimiter">(</span><span class="string">&quot;maxBsonObjectSize&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>.intValue<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+                maxBsonObjectSize = Bytes.MAX_OBJECT_SIZE;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>Exception e<span class="delimiter">)</span> <span class="delimiter">{</span>
+            _logger.log<span class="delimiter">(</span>Level.WARNING, <span class="string">&quot;Exception determining maxBSON size using&quot;</span>+maxBsonObjectSize, e<span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            port.getPool<span class="delimiter">(</span><span class="delimiter">)</span>.done<span class="delimiter">(</span>port<span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">return</span> maxBsonObjectSize;
+    <span class="delimiter">}</span>
+
+
+    void testMaster<span class="delimiter">(</span><span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        
+        DBPort p = <span class="keyword">null</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            p = _masterPortPool.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+            p.runCommand<span class="delimiter">(</span> _mongo.getDB<span class="delimiter">(</span><span class="string">&quot;admin&quot;</span><span class="delimiter">)</span> , <span class="keyword">new</span> BasicDBObject<span class="delimiter">(</span> <span class="string">&quot;nonce&quot;</span> , <span class="int">1</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span> IOException ioe <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> MongoException.Network<span class="delimiter">(</span> ioe.getMessage<span class="delimiter">(</span><span class="delimiter">)</span> , ioe <span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            _masterPortPool.done<span class="delimiter">(</span> p <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> boolean _set<span class="delimiter">(</span> ServerAddress addr <span class="delimiter">)</span><span class="delimiter">{</span>
+        DBPortPool newPool = _portHolder.get<span class="delimiter">(</span> addr <span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>newPool == _masterPortPool<span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">false</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> _logger.isLoggable<span class="delimiter">(</span> Level.WARNING <span class="delimiter">)</span> &amp;&amp; _masterPortPool != <span class="keyword">null</span> <span class="delimiter">)</span>
+            _logger.log<span class="delimiter">(</span>Level.WARNING, <span class="string">&quot;Master switching from &quot;</span> + _masterPortPool.getServerAddress<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="string">&quot; to &quot;</span> + addr<span class="delimiter">)</span>;
+        _masterPortPool = newPool;
+        <span class="keyword">return</span> <span class="keyword">true</span>;
+    <span class="delimiter">}</span>
+
+    public String debugString<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        StringBuilder buf = <span class="keyword">new</span> StringBuilder<span class="delimiter">(</span> <span class="string">&quot;DBTCPConnector: &quot;</span> <span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> _rsStatus != <span class="keyword">null</span> <span class="delimiter">)</span> <span class="delimiter">{</span>
+            buf.append<span class="delimiter">(</span> <span class="string">&quot;replica set : &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> _allHosts <span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+            ServerAddress master = getAddress<span class="delimiter">(</span><span class="delimiter">)</span>;
+            buf.append<span class="delimiter">(</span> master <span class="delimiter">)</span>.append<span class="delimiter">(</span> <span class="string">&quot; &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> master != <span class="keyword">null</span> ? master._addr : <span class="keyword">null</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">return</span> buf.toString<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public void close<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _closed = <span class="keyword">true</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> _portHolder != <span class="keyword">null</span> <span class="delimiter">)</span> <span class="delimiter">{</span>
+            _portHolder.close<span class="delimiter">(</span><span class="delimiter">)</span>;
+            _portHolder = <span class="keyword">null</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _rsStatus != <span class="keyword">null</span> <span class="delimiter">)</span> <span class="delimiter">{</span>
+            _rsStatus.close<span class="delimiter">(</span><span class="delimiter">)</span>;
+            _rsStatus = <span class="keyword">null</span>;
+        <span class="delimiter">}</span>
+
+        <span class="comment">// below this will remove the myport for this thread only</span>
+        <span class="comment">// client using thread pool in web framework may need to call close() from all threads</span>
+        _myPort.remove<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Assigns a new DBPortPool for a given ServerAddress.
+     * This is used to obtain a new pool when the resolved IP of a host changes, for example.
+     * User application should not have to call this method directly.
+     * @param addr
+     */</span>
+    public void updatePortPool<span class="delimiter">(</span>ServerAddress addr<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// just remove from map, a new pool will be created lazily</span>
+        _portHolder._pools.remove<span class="delimiter">(</span>addr<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Gets the DBPortPool associated with a ServerAddress.
+     * @param addr
+     * @return
+     */</span>
+    public DBPortPool getDBPortPool<span class="delimiter">(</span>ServerAddress addr<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> _portHolder.get<span class="delimiter">(</span>addr<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public boolean isOpen<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> ! _closed;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Gets the maximum size for a BSON object supported by the current master server.
+     * Note that this value may change over time depending on which server is master.
+     * @return the maximum size, or 0 if not obtained from servers yet.
+     */</span>
+    public int getMaxBsonObjectSize<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> maxBsonObjectSize;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> Mongo _mongo;
+<span class="comment">//    private ServerAddress _curMaster;</span>
+    <span class="keyword">private</span> DBPortPool _masterPortPool;
+    <span class="keyword">private</span> DBPortPool.Holder _portHolder;
+    <span class="keyword">private</span> <span class="keyword">final</span> List&lt;ServerAddress&gt; _allHosts;
+    <span class="keyword">private</span> ReplicaSetStatus _rsStatus;
+    <span class="keyword">private</span> boolean _closed = <span class="keyword">false</span>;
+    <span class="keyword">private</span> int maxBsonObjectSize = <span class="int">0</span>;
+
+    <span class="keyword">private</span> ThreadLocal&lt;MyPort&gt; _myPort = <span class="keyword">new</span> ThreadLocal&lt;MyPort&gt;<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">protected</span> MyPort initialValue<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">return</span> <span class="keyword">new</span> MyPort<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>;
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,3 +1,5 @@
+// https://github.com/mongodb/mongo-java-driver/raw/r2.6.3/lib/testng-5.8-jdk15.jar
+
 scalaVersion := "2.9.0-1"
 
 resolvers ++= Seq(
@@ -31,6 +33,10 @@ scalacOptions <+= ( sourceDirectories in Compile) map (
       ,new File("src/main/scala/" + module )
       ,new SimpleFilter(_.endsWith("scala"))
     ).toSeq
-  }
+  } ++ IO.unzipURL(
+     new java.net.URL("http://repo1.maven.org/maven2/org/mongodb/mongo-java-driver/2.6.3/mongo-java-driver-2.6.3-sources.jar")
+    ,new File("src/main/java/")
+    ,new SimpleFilter(_.endsWith("java"))
+  )
 }
 

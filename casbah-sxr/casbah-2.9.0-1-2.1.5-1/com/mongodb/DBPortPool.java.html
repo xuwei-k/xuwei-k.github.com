@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>com/mongodb/DBPortPool.java</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">// DBPortPool.java</span>
+
+<span class="comment">/**
+ *      Copyright (C) 2008 10gen Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */</span>
+
+<span class="keyword">package</span> com.mongodb;
+
+<span class="keyword">import</span> java.lang.management.ManagementFactory;
+<span class="keyword">import</span> java.util.*;
+<span class="keyword">import</span> java.util.concurrent.Semaphore;
+<span class="keyword">import</span> java.util.logging.Level;
+
+<span class="keyword">import</span> javax.management.*;
+
+<span class="keyword">import</span> com.mongodb.util.SimplePool;
+
+public <span class="keyword">class</span> <a title="object com.mongodb.DBPortPool" id="7869">DBPortPool</a> <span class="keyword">extends</span> SimplePool&lt;DBPort&gt; <span class="delimiter">{</span>
+
+    static <span class="keyword">class</span> <a title="object com.mongodb.DBPortPool.Holder" id="145293">Holder</a> <span class="delimiter">{</span>
+        
+        Holder<span class="delimiter">(</span> MongoOptions options <span class="delimiter">)</span><span class="delimiter">{</span>
+            _options = options;
+            <span class="delimiter">{</span>
+                MBeanServer temp = <span class="keyword">null</span>;
+                <span class="keyword">try</span> <span class="delimiter">{</span>
+                    temp = ManagementFactory.getPlatformMBeanServer<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">catch</span> <span class="delimiter">(</span> Throwable t <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="delimiter">}</span>
+                
+                _server = temp;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        DBPortPool get<span class="delimiter">(</span> ServerAddress addr <span class="delimiter">)</span><span class="delimiter">{</span>
+            
+            DBPortPool p = _pools.get<span class="delimiter">(</span> addr <span class="delimiter">)</span>;
+            
+            <span class="keyword">if</span> <span class="delimiter">(</span>p != <span class="keyword">null</span><span class="delimiter">)</span> 
+                <span class="keyword">return</span> p;
+            
+            synchronized <span class="delimiter">(</span>_pools<span class="delimiter">)</span> <span class="delimiter">{</span>
+                p = _pools.get<span class="delimiter">(</span> addr <span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>p != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    <span class="keyword">return</span> p;
+                <span class="delimiter">}</span>
+                
+                p = <span class="keyword">new</span> DBPortPool<span class="delimiter">(</span> addr , _options <span class="delimiter">)</span>;
+                _pools.put<span class="delimiter">(</span> addr , p<span class="delimiter">)</span>;
+
+                <span class="keyword">if</span> <span class="delimiter">(</span> _server != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                    <span class="keyword">try</span> <span class="delimiter">{</span>
+                        ObjectName on = createObjectName<span class="delimiter">(</span> addr <span class="delimiter">)</span>;
+                        <span class="keyword">if</span> <span class="delimiter">(</span> _server.isRegistered<span class="delimiter">(</span> on <span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                            _server.unregisterMBean<span class="delimiter">(</span> on <span class="delimiter">)</span>;
+                            Bytes.LOGGER.log<span class="delimiter">(</span> Level.INFO , <span class="string">&quot;multiple Mongo instances for same host, jmx numbers might be off&quot;</span> <span class="delimiter">)</span>;
+                        <span class="delimiter">}</span>
+                        _server.registerMBean<span class="delimiter">(</span> p , on <span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                    <span class="keyword">catch</span> <span class="delimiter">(</span> JMException e <span class="delimiter">)</span><span class="delimiter">{</span>
+                        Bytes.LOGGER.log<span class="delimiter">(</span> Level.WARNING , <span class="string">&quot;jmx registration error: &quot;</span> + e + <span class="string">&quot; continuing...&quot;</span> <span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                    <span class="keyword">catch</span> <span class="delimiter">(</span> java.security.AccessControlException e <span class="delimiter">)</span><span class="delimiter">{</span>
+                        Bytes.LOGGER.log<span class="delimiter">(</span> Level.WARNING , <span class="string">&quot;jmx registration error: &quot;</span> + e + <span class="string">&quot; continuing...&quot;</span> <span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+
+            <span class="delimiter">}</span>
+            
+            <span class="keyword">return</span> p;
+        <span class="delimiter">}</span>
+
+        void close<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            synchronized <span class="delimiter">(</span> _pools <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">for</span> <span class="delimiter">(</span> DBPortPool p : _pools.values<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                    p.close<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+                    <span class="keyword">try</span> <span class="delimiter">{</span>
+                        ObjectName on = createObjectName<span class="delimiter">(</span> p._addr <span class="delimiter">)</span>;
+                        <span class="keyword">if</span> <span class="delimiter">(</span> _server.isRegistered<span class="delimiter">(</span> on <span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                            _server.unregisterMBean<span class="delimiter">(</span> on <span class="delimiter">)</span>;
+                        <span class="delimiter">}</span>
+                    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span> JMException e <span class="delimiter">)</span><span class="delimiter">{</span>
+                        Bytes.LOGGER.log<span class="delimiter">(</span> Level.WARNING , <span class="string">&quot;jmx de-registration error, continuing&quot;</span> , e <span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        <span class="keyword">private</span> ObjectName createObjectName<span class="delimiter">(</span> ServerAddress addr <span class="delimiter">)</span> throws MalformedObjectNameException <span class="delimiter">{</span>
+            String name =  <span class="string">&quot;com.mongodb:type=ConnectionPool,host=&quot;</span> + addr.toString<span class="delimiter">(</span><span class="delimiter">)</span>.replace<span class="delimiter">(</span> <span class="string">&quot;:&quot;</span> , <span class="string">&quot;,port=&quot;</span> <span class="delimiter">)</span> + <span class="string">&quot;,instance=&quot;</span> + hashCode<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> _options.description != <span class="keyword">null</span> <span class="delimiter">)</span>
+                name += <span class="string">&quot;,description=&quot;</span> + _options.description;
+            <span class="keyword">return</span> <span class="keyword">new</span> ObjectName<span class="delimiter">(</span> name <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">final</span> MongoOptions _options;
+        <span class="keyword">final</span> Map&lt;ServerAddress,DBPortPool&gt; _pools = Collections.synchronizedMap<span class="delimiter">(</span> <span class="keyword">new</span> HashMap&lt;ServerAddress,DBPortPool&gt;<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        <span class="keyword">final</span> MBeanServer _server;
+    <span class="delimiter">}</span>
+
+    <span class="comment">// ----</span>
+    
+    public static <span class="keyword">class</span> <a title="object com.mongodb.DBPortPool.NoMoreConnection" id="145296">NoMoreConnection</a> <span class="keyword">extends</span> MongoInternalException <span class="delimiter">{</span>
+        <span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="145305">serialVersionUID</a> = -<span class="long">4415279469780082174L</span>;
+	
+        NoMoreConnection<span class="delimiter">(</span> String msg <span class="delimiter">)</span><span class="delimiter">{</span>
+	        <span class="keyword">super</span><span class="delimiter">(</span> msg <span class="delimiter">)</span>;
+	    <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    
+    public static <span class="keyword">class</span> <a title="object com.mongodb.DBPortPool.SemaphoresOut" id="145299">SemaphoresOut</a> <span class="keyword">extends</span> NoMoreConnection <span class="delimiter">{</span>
+        <span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="145307">serialVersionUID</a> = -<span class="long">4415279469780082174L</span>;
+        SemaphoresOut<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">super</span><span class="delimiter">(</span> <span class="string">&quot;Out of semaphores to get db connection&quot;</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    public static <span class="keyword">class</span> <a title="object com.mongodb.DBPortPool.ConnectionWaitTimeOut" id="145302">ConnectionWaitTimeOut</a> <span class="keyword">extends</span> NoMoreConnection <span class="delimiter">{</span>
+        <span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="145309">serialVersionUID</a> = -<span class="long">4415279469780082174L</span>;
+        ConnectionWaitTimeOut<span class="delimiter">(</span>int timeout<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">super</span><span class="delimiter">(</span><span class="string">&quot;Connection wait timeout after &quot;</span> + timeout + <span class="string">&quot; ms&quot;</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">// ----</span>
+    
+    DBPortPool<span class="delimiter">(</span> ServerAddress addr , MongoOptions options <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">super</span><span class="delimiter">(</span> <span class="string">&quot;DBPortPool-&quot;</span> + addr.toString<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="string">&quot;, options = &quot;</span> +  options.toString<span class="delimiter">(</span><span class="delimiter">)</span> , options.connectionsPerHost , options.connectionsPerHost <span class="delimiter">)</span>;
+        _options = options;
+        _addr = addr;
+        _waitingSem = <span class="keyword">new</span> Semaphore<span class="delimiter">(</span> _options.connectionsPerHost * _options.threadsAllowedToBlockForConnectionMultiplier <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> long memSize<span class="delimiter">(</span> DBPort p <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="int">0</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> int pick<span class="delimiter">(</span> int iThink , boolean couldCreate <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">final</span> int id = System.identityHashCode<span class="delimiter">(</span>Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+        <span class="keyword">final</span> int s = _availSafe.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">for</span> <span class="delimiter">(</span> int i=<span class="int">0</span>; i&lt;s; i++ <span class="delimiter">)</span><span class="delimiter">{</span>
+            DBPort p = _availSafe.get<span class="delimiter">(</span>i<span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> p._lastThread == id <span class="delimiter">)</span>
+                <span class="keyword">return</span> i;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> couldCreate <span class="delimiter">)</span>
+            <span class="keyword">return</span> -<span class="int">1</span>;
+        <span class="keyword">return</span> iThink;
+    <span class="delimiter">}</span>
+    
+    public DBPort get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+	DBPort port = <span class="keyword">null</span>;
+	<span class="keyword">if</span> <span class="delimiter">(</span> ! _waitingSem.tryAcquire<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+	    <span class="keyword">throw</span> <span class="keyword">new</span> SemaphoresOut<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+	<span class="keyword">try</span> <span class="delimiter">{</span>
+	    port = get<span class="delimiter">(</span> _options.maxWaitTime <span class="delimiter">)</span>;
+	<span class="delimiter">}</span>
+	<span class="keyword">finally</span> <span class="delimiter">{</span>
+	    _waitingSem.release<span class="delimiter">(</span><span class="delimiter">)</span>;
+	<span class="delimiter">}</span>
+
+	<span class="keyword">if</span> <span class="delimiter">(</span> port == <span class="keyword">null</span> <span class="delimiter">)</span>
+	    <span class="keyword">throw</span> <span class="keyword">new</span> ConnectionWaitTimeOut<span class="delimiter">(</span> _options.maxWaitTime <span class="delimiter">)</span>;
+	
+        port._lastThread = System.identityHashCode<span class="delimiter">(</span>Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+	<span class="keyword">return</span> port;
+    <span class="delimiter">}</span>
+
+    void gotError<span class="delimiter">(</span> Exception e <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> e instanceof java.nio.channels.ClosedByInterruptException || 
+             e instanceof InterruptedException <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="comment">// this is probably a request that is taking too long</span>
+            <span class="comment">// so usually doesn't mean there is a real db problem</span>
+            <span class="keyword">return</span>;
+        <span class="delimiter">}</span>
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span> e instanceof java.net.SocketTimeoutException <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="comment">// we don't want to clear the port pool for a connection timing out</span>
+            <span class="keyword">return</span>;
+        <span class="delimiter">}</span>
+        Bytes.LOGGER.log<span class="delimiter">(</span> Level.WARNING , <span class="string">&quot;emptying DBPortPool to &quot;</span> + getServerAddress<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="string">&quot; b/c of error&quot;</span> , e <span class="delimiter">)</span>;
+
+        <span class="comment">// force close all sockets </span>
+
+        List&lt;DBPort&gt; all = <span class="keyword">new</span> ArrayList&lt;DBPort&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">while</span> <span class="delimiter">(</span> <span class="keyword">true</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            DBPort temp = get<span class="delimiter">(</span><span class="int">0</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> temp == <span class="keyword">null</span> <span class="delimiter">)</span>
+                break;
+            all.add<span class="delimiter">(</span> temp <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+        <span class="keyword">for</span> <span class="delimiter">(</span> DBPort p : all <span class="delimiter">)</span><span class="delimiter">{</span>
+            p.close<span class="delimiter">(</span><span class="delimiter">)</span>;
+            done<span class="delimiter">(</span>p<span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+    <span class="delimiter">}</span>
+
+    void close<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        clear<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public void cleanup<span class="delimiter">(</span> DBPort p <span class="delimiter">)</span><span class="delimiter">{</span>
+        p.close<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public boolean ok<span class="delimiter">(</span> DBPort t <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _addr.getSocketAddress<span class="delimiter">(</span><span class="delimiter">)</span>.equals<span class="delimiter">(</span> t._addr <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">protected</span> DBPort createNew<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="keyword">new</span> DBPort<span class="delimiter">(</span> _addr , <span class="keyword">this</span> , _options <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public ServerAddress getServerAddress<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> _addr;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">final</span> MongoOptions _options;
+    <span class="keyword">final</span> <span class="keyword">private</span> Semaphore _waitingSem;
+    <span class="keyword">final</span> ServerAddress _addr;
+    boolean _everWorked = <span class="keyword">false</span>;
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

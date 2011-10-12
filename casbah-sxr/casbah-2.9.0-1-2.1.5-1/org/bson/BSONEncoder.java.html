@@ -1,0 +1,478 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>org/bson/BSONEncoder.java</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">// BSONEncoder.java</span>
+
+<span class="keyword">package</span> org.bson;
+
+<span class="keyword">import</span> static org.bson.BSON.*;
+
+<span class="keyword">import</span> java.lang.reflect.Array;
+<span class="keyword">import</span> java.nio.Buffer;
+<span class="keyword">import</span> java.util.*;
+<span class="keyword">import</span> java.util.Map.Entry;
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicInteger;
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicLong;
+<span class="keyword">import</span> java.util.regex.Pattern;
+
+<span class="keyword">import</span> org.bson.io.BasicOutputBuffer;
+<span class="keyword">import</span> org.bson.io.OutputBuffer;
+<span class="keyword">import</span> org.bson.types.*;
+
+<span class="keyword">import</span> com.mongodb.DBRefBase;
+
+<span class="comment">/**
+ * this is meant to be pooled or cached
+ * there is some per instance memory for string conversion, etc...
+ */</span>
+@SuppressWarnings<span class="delimiter">(</span><span class="string">&quot;unchecked&quot;</span><span class="delimiter">)</span>
+public <span class="keyword">class</span> <a title="object org.bson.BSONEncoder" id="8459">BSONEncoder</a> <span class="delimiter">{</span>
+    
+    static <span class="keyword">final</span> boolean <a title="Boolean" id="147677">DEBUG</a> = <span class="keyword">false</span>;
+
+    public BSONEncoder<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+
+    <span class="delimiter">}</span>
+
+    public byte<span class="delimiter">[</span><span class="delimiter">]</span> encode<span class="delimiter">(</span> BSONObject o <span class="delimiter">)</span><span class="delimiter">{</span>
+        BasicOutputBuffer buf = <span class="keyword">new</span> BasicOutputBuffer<span class="delimiter">(</span><span class="delimiter">)</span>;
+        set<span class="delimiter">(</span> buf <span class="delimiter">)</span>;
+        putObject<span class="delimiter">(</span> o <span class="delimiter">)</span>;
+        done<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> buf.toByteArray<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public void set<span class="delimiter">(</span> OutputBuffer out <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _buf != <span class="keyword">null</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalStateException<span class="delimiter">(</span> <span class="string">&quot;in the middle of something&quot;</span> <span class="delimiter">)</span>;
+        
+        _buf = out;
+    <span class="delimiter">}</span>
+ 
+    public void done<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _buf = <span class="keyword">null</span>;
+    <span class="delimiter">}</span>
+   
+    <span class="comment">/**
+     * @return true if object was handled
+     */</span>
+    <span class="keyword">protected</span> boolean handleSpecialObjects<span class="delimiter">(</span> String name , BSONObject o <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="keyword">false</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">protected</span> boolean putSpecial<span class="delimiter">(</span> String name , Object o <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="keyword">false</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Encodes a &lt;code&gt;BSONObject&lt;/code&gt;.
+     * This is for the higher level api calls
+     * @param o the object to encode
+     * @return the number of characters in the encoding
+     */</span>
+    public int putObject<span class="delimiter">(</span> BSONObject o <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> putObject<span class="delimiter">(</span> <span class="keyword">null</span> , o <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * this is really for embedded objects
+     */</span>
+    int putObject<span class="delimiter">(</span> String name , BSONObject o <span class="delimiter">)</span><span class="delimiter">{</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> o == <span class="keyword">null</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span> <span class="string">&quot;can't save a null object&quot;</span> <span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> DEBUG <span class="delimiter">)</span> System.out.println<span class="delimiter">(</span> <span class="string">&quot;putObject : &quot;</span> + name + <span class="string">&quot; [&quot;</span> + o.getClass<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="string">&quot;]&quot;</span> + <span class="string">&quot; # keys &quot;</span> + o.keySet<span class="delimiter">(</span><span class="delimiter">)</span>.size<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        
+        <span class="keyword">final</span> int start = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        
+        byte myType = OBJECT;
+        <span class="keyword">if</span> <span class="delimiter">(</span> o instanceof List <span class="delimiter">)</span>
+            myType = ARRAY;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> handleSpecialObjects<span class="delimiter">(</span> name , o <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span> - start;
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span> name != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            _put<span class="delimiter">(</span> myType , name <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">final</span> int sizePos = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; <span class="comment">// leaving space for this.  set it at the end</span>
+
+        List transientFields = <span class="keyword">null</span>;
+        boolean rewriteID = myType == OBJECT &amp;&amp; name == <span class="keyword">null</span>;
+        
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> myType == OBJECT <span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> rewriteID &amp;&amp; o.containsField<span class="delimiter">(</span> <span class="string">&quot;_id&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+                _putObjectField<span class="delimiter">(</span> <span class="string">&quot;_id&quot;</span> , o.get<span class="delimiter">(</span> <span class="string">&quot;_id&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+            
+            <span class="delimiter">{</span>
+                Object temp = o.get<span class="delimiter">(</span> <span class="string">&quot;_transientFields&quot;</span> <span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span> temp instanceof List <span class="delimiter">)</span>
+                    transientFields = <span class="delimiter">(</span>List<span class="delimiter">)</span>temp;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        
+        <span class="comment">//TODO: reduce repeated code below.</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> o instanceof Map <span class="delimiter">)</span><span class="delimiter">{</span>
+	        <span class="keyword">for</span> <span class="delimiter">(</span> Entry&lt;String, Object&gt; e : <span class="delimiter">(</span><span class="delimiter">(</span>Map&lt;String, Object&gt;<span class="delimiter">)</span>o<span class="delimiter">)</span>.entrySet<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+	        	
+	            <span class="keyword">if</span> <span class="delimiter">(</span> rewriteID &amp;&amp; e.getKey<span class="delimiter">(</span><span class="delimiter">)</span>.equals<span class="delimiter">(</span> <span class="string">&quot;_id&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+	                continue;
+	            
+	            <span class="keyword">if</span> <span class="delimiter">(</span> transientFields != <span class="keyword">null</span> &amp;&amp; transientFields.contains<span class="delimiter">(</span> e.getKey<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+	                continue;
+	            
+	            _putObjectField<span class="delimiter">(</span> e.getKey<span class="delimiter">(</span><span class="delimiter">)</span> , e.getValue<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+	
+	        <span class="delimiter">}</span>        	
+        <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+	        <span class="keyword">for</span> <span class="delimiter">(</span> String s : o.keySet<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+	
+	            <span class="keyword">if</span> <span class="delimiter">(</span> rewriteID &amp;&amp; s.equals<span class="delimiter">(</span> <span class="string">&quot;_id&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+	                continue;
+	            
+	            <span class="keyword">if</span> <span class="delimiter">(</span> transientFields != <span class="keyword">null</span> &amp;&amp; transientFields.contains<span class="delimiter">(</span> s <span class="delimiter">)</span> <span class="delimiter">)</span>
+	                continue;
+	            
+	            Object <span class="keyword">val</span> = o.get<span class="delimiter">(</span> s <span class="delimiter">)</span>;
+	
+	            _putObjectField<span class="delimiter">(</span> s , <span class="keyword">val</span> <span class="delimiter">)</span>;
+	
+	        <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        _buf.write<span class="delimiter">(</span> EOO <span class="delimiter">)</span>;
+        
+        _buf.writeInt<span class="delimiter">(</span> sizePos , _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span> - sizePos <span class="delimiter">)</span>;
+        <span class="keyword">return</span> _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span> - start;
+    <span class="delimiter">}</span>
+
+	<span class="keyword">protected</span> void _putObjectField<span class="delimiter">(</span> String name , Object <span class="keyword">val</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> name.equals<span class="delimiter">(</span> <span class="string">&quot;_transientFields&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span>;
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span> DEBUG <span class="delimiter">)</span> System.out.println<span class="delimiter">(</span> <span class="string">&quot;\t put thing : &quot;</span> + name <span class="delimiter">)</span>;
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span> name.equals<span class="delimiter">(</span> <span class="string">&quot;$where&quot;</span><span class="delimiter">)</span> &amp;&amp; <span class="keyword">val</span> instanceof String <span class="delimiter">)</span><span class="delimiter">{</span>
+            _put<span class="delimiter">(</span> CODE , name <span class="delimiter">)</span>;
+            _putValueString<span class="delimiter">(</span> <span class="keyword">val</span>.toString<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+            <span class="keyword">return</span>;
+        <span class="delimiter">}</span>
+        
+        <span class="keyword">val</span> = BSON.applyEncodingHooks<span class="delimiter">(</span> <span class="keyword">val</span> <span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> == <span class="keyword">null</span> <span class="delimiter">)</span>
+            putNull<span class="delimiter">(</span>name<span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof Date <span class="delimiter">)</span>
+            putDate<span class="delimiter">(</span> name , <span class="delimiter">(</span>Date<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof Number <span class="delimiter">)</span>
+            putNumber<span class="delimiter">(</span>name, <span class="delimiter">(</span>Number<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof String <span class="delimiter">)</span>
+            putString<span class="delimiter">(</span>name, <span class="keyword">val</span>.toString<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof ObjectId <span class="delimiter">)</span>
+            putObjectId<span class="delimiter">(</span>name, <span class="delimiter">(</span>ObjectId<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof BSONObject <span class="delimiter">)</span>
+            putObject<span class="delimiter">(</span>name, <span class="delimiter">(</span>BSONObject<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof Boolean <span class="delimiter">)</span>
+            putBoolean<span class="delimiter">(</span>name, <span class="delimiter">(</span>Boolean<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof Pattern <span class="delimiter">)</span>
+            putPattern<span class="delimiter">(</span>name, <span class="delimiter">(</span>Pattern<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof Map <span class="delimiter">)</span>
+            putMap<span class="delimiter">(</span> name , <span class="delimiter">(</span>Map<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof Iterable<span class="delimiter">)</span>
+            putIterable<span class="delimiter">(</span> name , <span class="delimiter">(</span>Iterable<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof byte<span class="delimiter">[</span><span class="delimiter">]</span> <span class="delimiter">)</span>
+            putBinary<span class="delimiter">(</span> name , <span class="delimiter">(</span>byte<span class="delimiter">[</span><span class="delimiter">]</span><span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof Binary <span class="delimiter">)</span>
+            putBinary<span class="delimiter">(</span> name , <span class="delimiter">(</span>Binary<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span> instanceof UUID <span class="delimiter">)</span>
+            putUUID<span class="delimiter">(</span> name , <span class="delimiter">(</span>UUID<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> <span class="keyword">val</span>.getClass<span class="delimiter">(</span><span class="delimiter">)</span>.isArray<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+        	putArray<span class="delimiter">(</span> name , <span class="keyword">val</span> <span class="delimiter">)</span>;
+
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span><span class="keyword">val</span> instanceof Symbol<span class="delimiter">)</span> <span class="delimiter">{</span>
+            putSymbol<span class="delimiter">(</span>name, <span class="delimiter">(</span>Symbol<span class="delimiter">)</span> <span class="keyword">val</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span><span class="keyword">val</span> instanceof BSONTimestamp<span class="delimiter">)</span> <span class="delimiter">{</span>
+            putTimestamp<span class="delimiter">(</span> name , <span class="delimiter">(</span>BSONTimestamp<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span><span class="keyword">val</span> instanceof CodeWScope<span class="delimiter">)</span> <span class="delimiter">{</span>
+            putCodeWScope<span class="delimiter">(</span> name , <span class="delimiter">(</span>CodeWScope<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span><span class="keyword">val</span> instanceof Code<span class="delimiter">)</span> <span class="delimiter">{</span>
+            putCode<span class="delimiter">(</span> name , <span class="delimiter">(</span>Code<span class="delimiter">)</span><span class="keyword">val</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span><span class="keyword">val</span> instanceof DBRefBase<span class="delimiter">)</span> <span class="delimiter">{</span>
+            BSONObject temp = <span class="keyword">new</span> BasicBSONObject<span class="delimiter">(</span><span class="delimiter">)</span>;
+            temp.put<span class="delimiter">(</span><span class="string">&quot;$ref&quot;</span>, <span class="delimiter">(</span><span class="delimiter">(</span>DBRefBase<span class="delimiter">)</span><span class="keyword">val</span><span class="delimiter">)</span>.getRef<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+            temp.put<span class="delimiter">(</span><span class="string">&quot;$id&quot;</span>, <span class="delimiter">(</span><span class="delimiter">(</span>DBRefBase<span class="delimiter">)</span><span class="keyword">val</span><span class="delimiter">)</span>.getId<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+            putObject<span class="delimiter">(</span> name, temp <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> putSpecial<span class="delimiter">(</span> name , <span class="keyword">val</span> <span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="comment">// no-op</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span> <span class="string">&quot;can't serialize &quot;</span> + <span class="keyword">val</span>.getClass<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+    <span class="delimiter">}</span>
+	
+    <span class="keyword">private</span> void putArray<span class="delimiter">(</span> String name , Object array <span class="delimiter">)</span> <span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> ARRAY , name <span class="delimiter">)</span>;
+        <span class="keyword">final</span> int sizePos = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>;
+                	        
+        int size = Array.getLength<span class="delimiter">(</span>array<span class="delimiter">)</span>;
+        <span class="keyword">for</span> <span class="delimiter">(</span> int i = <span class="int">0</span>; i &lt; size; i++ <span class="delimiter">)</span>
+            _putObjectField<span class="delimiter">(</span> String.valueOf<span class="delimiter">(</span> i <span class="delimiter">)</span> , Array.get<span class="delimiter">(</span> array, i <span class="delimiter">)</span> <span class="delimiter">)</span>;
+
+        _buf.write<span class="delimiter">(</span> EOO <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> sizePos , _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span> - sizePos <span class="delimiter">)</span>; 
+    <span class="delimiter">}</span>
+	
+    <span class="keyword">private</span> void putIterable<span class="delimiter">(</span> String name , Iterable l <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> ARRAY , name <span class="delimiter">)</span>;
+        <span class="keyword">final</span> int sizePos = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>;
+        
+        int i=<span class="int">0</span>;
+        <span class="keyword">for</span> <span class="delimiter">(</span> Object obj: l <span class="delimiter">)</span> <span class="delimiter">{</span>
+            _putObjectField<span class="delimiter">(</span> String.valueOf<span class="delimiter">(</span> i <span class="delimiter">)</span> , obj <span class="delimiter">)</span>;
+            i++;
+        <span class="delimiter">}</span>
+        	
+
+        _buf.write<span class="delimiter">(</span> EOO <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> sizePos , _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span> - sizePos <span class="delimiter">)</span>;        
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">private</span> void putMap<span class="delimiter">(</span> String name , Map m <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> OBJECT , name <span class="delimiter">)</span>;
+        <span class="keyword">final</span> int sizePos = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>;
+        
+        <span class="keyword">for</span> <span class="delimiter">(</span> Map.Entry entry : <span class="delimiter">(</span>Set&lt;Map.Entry&gt;<span class="delimiter">)</span>m.entrySet<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+            _putObjectField<span class="delimiter">(</span> entry.getKey<span class="delimiter">(</span><span class="delimiter">)</span>.toString<span class="delimiter">(</span><span class="delimiter">)</span> , entry.getValue<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+
+        _buf.write<span class="delimiter">(</span> EOO <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> sizePos , _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span> - sizePos <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+
+    <span class="keyword">protected</span> void putNull<span class="delimiter">(</span> String name <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> NULL , name <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putUndefined<span class="delimiter">(</span>String name<span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span>UNDEFINED, name<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putTimestamp<span class="delimiter">(</span>String name, BSONTimestamp ts <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> TIMESTAMP , name <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> ts.getInc<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> ts.getTime<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">protected</span> void putCodeWScope<span class="delimiter">(</span> String name , CodeWScope code <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> CODE_W_SCOPE , name <span class="delimiter">)</span>;
+        int temp = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>;
+        _putValueString<span class="delimiter">(</span> code.getCode<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        putObject<span class="delimiter">(</span> code.getScope<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> temp , _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span> - temp <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putCode<span class="delimiter">(</span> String name , Code code <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> CODE , name <span class="delimiter">)</span>;
+        int temp = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _putValueString<span class="delimiter">(</span> code.getCode<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putBoolean<span class="delimiter">(</span> String name , Boolean b <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> BOOLEAN , name <span class="delimiter">)</span>;
+        _buf.write<span class="delimiter">(</span> b ? <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="int">0x1</span> : <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="int">0x0</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putDate<span class="delimiter">(</span> String name , Date d <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> DATE , name <span class="delimiter">)</span>;
+        _buf.writeLong<span class="delimiter">(</span> d.getTime<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putNumber<span class="delimiter">(</span> String name , Number n <span class="delimiter">)</span><span class="delimiter">{</span>
+		<span class="keyword">if</span> <span class="delimiter">(</span> n instanceof Integer ||
+	             n instanceof Short ||
+	             n instanceof Byte ||
+	             n instanceof AtomicInteger <span class="delimiter">)</span><span class="delimiter">{</span>
+		    _put<span class="delimiter">(</span> NUMBER_INT , name <span class="delimiter">)</span>;
+		    _buf.writeInt<span class="delimiter">(</span> n.intValue<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+		<span class="delimiter">}</span>
+	    <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> n instanceof Long || n instanceof AtomicLong <span class="delimiter">)</span> <span class="delimiter">{</span>
+	        _put<span class="delimiter">(</span> NUMBER_LONG , name <span class="delimiter">)</span>;
+	        _buf.writeLong<span class="delimiter">(</span> n.longValue<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+	    <span class="delimiter">}</span>
+	    <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> n instanceof Float || n instanceof Double <span class="delimiter">)</span> <span class="delimiter">{</span>
+	      _put<span class="delimiter">(</span> NUMBER , name <span class="delimiter">)</span>;
+	      _buf.writeDouble<span class="delimiter">(</span> n.doubleValue<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+	    <span class="delimiter">}</span>
+		<span class="keyword">else</span> <span class="delimiter">{</span>
+	        <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span> <span class="string">&quot;can't serialize &quot;</span> + n.getClass<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+		<span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">protected</span> void putBinary<span class="delimiter">(</span> String name , byte<span class="delimiter">[</span><span class="delimiter">]</span> data <span class="delimiter">)</span><span class="delimiter">{</span>
+        putBinary<span class="delimiter">(</span> name, B_GENERAL, data <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">protected</span> void putBinary<span class="delimiter">(</span> String name , Binary <span class="keyword">val</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+        putBinary<span class="delimiter">(</span> name, <span class="keyword">val</span>.getType<span class="delimiter">(</span><span class="delimiter">)</span>, <span class="keyword">val</span>.getData<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;        
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">private</span> void putBinary<span class="delimiter">(</span> String name , int <span class="keyword">type</span> , byte<span class="delimiter">[</span><span class="delimiter">]</span> data <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> BINARY , name <span class="delimiter">)</span>;
+        int totalLen = data.length;
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span><span class="keyword">type</span> == B_BINARY<span class="delimiter">)</span>
+            totalLen += <span class="int">4</span>;
+        
+        _buf.writeInt<span class="delimiter">(</span> totalLen <span class="delimiter">)</span>;
+        _buf.write<span class="delimiter">(</span> <span class="keyword">type</span> <span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span><span class="keyword">type</span> == B_BINARY<span class="delimiter">)</span>
+            _buf.writeInt<span class="delimiter">(</span> totalLen -<span class="int">4</span> <span class="delimiter">)</span>;
+        int before = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _buf.write<span class="delimiter">(</span> data <span class="delimiter">)</span>;
+        int after = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        com.mongodb.util.MyAsserts.assertEquals<span class="delimiter">(</span> after - before , data.length <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">protected</span> void putUUID<span class="delimiter">(</span> String name , UUID <span class="keyword">val</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> BINARY , name <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> <span class="int">16</span> <span class="delimiter">)</span>;
+        _buf.write<span class="delimiter">(</span> B_UUID <span class="delimiter">)</span>;
+        _buf.writeLong<span class="delimiter">(</span> <span class="keyword">val</span>.getMostSignificantBits<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+        _buf.writeLong<span class="delimiter">(</span> <span class="keyword">val</span>.getLeastSignificantBits<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putSymbol<span class="delimiter">(</span> String name , Symbol s <span class="delimiter">)</span><span class="delimiter">{</span>
+        _putString<span class="delimiter">(</span>name, s.getSymbol<span class="delimiter">(</span><span class="delimiter">)</span>, SYMBOL<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putString<span class="delimiter">(</span>String name, String s<span class="delimiter">)</span> <span class="delimiter">{</span>
+        _putString<span class="delimiter">(</span>name, s, STRING<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> void _putString<span class="delimiter">(</span> String name , String s, byte <span class="keyword">type</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> <span class="keyword">type</span> , name <span class="delimiter">)</span>;
+        _putValueString<span class="delimiter">(</span> s <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void putObjectId<span class="delimiter">(</span> String name , ObjectId oid <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> OID , name <span class="delimiter">)</span>;
+        <span class="comment">// according to spec, values should be stored big endian</span>
+        _buf.writeIntBE<span class="delimiter">(</span> oid._time<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        _buf.writeIntBE<span class="delimiter">(</span> oid._machine<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        _buf.writeIntBE<span class="delimiter">(</span> oid._inc<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">private</span> void putPattern<span class="delimiter">(</span> String name, Pattern p <span class="delimiter">)</span> <span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> REGEX , name <span class="delimiter">)</span>;
+        _put<span class="delimiter">(</span> p.pattern<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+        _put<span class="delimiter">(</span> regexFlags<span class="delimiter">(</span> p.flags<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+
+    <span class="comment">// ----------------------------------------------</span>
+    
+    <span class="comment">/**
+     * Encodes the type and key.
+     * 
+     */</span>
+    <span class="keyword">protected</span> void _put<span class="delimiter">(</span> byte <span class="keyword">type</span> , String name <span class="delimiter">)</span><span class="delimiter">{</span>
+        _buf.write<span class="delimiter">(</span> <span class="keyword">type</span> <span class="delimiter">)</span>;
+        _put<span class="delimiter">(</span> name <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> void _putValueString<span class="delimiter">(</span> String s <span class="delimiter">)</span><span class="delimiter">{</span>
+        int lenPos = _buf.getPosition<span class="delimiter">(</span><span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; <span class="comment">// making space for size</span>
+        int strLen = _put<span class="delimiter">(</span> s <span class="delimiter">)</span>;
+        _buf.writeInt<span class="delimiter">(</span> lenPos , strLen <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    void _reset<span class="delimiter">(</span> Buffer b <span class="delimiter">)</span><span class="delimiter">{</span>
+        b.position<span class="delimiter">(</span><span class="int">0</span><span class="delimiter">)</span>;
+        b.limit<span class="delimiter">(</span> b.capacity<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * puts as utf-8 string
+     */</span>
+    <span class="keyword">protected</span> int _put<span class="delimiter">(</span> String str <span class="delimiter">)</span><span class="delimiter">{</span>
+
+        <span class="keyword">final</span> int len = str.length<span class="delimiter">(</span><span class="delimiter">)</span>;
+        int total = <span class="int">0</span>;
+
+        <span class="keyword">for</span> <span class="delimiter">(</span> int i=<span class="int">0</span>; i&lt;len; <span class="delimiter">)</span><span class="delimiter">{</span>
+            int c = Character.codePointAt<span class="delimiter">(</span> str , i <span class="delimiter">)</span>;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> c &lt; <span class="int">0x80</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span>c <span class="delimiter">)</span>;
+                total += <span class="int">1</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> c &lt; <span class="int">0x800</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0xc0</span> + <span class="delimiter">(</span>c &gt;&gt; <span class="int">6</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0x80</span> + <span class="delimiter">(</span>c &amp; <span class="int">0x3f</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+                total += <span class="int">2</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>c &lt; <span class="int">0x10000</span><span class="delimiter">)</span><span class="delimiter">{</span>
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0xe0</span> + <span class="delimiter">(</span>c &gt;&gt; <span class="int">12</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0x80</span> + <span class="delimiter">(</span><span class="delimiter">(</span>c &gt;&gt; <span class="int">6</span><span class="delimiter">)</span> &amp; <span class="int">0x3f</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0x80</span> + <span class="delimiter">(</span>c &amp; <span class="int">0x3f</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+                total += <span class="int">3</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">else</span> <span class="delimiter">{</span>
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0xf0</span> + <span class="delimiter">(</span>c &gt;&gt; <span class="int">18</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0x80</span> + <span class="delimiter">(</span><span class="delimiter">(</span>c &gt;&gt; <span class="int">12</span><span class="delimiter">)</span> &amp; <span class="int">0x3f</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0x80</span> + <span class="delimiter">(</span><span class="delimiter">(</span>c &gt;&gt; <span class="int">6</span><span class="delimiter">)</span> &amp; <span class="int">0x3f</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+                _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="delimiter">(</span><span class="int">0x80</span> + <span class="delimiter">(</span>c &amp; <span class="int">0x3f</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+                total += <span class="int">4</span>;
+            <span class="delimiter">}</span>
+            
+            i += Character.charCount<span class="delimiter">(</span>c<span class="delimiter">)</span>;
+        <span class="delimiter">}</span>  
+        
+        _buf.write<span class="delimiter">(</span> <span class="delimiter">(</span>byte<span class="delimiter">)</span><span class="int">0</span> <span class="delimiter">)</span>;
+        total++;
+        <span class="keyword">return</span> total;
+    <span class="delimiter">}</span>
+
+    public void writeInt<span class="delimiter">(</span> int x <span class="delimiter">)</span><span class="delimiter">{</span>
+        _buf.writeInt<span class="delimiter">(</span> x <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public void writeLong<span class="delimiter">(</span> long x <span class="delimiter">)</span><span class="delimiter">{</span>
+        _buf.writeLong<span class="delimiter">(</span> x <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public void writeCString<span class="delimiter">(</span> String s <span class="delimiter">)</span><span class="delimiter">{</span>
+        _put<span class="delimiter">(</span> s <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> OutputBuffer _buf;
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

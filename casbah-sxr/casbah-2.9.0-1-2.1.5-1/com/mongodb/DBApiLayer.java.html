@@ -1,0 +1,551 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>com/mongodb/DBApiLayer.java</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">// DBApiLayer.java</span>
+
+<span class="comment">/**
+ *      Copyright (C) 2008 10gen Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */</span>
+
+<span class="keyword">package</span> com.mongodb;
+
+<span class="keyword">import</span> java.util.*;
+<span class="keyword">import</span> java.util.concurrent.ConcurrentLinkedQueue;
+<span class="keyword">import</span> java.util.logging.Level;
+<span class="keyword">import</span> java.util.logging.Logger;
+
+<span class="keyword">import</span> org.bson.BSONObject;
+<span class="keyword">import</span> org.bson.types.ObjectId;
+
+<span class="keyword">import</span> com.mongodb.util.JSON;
+
+<span class="comment">/** Database API
+ * This cannot be directly instantiated, but the functions are available
+ * through instances of Mongo.
+ */</span>
+public <span class="keyword">class</span> <a title="object com.mongodb.DBApiLayer" id="7968">DBApiLayer</a> <span class="keyword">extends</span> DB <span class="delimiter">{</span>
+
+    static <span class="keyword">final</span> boolean <a title="Boolean" id="145159">D</a> = Boolean.getBoolean<span class="delimiter">(</span> <span class="string">&quot;DEBUG.DB&quot;</span> <span class="delimiter">)</span>;
+    <span class="comment">/** The maximum number of cursors allowed */</span>
+    static <span class="keyword">final</span> int <a title="Int" id="145160">NUM_CURSORS_BEFORE_KILL</a> = <span class="int">100</span>;
+    static <span class="keyword">final</span> int <a title="Int" id="145161">NUM_CURSORS_PER_BATCH</a> = <span class="int">20000</span>;
+    
+    <span class="comment">//  --- show</span>
+
+    static <span class="keyword">final</span> Logger <a title="java.util.logging.Logger" id="145162">TRACE_LOGGER</a> = Logger.getLogger<span class="delimiter">(</span> <span class="string">&quot;com.mongodb.TRACE&quot;</span> <span class="delimiter">)</span>;
+    static <span class="keyword">final</span> Level <a title="java.util.logging.Level" id="145163">TRACE_LEVEL</a> = Boolean.getBoolean<span class="delimiter">(</span> <span class="string">&quot;DB.TRACE&quot;</span> <span class="delimiter">)</span> ? Level.INFO : Level.FINEST;
+
+    static <span class="keyword">final</span> boolean <a title="()Boolean" id="145164">willTrace</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> TRACE_LOGGER.isLoggable<span class="delimiter">(</span> TRACE_LEVEL <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    static <span class="keyword">final</span> void <a title="(s: java.lang.String)Unit" id="145165">trace</a><span class="delimiter">(</span> String <a title="java.lang.String" id="145199">s</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        TRACE_LOGGER.log<span class="delimiter">(</span> TRACE_LEVEL , s <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    static int <a title="(batchSize: Int, limit: Int, fetched: Int)Int" id="145166">chooseBatchSize</a><span class="delimiter">(</span>int <a title="Int" id="145201">batchSize</a>, int <a title="Int" id="145202">limit</a>, int <a title="Int" id="145203">fetched</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        int bs = Math.abs<span class="delimiter">(</span>batchSize<span class="delimiter">)</span>;
+        int remaining = limit &gt; <span class="int">0</span> ? limit - fetched : <span class="int">0</span>;
+        int res = <span class="int">0</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>bs == <span class="int">0</span> &amp;&amp; remaining &gt; <span class="int">0</span><span class="delimiter">)</span>
+            res = remaining;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>bs &gt; <span class="int">0</span> &amp;&amp; remaining == <span class="int">0</span><span class="delimiter">)</span>
+            res = bs;
+        <span class="keyword">else</span>
+            res = Math.min<span class="delimiter">(</span>bs, remaining<span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span>batchSize &lt; <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="comment">// force close</span>
+            res = -res;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span>res == <span class="int">1</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="comment">// optimization: use negative batchsize to close cursor</span>
+            res = -<span class="int">1</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">return</span> res;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * @param mongo the Mongo instance
+     * @param name the database name
+     * @param connector the connector
+     */</span>
+    <span class="keyword">protected</span> DBApiLayer<span class="delimiter">(</span> Mongo mongo, String name , DBConnector connector <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">super</span><span class="delimiter">(</span> mongo, name <span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> connector == <span class="keyword">null</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span> <span class="string">&quot;need a connector: &quot;</span> + name <span class="delimiter">)</span>;
+        
+        _root = name;
+        _rootPlusDot = _root + <span class="string">&quot;.&quot;</span>;
+
+        _connector = connector;
+    <span class="delimiter">}</span>
+
+    public void requestStart<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _connector.requestStart<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public void requestDone<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _connector.requestDone<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public void requestEnsureConnection<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        _connector.requestEnsureConnection<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> MyCollection doGetCollection<span class="delimiter">(</span> String name <span class="delimiter">)</span><span class="delimiter">{</span>
+        MyCollection c = _collections.get<span class="delimiter">(</span> name <span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> c != <span class="keyword">null</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> c;
+
+        synchronized <span class="delimiter">(</span> _collections <span class="delimiter">)</span><span class="delimiter">{</span>
+            c = _collections.get<span class="delimiter">(</span> name <span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> c != <span class="keyword">null</span> <span class="delimiter">)</span>
+                <span class="keyword">return</span> c;
+
+            c = <span class="keyword">new</span> MyCollection<span class="delimiter">(</span> name <span class="delimiter">)</span>;
+            _collections.put<span class="delimiter">(</span> name , c <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">return</span> c;
+    <span class="delimiter">}</span>
+
+    String _removeRoot<span class="delimiter">(</span> String ns <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> ! ns.startsWith<span class="delimiter">(</span> _rootPlusDot <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> ns;
+        <span class="keyword">return</span> ns.substring<span class="delimiter">(</span> _root.length<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="int">1</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public void cleanCursors<span class="delimiter">(</span> boolean force <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+
+        int sz = _deadCursorIds.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+        <span class="keyword">if</span> <span class="delimiter">(</span> sz == <span class="int">0</span> || <span class="delimiter">(</span> ! force &amp;&amp; sz &lt; NUM_CURSORS_BEFORE_KILL<span class="delimiter">)</span><span class="delimiter">)</span>
+            <span class="keyword">return</span>;
+
+        Bytes.LOGGER.info<span class="delimiter">(</span> <span class="string">&quot;going to kill cursors : &quot;</span> + sz <span class="delimiter">)</span>;
+
+        Map&lt;ServerAddress,List&lt;Long&gt;&gt; m = <span class="keyword">new</span> HashMap&lt;ServerAddress,List&lt;Long&gt;&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+        DeadCursor c;
+        <span class="keyword">while</span> <span class="delimiter">(</span><span class="delimiter">(</span> c = _deadCursorIds.poll<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            List&lt;Long&gt; x = m.get<span class="delimiter">(</span> c.host <span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> x == <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                x = <span class="keyword">new</span> LinkedList&lt;Long&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+                m.put<span class="delimiter">(</span> c.host , x <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            x.add<span class="delimiter">(</span> c.id <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+            
+        <span class="keyword">for</span> <span class="delimiter">(</span> Map.Entry&lt;ServerAddress,List&lt;Long&gt;&gt; e : m.entrySet<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">try</span> <span class="delimiter">{</span>
+                killCursors<span class="delimiter">(</span> e.getKey<span class="delimiter">(</span><span class="delimiter">)</span> , e.getValue<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">catch</span> <span class="delimiter">(</span> Throwable t <span class="delimiter">)</span><span class="delimiter">{</span>
+                Bytes.LOGGER.log<span class="delimiter">(</span> Level.WARNING , <span class="string">&quot;can't clean cursors&quot;</span> , t <span class="delimiter">)</span>;
+                <span class="keyword">for</span> <span class="delimiter">(</span> Long x : e.getValue<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+                        _deadCursorIds.add<span class="delimiter">(</span> <span class="keyword">new</span> DeadCursor<span class="delimiter">(</span> x , e.getKey<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    void killCursors<span class="delimiter">(</span> ServerAddress addr , List&lt;Long&gt; all <span class="delimiter">)</span>
+        throws MongoException <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> all == <span class="keyword">null</span> || all.size<span class="delimiter">(</span><span class="delimiter">)</span> == <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span>;
+
+        OutMessage om = <span class="keyword">new</span> OutMessage<span class="delimiter">(</span> _mongo , <span class="int">2007</span> <span class="delimiter">)</span>;
+        om.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; <span class="comment">// reserved</span>
+            
+        om.writeInt<span class="delimiter">(</span> Math.min<span class="delimiter">(</span> NUM_CURSORS_PER_BATCH , all.size<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+
+        int soFar = <span class="int">0</span>;
+        int totalSoFar = <span class="int">0</span>;
+        <span class="keyword">for</span> <span class="delimiter">(</span>Long l : all<span class="delimiter">)</span> <span class="delimiter">{</span>
+            om.writeLong<span class="delimiter">(</span>l<span class="delimiter">)</span>;
+
+            totalSoFar++;
+            soFar++;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> soFar &gt;= NUM_CURSORS_PER_BATCH <span class="delimiter">)</span><span class="delimiter">{</span>
+                _connector.say<span class="delimiter">(</span> <span class="keyword">this</span> , om ,com.mongodb.WriteConcern.NONE <span class="delimiter">)</span>;
+                om = <span class="keyword">new</span> OutMessage<span class="delimiter">(</span> _mongo , <span class="int">2007</span> <span class="delimiter">)</span>;
+                om.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; <span class="comment">// reserved</span>
+                om.writeInt<span class="delimiter">(</span> Math.min<span class="delimiter">(</span> NUM_CURSORS_PER_BATCH , all.size<span class="delimiter">(</span><span class="delimiter">)</span> - totalSoFar <span class="delimiter">)</span> <span class="delimiter">)</span>;
+                soFar = <span class="int">0</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        _connector.say<span class="delimiter">(</span> <span class="keyword">this</span> , om ,com.mongodb.WriteConcern.NONE , addr <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">class</span> MyCollection <span class="keyword">extends</span> DBCollection <span class="delimiter">{</span>
+        MyCollection<span class="delimiter">(</span> String name <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">super</span><span class="delimiter">(</span> DBApiLayer.<span class="keyword">this</span> , name <span class="delimiter">)</span>;
+            _fullNameSpace = _root + <span class="string">&quot;.&quot;</span> + name;
+        <span class="delimiter">}</span>
+
+        public void doapply<span class="delimiter">(</span> DBObject o <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="delimiter">}</span>
+
+        @Override
+        public void drop<span class="delimiter">(</span><span class="delimiter">)</span> throws MongoException <span class="delimiter">{</span>
+            _collections.remove<span class="delimiter">(</span>getName<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+            <span class="keyword">super</span>.drop<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public WriteResult insert<span class="delimiter">(</span>DBObject<span class="delimiter">[</span><span class="delimiter">]</span> arr, com.mongodb.WriteConcern concern <span class="delimiter">)</span>
+            throws MongoException <span class="delimiter">{</span>
+            <span class="keyword">return</span> insert<span class="delimiter">(</span> arr , <span class="keyword">true</span> , concern <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">protected</span> WriteResult insert<span class="delimiter">(</span>DBObject<span class="delimiter">[</span><span class="delimiter">]</span> arr, boolean shouldApply , com.mongodb.WriteConcern concern <span class="delimiter">)</span>
+            throws MongoException <span class="delimiter">{</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> willTrace<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">for</span> <span class="delimiter">(</span>DBObject o : arr<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    trace<span class="delimiter">(</span> <span class="string">&quot;save:  &quot;</span> + _fullNameSpace + <span class="string">&quot; &quot;</span> + JSON.serialize<span class="delimiter">(</span> o <span class="delimiter">)</span> <span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            
+            <span class="keyword">if</span> <span class="delimiter">(</span> shouldApply <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">for</span> <span class="delimiter">(</span> int i=<span class="int">0</span>; i&lt;arr.length; i++ <span class="delimiter">)</span><span class="delimiter">{</span>
+                    DBObject o=arr<span class="delimiter">[</span>i<span class="delimiter">]</span>;
+                    apply<span class="delimiter">(</span> o <span class="delimiter">)</span>;
+                    _checkObject<span class="delimiter">(</span> o , <span class="keyword">false</span> , <span class="keyword">false</span> <span class="delimiter">)</span>;
+                    Object id = o.get<span class="delimiter">(</span> <span class="string">&quot;_id&quot;</span> <span class="delimiter">)</span>;
+                    <span class="keyword">if</span> <span class="delimiter">(</span> id instanceof ObjectId <span class="delimiter">)</span><span class="delimiter">{</span>
+                        <span class="delimiter">(</span><span class="delimiter">(</span>ObjectId<span class="delimiter">)</span>id<span class="delimiter">)</span>.notNew<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+
+            WriteResult last = <span class="keyword">null</span>;
+
+            int cur = <span class="int">0</span>;
+            int maxsize = _mongo.getMaxBsonObjectSize<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">while</span> <span class="delimiter">(</span> cur &lt; arr.length <span class="delimiter">)</span><span class="delimiter">{</span>
+                OutMessage om = <span class="keyword">new</span> OutMessage<span class="delimiter">(</span> _mongo , <span class="int">2002</span> <span class="delimiter">)</span>;
+                
+                om.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; <span class="comment">// reserved</span>
+                om.writeCString<span class="delimiter">(</span> _fullNameSpace <span class="delimiter">)</span>;
+                
+                <span class="keyword">for</span> <span class="delimiter">(</span> ; cur&lt;arr.length; cur++ <span class="delimiter">)</span><span class="delimiter">{</span>
+                    DBObject o = arr<span class="delimiter">[</span>cur<span class="delimiter">]</span>;
+                    om.putObject<span class="delimiter">(</span> o <span class="delimiter">)</span>;
+
+                    <span class="comment">// limit for batch insert is 4 x maxbson on server, use 2 x to be safe</span>
+                    <span class="keyword">if</span> <span class="delimiter">(</span> om.size<span class="delimiter">(</span><span class="delimiter">)</span> &gt; <span class="int">2</span> * maxsize <span class="delimiter">)</span><span class="delimiter">{</span>
+                        cur++;
+                        break;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+                
+                last = _connector.say<span class="delimiter">(</span> _db , om , concern <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            
+            <span class="keyword">return</span> last;
+        <span class="delimiter">}</span>
+        
+        public WriteResult remove<span class="delimiter">(</span> DBObject o , com.mongodb.WriteConcern concern <span class="delimiter">)</span>
+            throws MongoException <span class="delimiter">{</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> willTrace<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> trace<span class="delimiter">(</span> <span class="string">&quot;remove: &quot;</span> + _fullNameSpace + <span class="string">&quot; &quot;</span> + JSON.serialize<span class="delimiter">(</span> o <span class="delimiter">)</span> <span class="delimiter">)</span>;
+
+            OutMessage om = <span class="keyword">new</span> OutMessage<span class="delimiter">(</span> _mongo , <span class="int">2006</span> <span class="delimiter">)</span>;
+
+            om.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; <span class="comment">// reserved</span>
+            om.writeCString<span class="delimiter">(</span> _fullNameSpace <span class="delimiter">)</span>;
+            
+            Collection&lt;String&gt; keys = o.keySet<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> keys.size<span class="delimiter">(</span><span class="delimiter">)</span> == <span class="int">1</span> &amp;&amp;
+                 keys.iterator<span class="delimiter">(</span><span class="delimiter">)</span>.next<span class="delimiter">(</span><span class="delimiter">)</span>.equals<span class="delimiter">(</span> <span class="string">&quot;_id&quot;</span> <span class="delimiter">)</span> &amp;&amp;
+                 o.get<span class="delimiter">(</span> keys.iterator<span class="delimiter">(</span><span class="delimiter">)</span>.next<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> instanceof ObjectId <span class="delimiter">)</span>
+                om.writeInt<span class="delimiter">(</span> <span class="int">1</span> <span class="delimiter">)</span>;
+            <span class="keyword">else</span>
+                om.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>;
+
+            om.putObject<span class="delimiter">(</span> o <span class="delimiter">)</span>;
+            
+            <span class="keyword">return</span> _connector.say<span class="delimiter">(</span> _db , om , concern <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        @Override
+        Iterator&lt;DBObject&gt; __find<span class="delimiter">(</span> DBObject ref , DBObject fields , int numToSkip , int batchSize, int limit , int options <span class="delimiter">)</span>
+            throws MongoException <span class="delimiter">{</span>
+            
+            <span class="keyword">if</span> <span class="delimiter">(</span> ref == <span class="keyword">null</span> <span class="delimiter">)</span>
+                ref = <span class="keyword">new</span> BasicDBObject<span class="delimiter">(</span><span class="delimiter">)</span>;
+            
+            <span class="keyword">if</span> <span class="delimiter">(</span> willTrace<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> trace<span class="delimiter">(</span> <span class="string">&quot;find: &quot;</span> + _fullNameSpace + <span class="string">&quot; &quot;</span> + JSON.serialize<span class="delimiter">(</span> ref <span class="delimiter">)</span> <span class="delimiter">)</span>;
+            
+            OutMessage query = OutMessage.query<span class="delimiter">(</span> _mongo , options , _fullNameSpace , numToSkip , chooseBatchSize<span class="delimiter">(</span>batchSize, limit, <span class="int">0</span><span class="delimiter">)</span> , ref , fields <span class="delimiter">)</span>;
+
+            Response res = _connector.call<span class="delimiter">(</span> _db , <span class="keyword">this</span> , query , <span class="keyword">null</span> , <span class="int">2</span> <span class="delimiter">)</span>;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> res.size<span class="delimiter">(</span><span class="delimiter">)</span> == <span class="int">0</span> <span class="delimiter">)</span>
+                <span class="keyword">return</span> <span class="keyword">null</span>;
+            
+            <span class="keyword">if</span> <span class="delimiter">(</span> res.size<span class="delimiter">(</span><span class="delimiter">)</span> == <span class="int">1</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                BSONObject foo = res.get<span class="delimiter">(</span><span class="int">0</span><span class="delimiter">)</span>;
+                MongoException e = MongoException.parse<span class="delimiter">(</span> foo <span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span> e != <span class="keyword">null</span> &amp;&amp; ! _name.equals<span class="delimiter">(</span> <span class="string">&quot;$cmd&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+                    <span class="keyword">throw</span> e;
+            <span class="delimiter">}</span>
+            
+            <span class="keyword">return</span> <span class="keyword">new</span> Result<span class="delimiter">(</span> <span class="keyword">this</span> , res , batchSize, limit , options <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        @Override
+        public WriteResult update<span class="delimiter">(</span> DBObject query , DBObject o , boolean upsert , boolean multi , com.mongodb.WriteConcern concern <span class="delimiter">)</span>
+            throws MongoException <span class="delimiter">{</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span>o != <span class="keyword">null</span> &amp;&amp; !o.keySet<span class="delimiter">(</span><span class="delimiter">)</span>.isEmpty<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="comment">// if 1st key doesn't start with $, then object will be inserted as is, need to check it</span>
+                String key = o.keySet<span class="delimiter">(</span><span class="delimiter">)</span>.iterator<span class="delimiter">(</span><span class="delimiter">)</span>.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>key.charAt<span class="delimiter">(</span><span class="int">0</span><span class="delimiter">)</span> != <span class="char">'$'</span><span class="delimiter">)</span>
+                    _checkObject<span class="delimiter">(</span>o, <span class="keyword">false</span>, <span class="keyword">false</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> willTrace<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> trace<span class="delimiter">(</span> <span class="string">&quot;update: &quot;</span> + _fullNameSpace + <span class="string">&quot; &quot;</span> + JSON.serialize<span class="delimiter">(</span> query <span class="delimiter">)</span> + <span class="string">&quot; &quot;</span> + JSON.serialize<span class="delimiter">(</span> o <span class="delimiter">)</span>  <span class="delimiter">)</span>;
+            
+            OutMessage om = <span class="keyword">new</span> OutMessage<span class="delimiter">(</span> _mongo , <span class="int">2001</span> <span class="delimiter">)</span>;
+            om.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; <span class="comment">// reserved</span>
+            om.writeCString<span class="delimiter">(</span> _fullNameSpace <span class="delimiter">)</span>;
+            
+            int flags = <span class="int">0</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> upsert <span class="delimiter">)</span> flags |= <span class="int">1</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span> multi <span class="delimiter">)</span> flags |= <span class="int">2</span>;
+            om.writeInt<span class="delimiter">(</span> flags <span class="delimiter">)</span>;
+
+            om.putObject<span class="delimiter">(</span> query <span class="delimiter">)</span>;
+            om.putObject<span class="delimiter">(</span> o <span class="delimiter">)</span>;
+            
+            <span class="keyword">return</span> _connector.say<span class="delimiter">(</span> _db , om , concern <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+        public void createIndex<span class="delimiter">(</span> <span class="keyword">final</span> DBObject keys, <span class="keyword">final</span> DBObject options <span class="delimiter">)</span>
+            throws MongoException <span class="delimiter">{</span>
+            
+            DBObject full = <span class="keyword">new</span> BasicDBObject<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">for</span> <span class="delimiter">(</span> String k : options.keySet<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+                full.put<span class="delimiter">(</span> k , options.get<span class="delimiter">(</span> k <span class="delimiter">)</span> <span class="delimiter">)</span>;
+            full.put<span class="delimiter">(</span> <span class="string">&quot;key&quot;</span> , keys <span class="delimiter">)</span>;
+
+            DBApiLayer.<span class="keyword">this</span>.doGetCollection<span class="delimiter">(</span> <span class="string">&quot;system.indexes&quot;</span> <span class="delimiter">)</span>.insert<span class="delimiter">(</span> <span class="keyword">new</span> DBObject<span class="delimiter">[</span><span class="delimiter">]</span><span class="delimiter">{</span> full <span class="delimiter">}</span> , <span class="keyword">false</span> , WriteConcern.SAFE <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">final</span> String _fullNameSpace;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">class</span> Result implements Iterator&lt;DBObject&gt; <span class="delimiter">{</span>
+
+        Result<span class="delimiter">(</span> MyCollection coll , Response res , int batchSize, int limit , int options <span class="delimiter">)</span><span class="delimiter">{</span>
+            _collection = coll;
+            _batchSize = batchSize;
+            _limit = limit;
+            _options = options;
+            _host = res._host;
+            init<span class="delimiter">(</span> res <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">private</span> void init<span class="delimiter">(</span> Response res <span class="delimiter">)</span><span class="delimiter">{</span>
+            _totalBytes += res._len;
+            _curResult = res;
+            _cur = res.iterator<span class="delimiter">(</span><span class="delimiter">)</span>;
+            _sizes.add<span class="delimiter">(</span> res.size<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+            _numFetched += res.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> <span class="delimiter">(</span> res._flags &amp; Bytes.RESULTFLAG_CURSORNOTFOUND <span class="delimiter">)</span> &gt; <span class="int">0</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> MongoException.CursorNotFound<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span>res._cursor != <span class="int">0</span> &amp;&amp; _limit &gt; <span class="int">0</span> &amp;&amp; _limit - _numFetched &lt;= <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="comment">// fetched all docs within limit, close cursor server-side</span>
+                killCursor<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public DBObject next<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> _cur.hasNext<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">return</span> _cur.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> ! _curResult.hasGetMore<span class="delimiter">(</span> _options <span class="delimiter">)</span> <span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;no more&quot;</span> <span class="delimiter">)</span>;
+
+            _advance<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">return</span> next<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public boolean hasNext<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">while</span> <span class="delimiter">(</span> <span class="keyword">true</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span> _cur.hasNext<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                
+                <span class="keyword">if</span> <span class="delimiter">(</span> ! _curResult.hasGetMore<span class="delimiter">(</span> _options <span class="delimiter">)</span> <span class="delimiter">)</span>
+                    <span class="keyword">return</span> <span class="keyword">false</span>;
+                
+                _advance<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        <span class="keyword">private</span> void _advance<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+
+            <span class="keyword">if</span> <span class="delimiter">(</span> _curResult.cursor<span class="delimiter">(</span><span class="delimiter">)</span> &lt;= <span class="int">0</span> <span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;can't advance a cursor &lt;= 0&quot;</span> <span class="delimiter">)</span>;
+            
+            OutMessage m = <span class="keyword">new</span> OutMessage<span class="delimiter">(</span> _mongo , <span class="int">2005</span> <span class="delimiter">)</span>;
+
+            m.writeInt<span class="delimiter">(</span> <span class="int">0</span> <span class="delimiter">)</span>; 
+            m.writeCString<span class="delimiter">(</span> _collection._fullNameSpace <span class="delimiter">)</span>;
+            m.writeInt<span class="delimiter">(</span> chooseBatchSize<span class="delimiter">(</span>_batchSize, _limit, _numFetched<span class="delimiter">)</span> <span class="delimiter">)</span>;
+            m.writeLong<span class="delimiter">(</span> _curResult.cursor<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+            
+            Response res = _connector.call<span class="delimiter">(</span> DBApiLayer.<span class="keyword">this</span> , _collection , m , _host <span class="delimiter">)</span>;
+            _numGetMores++;
+            init<span class="delimiter">(</span> res <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public void remove<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;can't remove this way&quot;</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+        public int getBatchSize<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">return</span> _batchSize;
+        <span class="delimiter">}</span>
+        
+        public void setBatchSize<span class="delimiter">(</span>int size<span class="delimiter">)</span><span class="delimiter">{</span>
+            _batchSize = size;
+        <span class="delimiter">}</span>
+
+        public String toString<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">return</span> <span class="string">&quot;DBCursor&quot;</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">protected</span> void finalize<span class="delimiter">(</span><span class="delimiter">)</span> throws Throwable <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>_curResult != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                long curId = _curResult.cursor<span class="delimiter">(</span><span class="delimiter">)</span>;
+                _curResult = <span class="keyword">null</span>;
+                _cur = <span class="keyword">null</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>curId != <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    _deadCursorIds.add<span class="delimiter">(</span><span class="keyword">new</span> DeadCursor<span class="delimiter">(</span>curId, _host<span class="delimiter">)</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            <span class="keyword">super</span>.finalize<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public long totalBytes<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">return</span> _totalBytes;
+        <span class="delimiter">}</span>
+        
+        public long getCursorId<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> _curResult == <span class="keyword">null</span> <span class="delimiter">)</span>
+                <span class="keyword">return</span> <span class="int">0</span>;
+            <span class="keyword">return</span> _curResult._cursor;
+        <span class="delimiter">}</span>
+        
+        int numGetMores<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">return</span> _numGetMores;
+        <span class="delimiter">}</span>
+
+        List&lt;Integer&gt; getSizes<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">return</span> Collections.unmodifiableList<span class="delimiter">(</span> _sizes <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        
+        void close<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="comment">// not perfectly thread safe here, may need to use an atomicBoolean</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>_curResult != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                killCursor<span class="delimiter">(</span><span class="delimiter">)</span>;
+                _curResult = <span class="keyword">null</span>;
+                _cur = <span class="keyword">null</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        void killCursor<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>_curResult == <span class="keyword">null</span><span class="delimiter">)</span>
+                <span class="keyword">return</span>;
+            long curId = _curResult.cursor<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>curId == <span class="int">0</span><span class="delimiter">)</span>
+                <span class="keyword">return</span>;
+
+            List&lt;Long&gt; l = <span class="keyword">new</span> ArrayList&lt;Long&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+            l.add<span class="delimiter">(</span>curId<span class="delimiter">)</span>;
+
+            <span class="keyword">try</span> <span class="delimiter">{</span>
+                killCursors<span class="delimiter">(</span>_host, l<span class="delimiter">)</span>;
+            <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>Throwable t<span class="delimiter">)</span> <span class="delimiter">{</span>
+                Bytes.LOGGER.log<span class="delimiter">(</span>Level.WARNING, <span class="string">&quot;can't clean 1 cursor&quot;</span>, t<span class="delimiter">)</span>;
+                _deadCursorIds.add<span class="delimiter">(</span><span class="keyword">new</span> DeadCursor<span class="delimiter">(</span>curId, _host<span class="delimiter">)</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            _curResult._cursor = <span class="int">0</span>;
+        <span class="delimiter">}</span>
+
+        public ServerAddress getServerAddress<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> _host;
+        <span class="delimiter">}</span>
+        
+        Response _curResult;
+        Iterator&lt;DBObject&gt; _cur;
+        int _batchSize;
+        int _limit;
+        <span class="keyword">final</span> MyCollection _collection;
+        <span class="keyword">final</span> int _options;
+        <span class="keyword">final</span> ServerAddress _host; <span class="comment">// host where first went.  all subsequent have to go there</span>
+
+        <span class="keyword">private</span> long _totalBytes = <span class="int">0</span>;
+        <span class="keyword">private</span> int _numGetMores = <span class="int">0</span>;
+        <span class="keyword">private</span> List&lt;Integer&gt; _sizes = <span class="keyword">new</span> ArrayList&lt;Integer&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">private</span> int _numFetched = <span class="int">0</span>;
+        
+    <span class="delimiter">}</span>  <span class="comment">// class Result</span>
+    
+    static <span class="keyword">class</span> <a title="object com.mongodb.DBApiLayer.DeadCursor" id="145169">DeadCursor</a> <span class="delimiter">{</span>
+        
+        DeadCursor<span class="delimiter">(</span> long a , ServerAddress b <span class="delimiter">)</span><span class="delimiter">{</span>
+            id = a;
+            host = b;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">final</span> long id;
+        <span class="keyword">final</span> ServerAddress host;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">final</span> String _root;
+    <span class="keyword">final</span> String _rootPlusDot;
+    <span class="keyword">final</span> DBConnector _connector;
+    <span class="keyword">final</span> Map&lt;String,MyCollection&gt; _collections = Collections.synchronizedMap<span class="delimiter">(</span> <span class="keyword">new</span> HashMap&lt;String,MyCollection&gt;<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+    
+    ConcurrentLinkedQueue&lt;DeadCursor&gt; _deadCursorIds = <span class="keyword">new</span> ConcurrentLinkedQueue&lt;DeadCursor&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    static <span class="keyword">final</span> List&lt;<a href="DBObject.java.html#7932" title="com.mongodb.DBObject">DBObject</a>&gt; <a title="java.util.List[com.mongodb.DBObject]" id="145170">EMPTY</a> = Collections.unmodifiableList<span class="delimiter">(</span> <span class="keyword">new</span> LinkedList&lt;DBObject&gt;<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>;
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

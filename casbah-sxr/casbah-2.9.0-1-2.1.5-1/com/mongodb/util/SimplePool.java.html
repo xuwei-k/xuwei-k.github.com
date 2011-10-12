@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>com/mongodb/util/SimplePool.java</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">// SimplePool.java</span>
+
+<span class="comment">/**
+ *      Copyright (C) 2008 10gen Inc.
+ *  
+ *   Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ * 
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */</span>
+
+<span class="keyword">package</span> com.mongodb.util;
+
+<span class="keyword">import</span> java.util.*;
+<span class="keyword">import</span> java.util.concurrent.Semaphore;
+<span class="keyword">import</span> java.util.concurrent.TimeUnit;
+
+<span class="keyword">import</span> javax.management.*;
+
+public <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="object com.mongodb.util.SimplePool" id="8293">SimplePool</a>&lt;<a title="Nothing" id="8365">T</a>&gt; implements DynamicMBean <span class="delimiter">{</span>
+
+    static <span class="keyword">final</span> boolean <a title="Boolean" id="146792">TRACK_LEAKS</a> = Boolean.getBoolean<span class="delimiter">(</span> <span class="string">&quot;MONGO-TRACKLEAKS&quot;</span> <span class="delimiter">)</span>;
+    static <span class="keyword">final</span> long <a title="Long" id="146793">_sleepTime</a> = <span class="int">2</span>;
+    
+    <span class="comment">/** 
+     * See full constructor docs
+     */</span>
+    public SimplePool<span class="delimiter">(</span> String name , int maxToKeep , int maxTotal <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">this</span><span class="delimiter">(</span> name , maxToKeep , maxTotal , <span class="keyword">false</span> , <span class="keyword">false</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span> 
+    
+    <span class="comment">/** Initializes a new pool of objects.
+     * @param name name for the pool
+     * @param maxToKeep max to hold to at any given time. if &lt; 0 then no limit
+     * @param maxTotal max to have allocated at any point.  if there are no more, get() will block
+     * @param trackLeaks if leaks should be tracked
+     */</span>
+    public SimplePool<a title="(name: java.lang.String, maxToKeep: Int, maxTotal: Int, trackLeaks: Boolean, debug: Boolean)com.mongodb.util.SimplePool[T]" id="146007" class="delimiter">(</a> String <a title="java.lang.String" id="146796">name</a> , int <a title="Int" id="146797">maxToKeep</a> , int <a title="Int" id="146798">maxTotal</a> , boolean <a title="Boolean" id="146799">trackLeaks</a> , boolean <a title="Boolean" id="146800">debug</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        _name = name;
+        _maxToKeep = maxToKeep;
+        _maxTotal = maxTotal;
+        _trackLeaks = trackLeaks || TRACK_LEAKS;
+        _debug = debug;
+        _mbeanInfo = <span class="keyword">new</span> MBeanInfo<span class="delimiter">(</span> <span class="keyword">this</span>.getClass<span class="delimiter">(</span><span class="delimiter">)</span>.getName<span class="delimiter">(</span><span class="delimiter">)</span> , _name , 
+                <span class="keyword">new</span> MBeanAttributeInfo<span class="delimiter">[</span><span class="delimiter">]</span><span class="delimiter">{</span>
+                    <span class="keyword">new</span> MBeanAttributeInfo<span class="delimiter">(</span> <span class="string">&quot;name&quot;</span> , <span class="string">&quot;java.lang.String&quot;</span> , <span class="string">&quot;name of pool&quot;</span> , <span class="keyword">true</span> , <span class="keyword">false</span> , <span class="keyword">false</span> <span class="delimiter">)</span> , 
+                    <span class="keyword">new</span> MBeanAttributeInfo<span class="delimiter">(</span> <span class="string">&quot;size&quot;</span> , <span class="string">&quot;java.lang.Integer&quot;</span> , <span class="string">&quot;total size of pool&quot;</span> , <span class="keyword">true</span> , <span class="keyword">false</span> , <span class="keyword">false</span> <span class="delimiter">)</span> , 
+                    <span class="keyword">new</span> MBeanAttributeInfo<span class="delimiter">(</span> <span class="string">&quot;available&quot;</span> , <span class="string">&quot;java.lang.Integer&quot;</span> , <span class="string">&quot;total connections available&quot;</span> , <span class="keyword">true</span> , <span class="keyword">false</span> , <span class="keyword">false</span> <span class="delimiter">)</span> , 
+                    <span class="keyword">new</span> MBeanAttributeInfo<span class="delimiter">(</span> <span class="string">&quot;inUse&quot;</span> , <span class="string">&quot;java.lang.Integer&quot;</span> , <span class="string">&quot;number connections in use right now&quot;</span> , <span class="keyword">true</span> , <span class="keyword">false</span> , <span class="keyword">false</span> <span class="delimiter">)</span> , 
+                    <span class="keyword">new</span> MBeanAttributeInfo<span class="delimiter">(</span> <span class="string">&quot;everCreated&quot;</span> , <span class="string">&quot;java.lang.Integer&quot;</span> , <span class="string">&quot;number connections ever created&quot;</span> , <span class="keyword">true</span> , <span class="keyword">false</span> , <span class="keyword">false</span> <span class="delimiter">)</span> 
+                <span class="delimiter">}</span> , <span class="keyword">null</span> , <span class="keyword">null</span> , <span class="keyword">null</span> <span class="delimiter">)</span>;
+        
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Creates a new object of this pool's type.
+     * @return the new object.
+     */</span>
+    <span class="keyword">protected</span> <span class="keyword">abstract</span> <a href="#8365" title="T">T</a> <a title="()T" id="146008">createNew</a><span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    <span class="comment">/** 
+     * callback to determine if an object is ok to be added back to the pool or used
+     * will be called when something is put back into the queue and when it comes out
+     * @return true if the object is ok to be added back to pool
+     */</span>
+    public boolean <a title="(t: T)Boolean" id="146009">ok</a><span class="delimiter">(</span> <a href="#8365" title="T">T</a> <a title="T" id="146802">t</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="keyword">true</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * override this if you need to do any cleanup
+     */</span>
+    public void <a title="(t: T)Unit" id="146010">cleanup</a><span class="delimiter">(</span> <a href="#8365" title="T">T</a> <a title="T" id="146804">t</a> <span class="delimiter">)</span><span class="delimiter">{</span><span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * @return &gt;= 0 the one to use, -1 don't use any
+     */</span>
+    <span class="keyword">protected</span> int <a title="(iThink: Int, couldCreate: Boolean)Int" id="146011">pick</a><span class="delimiter">(</span> int <a title="Int" id="146806">iThink</a> , boolean <a title="Boolean" id="146807">couldCreate</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> iThink;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** 
+     * call done when you are done with an object form the pool
+     * if there is room and the object is ok will get added
+     * @param t Object to add
+     */</span>
+    public void <a title="(t: T)Unit" id="146012">done</a><span class="delimiter">(</span> <a href="#8365" title="T">T</a> <a title="T" id="146809">t</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        done<span class="delimiter">(</span> t , ok<span class="delimiter">(</span> t <span class="delimiter">)</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    void <a title="(t: T, ok: Boolean)Unit" id="146013">done</a><span class="delimiter">(</span> <a href="#8365" title="T">T</a> <a title="T" id="146811">t</a> , boolean <a title="Boolean" id="146812">ok</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _trackLeaks <span class="delimiter">)</span><span class="delimiter">{</span>
+            synchronized <span class="delimiter">(</span> _where <span class="delimiter">)</span><span class="delimiter">{</span>
+                _where.remove<span class="delimiter">(</span> _hash<span class="delimiter">(</span> t <span class="delimiter">)</span> <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        
+        <span class="keyword">if</span> <span class="delimiter">(</span> ! ok <span class="delimiter">)</span><span class="delimiter">{</span>
+            synchronized <span class="delimiter">(</span> _avail <span class="delimiter">)</span><span class="delimiter">{</span>
+                _all.remove<span class="delimiter">(</span> t <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span>;
+        <span class="delimiter">}</span>
+
+        synchronized <span class="delimiter">(</span> _avail <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> _maxToKeep &lt; <span class="int">0</span> || _avail.size<span class="delimiter">(</span><span class="delimiter">)</span> &lt; _maxToKeep <span class="delimiter">)</span><span class="delimiter">{</span>
+                <span class="keyword">for</span> <span class="delimiter">(</span> int i=<span class="int">0</span>; i&lt;_avail.size<span class="delimiter">(</span><span class="delimiter">)</span>; i++ <span class="delimiter">)</span>
+                    <span class="keyword">if</span> <span class="delimiter">(</span> _avail.get<span class="delimiter">(</span> i <span class="delimiter">)</span> == t <span class="delimiter">)</span>
+                        <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;trying to put something back in the pool that's already there&quot;</span> <span class="delimiter">)</span>;
+                
+                <span class="comment">// if all doesn't contain it, it probably means this was cleared, so we don't want it</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span> _all.contains<span class="delimiter">(</span> t <span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                    _avail.add<span class="delimiter">(</span> t <span class="delimiter">)</span>;
+                    _waiting.release<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            <span class="keyword">else</span> <span class="delimiter">{</span>
+                cleanup<span class="delimiter">(</span> t <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    public void <a title="(t: T)Unit" id="146014">remove</a><span class="delimiter">(</span> <a href="#8365" title="T">T</a> <a title="T" id="146814">t</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        done<span class="delimiter">(</span> t , <span class="keyword">false</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Gets an object from the pool - will block if none are available
+     * @return An object from the pool
+     */</span>
+    public <a href="#8365" title="T">T</a> <a title="()T" id="146015">get</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+	<span class="keyword">return</span> get<span class="delimiter">(</span>-<span class="int">1</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="comment">/** Gets an object from the pool - will block if none are available
+     * @param waitTime 
+     *        negative - forever
+     *        0        - return immediately no matter what
+     *        positive ms to wait
+     * @return An object from the pool
+     */</span>
+    public <a href="#8365" title="T">T</a> <a title="(waitTime: Long)T" id="146016">get</a><span class="delimiter">(</span> long <a title="Long" id="146817">waitTime</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">final</span> T t = _get<span class="delimiter">(</span> waitTime <span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> t != <span class="keyword">null</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span> _trackLeaks <span class="delimiter">)</span><span class="delimiter">{</span>
+                Throwable stack = <span class="keyword">new</span> Throwable<span class="delimiter">(</span><span class="delimiter">)</span>;
+                stack.fillInStackTrace<span class="delimiter">(</span><span class="delimiter">)</span>;
+                synchronized <span class="delimiter">(</span> _where <span class="delimiter">)</span><span class="delimiter">{</span>
+                    _where.put<span class="delimiter">(</span> _hash<span class="delimiter">(</span> t <span class="delimiter">)</span> , stack <span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">return</span> t;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> int <a title="(t: T)Int" id="146017">_hash</a><span class="delimiter">(</span> <a href="#8365" title="T">T</a> <a title="T" id="146819">t</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> System.identityHashCode<span class="delimiter">(</span> t <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    <span class="keyword">private</span> <a href="#8365" title="T">T</a> <a title="(waitTime: Long)T" id="146018">_get</a><span class="delimiter">(</span> long <a title="Long" id="146821">waitTime</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+	long totalSlept = <span class="int">0</span>;
+        <span class="keyword">while</span> <span class="delimiter">(</span> <span class="keyword">true</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+            synchronized <span class="delimiter">(</span> _avail <span class="delimiter">)</span><span class="delimiter">{</span>
+                
+                boolean couldCreate = _maxTotal &lt;= <span class="int">0</span> || _all.size<span class="delimiter">(</span><span class="delimiter">)</span> &lt; _maxTotal;
+
+                <span class="keyword">while</span> <span class="delimiter">(</span> _avail.size<span class="delimiter">(</span><span class="delimiter">)</span> &gt; <span class="int">0</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                    int toTake = _avail.size<span class="delimiter">(</span><span class="delimiter">)</span> - <span class="int">1</span>;
+                    toTake = pick<span class="delimiter">(</span> toTake, couldCreate <span class="delimiter">)</span>;
+                    <span class="keyword">if</span> <span class="delimiter">(</span> toTake &gt;= <span class="int">0</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                        T t = _avail.remove<span class="delimiter">(</span> toTake <span class="delimiter">)</span>;
+                        <span class="keyword">if</span> <span class="delimiter">(</span> ok<span class="delimiter">(</span> t <span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                            _debug<span class="delimiter">(</span> <span class="string">&quot;got an old one&quot;</span> <span class="delimiter">)</span>;
+                            <span class="keyword">return</span> t;
+                        <span class="delimiter">}</span>
+                        _debug<span class="delimiter">(</span> <span class="string">&quot;old one was not ok&quot;</span> <span class="delimiter">)</span>;
+                        _all.remove<span class="delimiter">(</span> t <span class="delimiter">)</span>;
+                        continue;
+                    <span class="delimiter">}</span>
+                    <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span> ! couldCreate <span class="delimiter">)</span> <span class="delimiter">{</span>
+                        <span class="keyword">throw</span> <span class="keyword">new</span> IllegalStateException<span class="delimiter">(</span> <span class="string">&quot;can't pick nothing if can't create&quot;</span> <span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                    break;
+                <span class="delimiter">}</span>
+                
+                <span class="keyword">if</span> <span class="delimiter">(</span> couldCreate <span class="delimiter">)</span><span class="delimiter">{</span>
+                    _everCreated++;
+                    T t = createNew<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    _all.add<span class="delimiter">(</span> t <span class="delimiter">)</span>;
+                    <span class="keyword">return</span> t;
+                <span class="delimiter">}</span>
+		
+                <span class="keyword">if</span> <span class="delimiter">(</span> _trackLeaks &amp;&amp; _trackPrintCount++ % <span class="int">200</span> == <span class="int">0</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                    _wherePrint<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    _trackPrintCount = <span class="int">1</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+	    
+	    <span class="keyword">if</span> <span class="delimiter">(</span> waitTime == <span class="int">0</span> <span class="delimiter">)</span>
+		<span class="keyword">return</span> <span class="keyword">null</span>;
+
+	    <span class="keyword">if</span> <span class="delimiter">(</span> waitTime &gt; <span class="int">0</span> &amp;&amp; totalSlept &gt;= waitTime <span class="delimiter">)</span>
+		<span class="keyword">return</span> <span class="keyword">null</span>;
+	    
+            long start = System.currentTimeMillis<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">try</span> <span class="delimiter">{</span>
+                _waiting.tryAcquire<span class="delimiter">(</span> _sleepTime , TimeUnit.MILLISECONDS <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">catch</span> <span class="delimiter">(</span> InterruptedException ie <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="delimiter">}</span>
+
+	    totalSlept += <span class="delimiter">(</span> System.currentTimeMillis<span class="delimiter">(</span><span class="delimiter">)</span> - start <span class="delimiter">)</span>;
+
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> void <a title="()Unit" id="146019">_wherePrint</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        StringBuilder buf = <span class="keyword">new</span> StringBuilder<span class="delimiter">(</span> toString<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> <span class="string">&quot; waiting \n&quot;</span> <span class="delimiter">)</span>;
+        synchronized <span class="delimiter">(</span> _where <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">for</span> <span class="delimiter">(</span> Throwable t : _where.values<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span><span class="delimiter">{</span>
+                buf.append<span class="delimiter">(</span> <span class="string">&quot;--\n&quot;</span> <span class="delimiter">)</span>;
+                <span class="keyword">final</span> StackTraceElement<span class="delimiter">[</span><span class="delimiter">]</span> st = t.getStackTrace<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">for</span> <span class="delimiter">(</span> int i=<span class="int">0</span>; i&lt;st.length; i++ <span class="delimiter">)</span>
+                    buf.append<span class="delimiter">(</span> <span class="string">&quot;  &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> st<span class="delimiter">[</span>i<span class="delimiter">]</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> <span class="string">&quot;\n&quot;</span> <span class="delimiter">)</span>;
+                buf.append<span class="delimiter">(</span> <span class="string">&quot;----\n&quot;</span> <span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        System.out.println<span class="delimiter">(</span> buf <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Clears the pool of all objects. */</span>
+    <span class="keyword">protected</span> void <a title="()Unit" id="146020">clear</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        synchronized<span class="delimiter">(</span> _avail <span class="delimiter">)</span><span class="delimiter">{</span>
+            <span class="keyword">for</span> <span class="delimiter">(</span> T t : _avail <span class="delimiter">)</span>
+                cleanup<span class="delimiter">(</span> t <span class="delimiter">)</span>;
+            _avail.clear<span class="delimiter">(</span><span class="delimiter">)</span>;
+            _all.clear<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span> _where <span class="delimiter">)</span><span class="delimiter">{</span>
+                _where.clear<span class="delimiter">(</span><span class="delimiter">)</span>; <span class="comment">// is this correct</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    public int <a title="()Int" id="146021">total</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _all.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public int <a title="()Int" id="146022">inUse</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _all.size<span class="delimiter">(</span><span class="delimiter">)</span> - _avail.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public Iterator&lt;<a href="#8365" title="T">T</a>&gt; <a title="()java.util.Iterator[T]" id="146023">getAll</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _all.getAll<span class="delimiter">(</span><span class="delimiter">)</span>.iterator<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public int <a title="()Int" id="146024">available</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> _maxTotal &lt;= <span class="int">0</span> <span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalStateException<span class="delimiter">(</span> <span class="string">&quot;this pool has an infinite number of things available&quot;</span> <span class="delimiter">)</span>;
+        <span class="keyword">return</span> _maxTotal - inUse<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public int <a title="()Int" id="146025">everCreated</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _everCreated;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> void <a title="(msg: java.lang.String)Unit" id="146026">_debug</a><span class="delimiter">(</span> String <a title="java.lang.String" id="146830">msg</a> <span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span><span class="delimiter">(</span> _debug <span class="delimiter">)</span>
+            System.out.println<span class="delimiter">(</span> <span class="string">&quot;SimplePool [&quot;</span> + _name + <span class="string">&quot;] : &quot;</span> + msg <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public int <a title="()Int" id="146027">maxToKeep</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _maxToKeep;
+    <span class="delimiter">}</span>
+
+    public Object <a title="(attribute: java.lang.String)java.lang.Object" id="146028">getAttribute</a><span class="delimiter">(</span>String <a title="java.lang.String" id="146833">attribute</a><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span> attribute.equals<span class="delimiter">(</span> <span class="string">&quot;name&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> _name;
+        <span class="keyword">if</span> <span class="delimiter">(</span> attribute.equals<span class="delimiter">(</span> <span class="string">&quot;size&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> _maxToKeep;
+        <span class="keyword">if</span> <span class="delimiter">(</span> attribute.equals<span class="delimiter">(</span> <span class="string">&quot;available&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> available<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> attribute.equals<span class="delimiter">(</span> <span class="string">&quot;inUse&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> inUse<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span> attribute.equals<span class="delimiter">(</span> <span class="string">&quot;everCreated&quot;</span> <span class="delimiter">)</span> <span class="delimiter">)</span>
+            <span class="keyword">return</span> _everCreated;
+        
+        System.err.println<span class="delimiter">(</span> <span class="string">&quot;com.mongo.util.SimplePool unknown attribute: &quot;</span> + attribute <span class="delimiter">)</span>;
+        <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;unknown attribute: &quot;</span> + attribute <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public AttributeList <a title="(attributes: Array[java.lang.String])javax.management.AttributeList" id="146029">getAttributes</a><span class="delimiter">(</span>String<span class="delimiter">[</span><span title="Array" class="delimiter">]</span> <a title="Array[java.lang.String]" id="146835">attributes</a><span class="delimiter">)</span><span class="delimiter">{</span>
+        AttributeList l = <span class="keyword">new</span> AttributeList<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">for</span> <span class="delimiter">(</span> int i=<span class="int">0</span>; i&lt;attributes.length; i++ <span class="delimiter">)</span><span class="delimiter">{</span>
+            String name = attributes<span class="delimiter">[</span>i<span class="delimiter">]</span>;
+            l.add<span class="delimiter">(</span> <span class="keyword">new</span> Attribute<span class="delimiter">(</span> name , getAttribute<span class="delimiter">(</span> name <span class="delimiter">)</span> <span class="delimiter">)</span> <span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">return</span> l;
+    <span class="delimiter">}</span>
+
+    public MBeanInfo <a title="()javax.management.MBeanInfo" id="146030">getMBeanInfo</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">return</span> _mbeanInfo;
+    <span class="delimiter">}</span>
+
+    public Object <a title="(actionName: java.lang.String, params: Array[java.lang.Object], signature: Array[java.lang.String])java.lang.Object" id="146031">invoke</a><span class="delimiter">(</span>String <a title="java.lang.String" id="146919">actionName</a>, Object<span class="delimiter">[</span><span title="Array" class="delimiter">]</span> <a title="Array[java.lang.Object]" id="146920">params</a>, String<span class="delimiter">[</span><span title="Array" class="delimiter">]</span> <a title="Array[java.lang.String]" id="146921">signature</a><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;not allowed to invoke anything&quot;</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public void <a title="(attribute: javax.management.Attribute)Unit" id="146032">setAttribute</a><span class="delimiter">(</span>Attribute <a title="javax.management.Attribute" id="146923">attribute</a><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;not allowed to set anything&quot;</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+    
+    public AttributeList <a title="(attributes: javax.management.AttributeList)javax.management.AttributeList" id="146033">setAttributes</a><span class="delimiter">(</span>AttributeList <a title="javax.management.AttributeList" id="146934">attributes</a><span class="delimiter">)</span><span class="delimiter">{</span>
+        <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException<span class="delimiter">(</span> <span class="string">&quot;not allowed to set anything&quot;</span> <span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+
+    public String <a title="()java.lang.String" id="146034">toString</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">{</span>
+        StringBuilder buf = <span class="keyword">new</span> StringBuilder<span class="delimiter">(</span><span class="delimiter">)</span>;
+        buf.append<span class="delimiter">(</span> <span class="string">&quot;pool: &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> _name <span class="delimiter">)</span>
+            .append<span class="delimiter">(</span> <span class="string">&quot; maxToKeep: &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> _maxToKeep <span class="delimiter">)</span>
+            .append<span class="delimiter">(</span> <span class="string">&quot; maxTotal: &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> _maxToKeep <span class="delimiter">)</span>
+            .append<span class="delimiter">(</span> <span class="string">&quot; where &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> _where.size<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+            .append<span class="delimiter">(</span> <span class="string">&quot; avail &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> _avail.size<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+            .append<span class="delimiter">(</span> <span class="string">&quot; all &quot;</span> <span class="delimiter">)</span>.append<span class="delimiter">(</span> _all.size<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">)</span>
+            ;
+        <span class="keyword">return</span> buf.toString<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> <span class="keyword">final</span> String <a title="java.lang.String" id="146035">_name</a>;
+    <span class="keyword">protected</span> <span class="keyword">final</span> int <a title="Int" id="146036">_maxToKeep</a>;
+    <span class="keyword">protected</span> <span class="keyword">final</span> int <a title="Int" id="146037">_maxTotal</a>;
+    <span class="keyword">protected</span> <span class="keyword">final</span> boolean <a title="Boolean" id="146038">_trackLeaks</a>;
+    <span class="keyword">protected</span> <span class="keyword">final</span> boolean <a title="Boolean" id="146039">_debug</a>;
+    <span class="keyword">protected</span> <span class="keyword">final</span> MBeanInfo <a title="javax.management.MBeanInfo" id="146040">_mbeanInfo</a>;
+
+    <span class="keyword">private</span> <span class="keyword">final</span> List&lt;<a href="#8365" title="T">T</a>&gt; <a title="java.util.List[T]" id="146041">_avail</a> = <span class="keyword">new</span> ArrayList&lt;T&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="keyword">protected</span> <span class="keyword">final</span> List&lt;<a href="#8365" title="T">T</a>&gt; <a title="java.util.List[T]" id="146042">_availSafe</a> = Collections.unmodifiableList<span class="delimiter">(</span> _avail <span class="delimiter">)</span>;
+    <span class="keyword">private</span> <span class="keyword">final</span> <a href="WeakBag.java.html#8257" title="com.mongodb.util.WeakBag">WeakBag</a>&lt;<a href="#8365" title="T">T</a>&gt; <a title="com.mongodb.util.WeakBag[T]" id="146043">_all</a> = <span class="keyword">new</span> WeakBag&lt;T&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="keyword">private</span> <span class="keyword">final</span> Map&lt;Integer,Throwable&gt; <a title="java.util.Map[java.lang.Integer,java.lang.Throwable]" id="146044">_where</a> = <span class="keyword">new</span> HashMap&lt;Integer,Throwable&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    <span class="keyword">private</span> <span class="keyword">final</span> Semaphore <a title="java.util.concurrent.Semaphore" id="146045">_waiting</a> = <span class="keyword">new</span> Semaphore<span class="delimiter">(</span><span class="int">0</span><span class="delimiter">)</span>;
+
+    <span class="keyword">private</span> int <a title="Int" id="146046">_everCreated</a> = <span class="int">0</span>;
+    <span class="keyword">private</span> int <a title="Int" id="146047">_trackPrintCount</a> = <span class="int">0</span>;
+    
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
