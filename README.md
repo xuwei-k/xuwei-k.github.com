@@ -20,3 +20,7 @@ http://xuwei-k.github.com/unfiltered-sxr/unfiltered-2.9.1-0.5.0/
 
 http://xuwei-k.github.com/scala-library-sxr/scala-library-2.9.1/
 
+
+##### scala compiler
+
+http://xuwei-k.github.com/scala-compiler-sxr/scala-compiler-2.9.1/
