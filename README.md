@@ -26,6 +26,6 @@ http://xuwei-k.github.com/scala-library-sxr/scala-library-2.9.1/
 http://xuwei-k.github.com/scala-compiler-sxr/scala-compiler-2.9.1/
 
 
-#### specs2
+##### specs2
 
 http://xuwei-k.github.com/specs2-sxr/specs2-2.9.1-1.6.1/
