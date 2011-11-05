@@ -20,3 +20,15 @@ scalacOptions <+= ( sourceDirectories in Compile) map (
   ).toSeq
 }
 
+TaskKey[Unit]("slide") <<= (sources in Compile) map { files =>
+  val u = "http://xuwei-k.github.com/scala-library-sxr/scala-library-2.9.1/"
+  def pathString(f:File):String = {
+    f.getAbsolutePath.split('/').dropWhile("scala" !=).tail.mkString("/")
+  }
+  IO.write( 
+    file("../slide/scala-library" ) ,
+    files.map{f =>
+      "\n\n!SLIDE\n\n" + <iframe src={ u + pathString(f) } width="1200" height="600" />
+    }.mkString
+  )
+}
