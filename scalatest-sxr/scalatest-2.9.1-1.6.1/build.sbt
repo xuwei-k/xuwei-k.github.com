@@ -26,7 +26,7 @@ libraryDependencies ++= Seq(
   Seq(baseURL("")).flatMap{ u =>
     IO.unzipURL(
       new java.net.URL(u)
-      ,dir
+      ,file("src/main/scala")
       ,new SimpleFilter(s => s.endsWith("scala") || s.endsWith("java") )
     ).toSeq
   }
@@ -34,7 +34,7 @@ libraryDependencies ++= Seq(
 
 addCompilerPlugin("org.scala-tools.sxr" %% "sxr" % "0.2.8-SNAPSHOT")
 
-scalacOptions <<= (scalacOptions, sourceManaged in Compile).map{ (options, base) =>
-  options :+ ("-P:sxr:base-directory:" + base.getAbsolutePath)
+scalacOptions <+= (sourceDirectories in Compile).map{
+  "-P:sxr:base-directory:" + _.mkString(":")
 }
 
