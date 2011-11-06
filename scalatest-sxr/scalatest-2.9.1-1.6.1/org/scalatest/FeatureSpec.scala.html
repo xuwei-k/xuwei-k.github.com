@@ -1,0 +1,1799 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>org/scalatest/FeatureSpec.scala</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*
+ * Copyright 2001-2008 Artima, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+<span class="keyword">package</span> org.scalatest
+
+<span class="keyword">import</span> <a href="NodeFamily.scala.html#10254" title="object org.scalatest.NodeFamily">NodeFamily</a>._
+<span class="keyword">import</span> scala.collection.immutable.ListSet
+<span class="keyword">import</span> org.scalatest.<a href="StackDepthException.scala.html#9555" title="object org.scalatest.StackDepthExceptionHelper">StackDepthExceptionHelper</a>.getStackDepth
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicReference
+<span class="keyword">import</span> java.util.ConcurrentModificationException
+<span class="keyword">import</span> org.scalatest.events._
+<span class="keyword">import</span> <a href="Suite.scala.html#10074" title="object org.scalatest.Suite">Suite</a>.anErrorThatShouldCauseAnAbort
+
+<span class="comment">/**
+ * A suite of tests in which each test represents one &lt;em&gt;scenario&lt;/em&gt; of a &lt;em&gt;feature&lt;/em&gt;. 
+ * &lt;code&gt;FeatureSpec&lt;/code&gt; is intended for writing tests that are &quot;higher level&quot; than unit tests, for example, integration
+ * tests, functional tests, and acceptance tests. You can use &lt;code&gt;FeatureSpec&lt;/code&gt; for unit testing if you prefer, however.
+ * Here's an example:
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.GivenWhenThen
+ * import scala.collection.mutable.Stack
+ * 
+ * class StackFeatureSpec extends FeatureSpec with GivenWhenThen {
+ * 
+ *   feature(&quot;The user can pop an element off the top of the stack&quot;) {
+ * 
+ *     info(&quot;As a programmer&quot;)
+ *     info(&quot;I want to be able to pop items off the stack&quot;)
+ *     info(&quot;So that I can get them in last-in-first-out order&quot;)
+ * 
+ *     scenario(&quot;pop is invoked on a non-empty stack&quot;) {
+ * 
+ *       given(&quot;a non-empty stack&quot;)
+ *       val stack = new Stack[Int]
+ *       stack.push(1)
+ *       stack.push(2)
+ *       val oldSize = stack.size
+ * 
+ *       when(&quot;when pop is invoked on the stack&quot;)
+ *       val result = stack.pop()
+ * 
+ *       then(&quot;the most recently pushed element should be returned&quot;)
+ *       assert(result === 2)
+ * 
+ *       and(&quot;the stack should have one less item than before&quot;)
+ *       assert(stack.size === oldSize - 1)
+ *     }
+ * 
+ *     scenario(&quot;pop is invoked on an empty stack&quot;) {
+ * 
+ *       given(&quot;an empty stack&quot;)
+ *       val emptyStack = new Stack[String]
+ * 
+ *       when(&quot;when pop is invoked on the stack&quot;)
+ *       then(&quot;NoSuchElementException should be thrown&quot;)
+ *       intercept[NoSuchElementException] {
+ *         emptyStack.pop()
+ *       }
+ * 
+ *       and(&quot;the stack should still be empty&quot;)
+ *       assert(emptyStack.isEmpty)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;code&gt;FeatureSpec&lt;/code&gt; contains &lt;em&gt;feature clauses&lt;/em&gt; and &lt;em&gt;scenarios&lt;/em&gt;. You define a feature clause
+ * with &lt;code&gt;feature&lt;/code&gt;, and a scenario with &lt;code&gt;scenario&lt;/code&gt;. Both
+ * &lt;code&gt;feature&lt;/code&gt; and &lt;code&gt;scenario&lt;/code&gt; are methods, defined in
+ * &lt;code&gt;FeatureSpec&lt;/code&gt;, which will be invoked
+ * by the primary constructor of &lt;code&gt;StackFeatureSpec&lt;/code&gt;. 
+ * A feature clause describes a feature of the &lt;em&gt;subject&lt;/em&gt; (class or other entity) you are specifying
+ * and testing. In the previous example, 
+ * the subject under specification and test is a stack. The feature being specified and tested is 
+ * the ability for a user (a programmer in this case) to pop an element off the top of the stack. With each scenario you provide a
+ * string (the &lt;em&gt;spec text&lt;/em&gt;) that specifies the behavior of the subject for
+ * one scenario in which the feature may be used, and a block of code that tests that behavior.
+ * You place the spec text between the parentheses, followed by the test code between curly
+ * braces.  The test code will be wrapped up as a function passed as a by-name parameter to
+ * &lt;code&gt;scenario&lt;/code&gt;, which will register the test for later execution.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;code&gt;FeatureSpec&lt;/code&gt;'s lifecycle has two phases: the &lt;em&gt;registration&lt;/em&gt; phase and the
+ * &lt;em&gt;ready&lt;/em&gt; phase. It starts in registration phase and enters ready phase the first time
+ * &lt;code&gt;run&lt;/code&gt; is called on it. It then remains in ready phase for the remainder of its lifetime.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Scenarios can only be registered with the &lt;code&gt;scenario&lt;/code&gt; method while the &lt;code&gt;FeatureSpec&lt;/code&gt; is
+ * in its registration phase. Any attempt to register a scenario after the &lt;code&gt;FeatureSpec&lt;/code&gt; has
+ * entered its ready phase, &lt;em&gt;i.e.&lt;/em&gt;, after &lt;code&gt;run&lt;/code&gt; has been invoked on the &lt;code&gt;FeatureSpec&lt;/code&gt;,
+ * will be met with a thrown &lt;code&gt;TestRegistrationClosedException&lt;/code&gt;. The recommended style
+ * of using &lt;code&gt;FeatureSpec&lt;/code&gt; is to register tests during object construction as is done in all
+ * the examples shown here. If you keep to the recommended style, you should never see a
+ * &lt;code&gt;TestRegistrationClosedException&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Each scenario represents one test. The name of the test is the spec text passed to the &lt;code&gt;scenario&lt;/code&gt; method.
+ * The feature name does not appear as part of the test name. In a &lt;code&gt;FeatureSpec&lt;/code&gt;, therefore, you must take care
+ * to ensure that each test has a unique name (in other words, that each &lt;code&gt;scenario&lt;/code&gt; has unique spec text).
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * When you run a &lt;code&gt;FeatureSpec&lt;/code&gt;, it will send &lt;code&gt;Formatter&lt;/code&gt;s in the events it sends to the
+ * &lt;code&gt;Reporter&lt;/code&gt;. ScalaTest's built-in reporters will report these events in such a way
+ * that the output is easy to read as an informal specification of the &lt;em&gt;subject&lt;/em&gt; being tested.
+ * For example, if you ran &lt;code&gt;StackFeatureSpec&lt;/code&gt; from within the Scala interpreter:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * scala&gt; (new StackFeatureSpec).execute()
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * You would see:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;Feature: The user can pop an element off the top of the stack 
+ *   As a programmer 
+ *   I want to be able to pop items off the stack 
+ *   So that I can get them in last-in-first-out order 
+ *   Scenario: pop is invoked on a non-empty stack
+ *     Given a non-empty stack 
+ *     When when pop is invoked on the stack 
+ *     Then the most recently pushed element should be returned 
+ *     And the stack should have one less item than before 
+ *   Scenario: pop is invoked on an empty stack
+ *     Given an empty stack 
+ *     When when pop is invoked on the stack 
+ *     Then NoSuchElementException should be thrown 
+ *     And the stack should still be empty&lt;/span&gt; 
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * See also: &lt;a href=&quot;http://www.scalatest.org/getting_started_with_feature_spec&quot; target=&quot;_blank&quot;&gt;Getting started with &lt;code&gt;FeatureSpec&lt;/code&gt;.&lt;/a&gt;
+ * &lt;/p&gt;
+ * 
+ * &lt;h2&gt;Ignored tests&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * To support the common use case of &amp;#8220;temporarily&amp;#8221; disabling a test, with the
+ * good intention of resurrecting the test at a later time, &lt;code&gt;FeatureSpec&lt;/code&gt; provides registration
+ * methods that start with &lt;code&gt;ignore&lt;/code&gt; instead of &lt;code&gt;scenario&lt;/code&gt;. For example, to temporarily
+ * disable the test named &lt;code&gt;addition&lt;/code&gt;, just change &amp;#8220;&lt;code&gt;scenario&lt;/code&gt;&amp;#8221; into &amp;#8220;&lt;code&gt;ignore&lt;/code&gt;,&amp;#8221; like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ *
+ * class ArithmeticSpec extends FeatureSpec {
+ *
+ *   // Sharing fixture objects via instance variables
+ *   val shared = 5
+ *
+ *   feature(&quot;Integer arithmetic&quot;) {
+ *
+ *     ignore(&quot;addition&quot;) {
+ *       val sum = 2 + 3
+ *       assert(sum === shared)
+ *     }
+ *
+ *     scenario(&quot;subtraction&quot;) {
+ *       val diff = 7 - 2
+ *       assert(diff === shared)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * If you run this version of &lt;code&gt;ArithmeticSpec&lt;/code&gt; with:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * scala&gt; (new ArithmeticSpec).execute()
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * It will run only &lt;code&gt;subtraction&lt;/code&gt; and report that &lt;code&gt;addition&lt;/code&gt; was ignored:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;Feature: Integer arithmetic &lt;/span&gt;
+ *   &lt;span class=&quot;stYellow&quot;&gt;Scenario: addition !!! IGNORED !!!&lt;/span&gt;
+ *   &lt;span class=&quot;stGreen&quot;&gt;Scenario: subtraction&lt;/span&gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;h2&gt;Informers&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * One of the parameters to the &lt;code&gt;run&lt;/code&gt; method is a &lt;code&gt;Reporter&lt;/code&gt;, which
+ * will collect and report information about the running suite of tests.
+ * Information about suites and tests that were run, whether tests succeeded or failed, 
+ * and tests that were ignored will be passed to the &lt;code&gt;Reporter&lt;/code&gt; as the suite runs.
+ * Most often the reporting done by default by &lt;code&gt;FeatureSpec&lt;/code&gt;'s methods will be sufficient, but
+ * occasionally you may wish to provide custom information to the &lt;code&gt;Reporter&lt;/code&gt; from a test.
+ * For this purpose, an &lt;code&gt;Informer&lt;/code&gt; that will forward information to the current &lt;code&gt;Reporter&lt;/code&gt;
+ * is provided via the &lt;code&gt;info&lt;/code&gt; parameterless method.
+ * You can pass the extra information to the &lt;code&gt;Informer&lt;/code&gt; via its &lt;code&gt;apply&lt;/code&gt; method.
+ * The &lt;code&gt;Informer&lt;/code&gt; will then pass the information to the &lt;code&gt;Reporter&lt;/code&gt; via an &lt;code&gt;InfoProvided&lt;/code&gt; event.
+ * Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ *
+ * class ArithmeticSpec extends FeatureSpec {
+ *
+ *   feature(&quot;Integer arithmetic&quot;) {
+ *
+ *     scenario(&quot;addition&quot;) {
+ *       val sum = 2 + 3
+ *       assert(sum === 5)
+ *       info(&quot;Addition seems to work&quot;)
+ *     }
+ *
+ *     scenario(&quot;subtraction&quot;) {
+ *       val diff = 7 - 2
+ *       assert(diff === 5)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * If you run this &lt;code&gt;ArithmeticSpec&lt;/code&gt; from the interpreter, you will see the following message
+ * included in the printed report:
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;Feature: Integer arithmetic 
+ *   Scenario: addition
+ *     Addition seems to work&lt;/span&gt; 
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * One use case for the &lt;code&gt;Informer&lt;/code&gt; is to pass more information about a scenario to the reporter. For example,
+ * the &lt;code&gt;GivenWhenThen&lt;/code&gt; trait provides methods that use the implicit &lt;code&gt;info&lt;/code&gt; provided by &lt;code&gt;FeatureSpec&lt;/code&gt;
+ * to pass such information to the reporter. Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.GivenWhenThen
+ * 
+ * class ArithmeticSpec extends FeatureSpec with GivenWhenThen {
+ * 
+ *   feature(&quot;Integer arithmetic&quot;) {
+ *
+ *     scenario(&quot;addition&quot;) {
+ * 
+ *       given(&quot;two integers&quot;)
+ *       val x = 2
+ *       val y = 3
+ * 
+ *       when(&quot;they are added&quot;)
+ *       val sum = x + y
+ * 
+ *       then(&quot;the result is the sum of the two numbers&quot;)
+ *       assert(sum === 5)
+ *     }
+ *
+ *     scenario(&quot;subtraction&quot;) {
+ * 
+ *       given(&quot;two integers&quot;)
+ *       val x = 7
+ *       val y = 2
+ * 
+ *       when(&quot;one is subtracted from the other&quot;)
+ *       val diff = x - y
+ * 
+ *       then(&quot;the result is the difference of the two numbers&quot;)
+ *       assert(diff === 5)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * If you run this &lt;code&gt;FeatureSpec&lt;/code&gt; from the interpreter, you will see the following messages
+ * included in the printed report:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * scala&gt; (new ArithmeticSpec).execute()
+ * &lt;span class=&quot;stGreen&quot;&gt;Feature: Integer arithmetic 
+ *   Scenario: addition
+ *     Given two integers 
+ *     When they are added 
+ *     Then the result is the sum of the two numbers 
+ *   Scenario: subtraction
+ *     Given two integers 
+ *     When one is subtracted from the other 
+ *     Then the result is the difference of the two numbers&lt;/span&gt; 
+ * &lt;/pre&gt;
+ *
+ * &lt;h2&gt;Pending tests&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;em&gt;pending test&lt;/em&gt; is one that has been given a name but is not yet implemented. The purpose of
+ * pending tests is to facilitate a style of testing in which documentation of behavior is sketched
+ * out before tests are written to verify that behavior (and often, before the behavior of
+ * the system being tested is itself implemented). Such sketches form a kind of specification of
+ * what tests and functionality to implement later.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * To support this style of testing, a test can be given a name that specifies one
+ * bit of behavior required by the system being tested. The test can also include some code that
+ * sends more information about the behavior to the reporter when the tests run. At the end of the test,
+ * it can call method &lt;code&gt;pending&lt;/code&gt;, which will cause it to complete abruptly with &lt;code&gt;TestPendingException&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Because tests in ScalaTest can be designated as pending with &lt;code&gt;TestPendingException&lt;/code&gt;, both the test name and any information
+ * sent to the reporter when running the test can appear in the report of a test run. (In other words,
+ * the code of a pending test is executed just like any other test.) However, because the test completes abruptly
+ * with &lt;code&gt;TestPendingException&lt;/code&gt;, the test will be reported as pending, to indicate
+ * the actual test, and possibly the functionality, has not yet been implemented.
+ * You can mark tests as pending in a &lt;code&gt;FeatureSpec&lt;/code&gt; like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ *
+ * class ArithmeticSpec extends FeatureSpec {
+ *
+ *   // Sharing fixture objects via instance variables
+ *   val shared = 5
+ *
+ *   feature(&quot;Integer arithmetic&quot;) {
+ *
+ *     scenario(&quot;addition&quot;) {
+ *       val sum = 2 + 3
+ *       assert(sum === shared)
+ *     }
+ *
+ *     scenario(&quot;subtraction&quot;) (pending)
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * (Note: &quot;&lt;code&gt;(pending)&lt;/code&gt;&quot; is the body of the test. Thus the test contains just one statement, an invocation
+ * of the &lt;code&gt;pending&lt;/code&gt; method, which throws &lt;code&gt;TestPendingException&lt;/code&gt;.)
+ * If you run this version of &lt;code&gt;ArithmeticSpec&lt;/code&gt; with:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * scala&gt; (new ArithmeticSpec).execute()
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * It will run both tests, but report that &lt;code&gt;subtraction&lt;/code&gt; is pending. You'll see:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;Feature: Integer arithmetic 
+ *   Scenario: addition&lt;/span&gt;
+ *   &lt;span class=&quot;stYellow&quot;&gt;Scenario: subtraction (pending)&lt;/span&gt;
+ * &lt;/pre&gt;
+ * 
+ * &lt;p&gt;
+ * One difference between an ignored test and a pending one is that an ignored test is intended to be used during a
+ * significant refactorings of the code under test, when tests break and you don't want to spend the time to fix
+ * all of them immediately. You can mark some of those broken tests as ignored temporarily, so that you can focus the red
+ * bar on just failing tests you actually want to fix immediately. Later you can go back and fix the ignored tests.
+ * In other words, by ignoring some failing tests temporarily, you can more easily notice failed tests that you actually
+ * want to fix. By contrast, a pending test is intended to be used before a test and/or the code under test is written.
+ * Pending indicates you've decided to write a test for a bit of behavior, but either you haven't written the test yet, or
+ * have only written part of it, or perhaps you've written the test but don't want to implement the behavior it tests
+ * until after you've implemented a different bit of behavior you realized you need first. Thus ignored tests are designed
+ * to facilitate refactoring of existing code whereas pending tests are designed to facilitate the creation of new code.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * One other difference between ignored and pending tests is that ignored tests are implemented as a test tag that is
+ * excluded by default. Thus an ignored test is never executed. By contrast, a pending test is implemented as a
+ * test that throws &lt;code&gt;TestPendingException&lt;/code&gt; (which is what calling the &lt;code&gt;pending&lt;/code&gt; method does). Thus
+ * the body of pending tests are executed up until they throw &lt;code&gt;TestPendingException&lt;/code&gt;. The reason for this difference
+ * is that it enables your unfinished test to send &lt;code&gt;InfoProvided&lt;/code&gt; messages to the reporter before it completes
+ * abruptly with &lt;code&gt;TestPendingException&lt;/code&gt;, as shown in the previous example on &lt;code&gt;Informer&lt;/code&gt;s
+ * that used the &lt;code&gt;GivenWhenThen&lt;/code&gt; trait. For example, the following snippet in a &lt;code&gt;FeatureSpec&lt;/code&gt;:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ *   feature(&quot;Integer arithmetic&quot;) {
+ *&amp;nbsp;
+ *     scenario(&quot;addition&quot;) {
+ *       given(&quot;two integers&quot;)
+ *       when(&quot;they are added&quot;)
+ *       then(&quot;the result is the sum of the two numbers&quot;)
+ *       pending
+ *     }
+ *     // ...
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * Would yield the following output when run in the interpreter:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;Feature: Integer arithmetic&lt;/span&gt; 
+ *   &lt;span class=&quot;stYellow&quot;&gt;Scenario: addition (pending)
+ *     Given two integers 
+ *     When they are added 
+ *     Then the result is the sum of the two numbers&lt;/span&gt; 
+ * &lt;/pre&gt;
+ *
+ * &lt;h2&gt;Tagging tests&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;code&gt;FeatureSpec&lt;/code&gt;'s tests may be classified into groups by &lt;em&gt;tagging&lt;/em&gt; them with string names.
+ * As with any suite, when executing a &lt;code&gt;FeatureSpec&lt;/code&gt;, groups of tests can
+ * optionally be included and/or excluded. To tag a &lt;code&gt;FeatureSpec&lt;/code&gt;'s tests,
+ * you pass objects that extend abstract class &lt;code&gt;org.scalatest.Tag&lt;/code&gt; to methods
+ * that register tests, &lt;code&gt;test&lt;/code&gt; and &lt;code&gt;ignore&lt;/code&gt;. Class &lt;code&gt;Tag&lt;/code&gt; takes one parameter, a string name.  If you have
+ * created Java annotation interfaces for use as group names in direct subclasses of &lt;code&gt;org.scalatest.Suite&lt;/code&gt;,
+ * then you will probably want to use group names on your &lt;code&gt;FeatureSpec&lt;/code&gt;s that match. To do so, simply 
+ * pass the fully qualified names of the Java interfaces to the &lt;code&gt;Tag&lt;/code&gt; constructor. For example, if you've
+ * defined Java annotation interfaces with fully qualified names, &lt;code&gt;com.mycompany.tags.SlowTest&lt;/code&gt; and
+ * &lt;code&gt;com.mycompany.tags.DbTest&lt;/code&gt;, then you could
+ * create matching groups for &lt;code&gt;FeatureSpec&lt;/code&gt;s like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.Tag
+ *
+ * object SlowTest extends Tag(&quot;com.mycompany.tags.SlowTest&quot;)
+ * object DbTest extends Tag(&quot;com.mycompany.tags.DbTest&quot;)
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * Given these definitions, you could place &lt;code&gt;FeatureSpec&lt;/code&gt; tests into groups like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ *
+ * class ArithmeticSpec extends FeatureSpec {
+ *
+ *   // Sharing fixture objects via instance variables
+ *   val shared = 5
+ *
+ *   feature(&quot;Integer arithmetic&quot;) {
+ *
+ *     scenario(&quot;addition&quot;, SlowTest) {
+ *       val sum = 2 + 3
+ *       assert(sum === shared)
+ *     }
+ *
+ *     scenario(&quot;subtraction&quot;, SlowTest, DbTest) {
+ *       val diff = 7 - 2
+ *       assert(diff === shared)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * This code marks both tests, &quot;addition&quot; and &quot;subtraction,&quot; with the &lt;code&gt;com.mycompany.tags.SlowTest&lt;/code&gt; tag, 
+ * and test &quot;subtraction&quot; with the &lt;code&gt;com.mycompany.tags.DbTest&lt;/code&gt; tag.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * The &lt;code&gt;run&lt;/code&gt; method takes a &lt;code&gt;Filter&lt;/code&gt;, whose constructor takes an optional
+ * &lt;code&gt;Set[String]&lt;/code&gt; called &lt;code&gt;tagsToInclude&lt;/code&gt; and a &lt;code&gt;Set[String]&lt;/code&gt; called
+ * &lt;code&gt;tagsToExclude&lt;/code&gt;. If &lt;code&gt;tagsToInclude&lt;/code&gt; is &lt;code&gt;None&lt;/code&gt;, all tests will be run
+ * except those those belonging to tags listed in the
+ * &lt;code&gt;tagsToExclude&lt;/code&gt; &lt;code&gt;Set&lt;/code&gt;. If &lt;code&gt;tagsToInclude&lt;/code&gt; is defined, only tests
+ * belonging to tags mentioned in the &lt;code&gt;tagsToInclude&lt;/code&gt; set, and not mentioned in &lt;code&gt;tagsToExclude&lt;/code&gt;,
+ * will be run.
+ * &lt;/p&gt;
+ *
+ * &lt;a name=&quot;sharedFixtures&quot;&gt;&lt;/a&gt;&lt;h2&gt;Shared fixtures&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * A test &lt;em&gt;fixture&lt;/em&gt; is objects or other artifacts (such as files, sockets, database
+ * connections, &lt;em&gt;etc.&lt;/em&gt;) used by tests to do their work.
+ * If a fixture is used by only one test method, then the definitions of the fixture objects can
+ * be local to the method, such as the objects assigned to &lt;code&gt;sum&lt;/code&gt; and &lt;code&gt;diff&lt;/code&gt; in the
+ * previous &lt;code&gt;ExampleSpec&lt;/code&gt; examples. If multiple methods need to share an immutable fixture, one approach
+ * is to assign them to instance variables.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * In some cases, however, shared &lt;em&gt;mutable&lt;/em&gt; fixture objects may be changed by test methods such that
+ * they need to be recreated or reinitialized before each test. Shared resources such
+ * as files or database connections may also need to 
+ * be created and initialized before, and cleaned up after, each test. JUnit 3 offered methods &lt;code&gt;setUp&lt;/code&gt; and
+ * &lt;code&gt;tearDown&lt;/code&gt; for this purpose. In ScalaTest, you can use the &lt;code&gt;BeforeAndAfterEach&lt;/code&gt; trait,
+ * which will be described later, to implement an approach similar to JUnit's &lt;code&gt;setUp&lt;/code&gt;
+ * and &lt;code&gt;tearDown&lt;/code&gt;, however, this approach usually involves reassigning &lt;code&gt;var&lt;/code&gt;s or mutating objects
+ * between tests. Before going that route, you may wish to consider some more functional approaches that
+ * avoid side effects.
+ * &lt;/p&gt;
+ *
+ * &lt;h4&gt;Calling create-fixture methods&lt;/h4&gt;
+ *
+ * &lt;p&gt;
+ * One approach is to write one or more &lt;em&gt;create-fixture&lt;/em&gt; methods
+ * that return a new instance of a needed fixture object (or an holder object containing multiple needed fixture objects) each time it
+ * is called. You can then call a create-fixture method at the beginning of each
+ * test method that needs the fixture, storing the returned object or objects in local variables. Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import collection.mutable.ListBuffer
+ *
+ * class ExampleSpec extends FeatureSpec {
+ * 
+ *   def fixture =
+ *     new {
+ *       val builder = new StringBuilder(&quot;ScalaTest is &quot;)
+ *       val buffer = new ListBuffer[String]
+ *     }
+ * 
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) {
+ *       val f = fixture
+ *       f.builder.append(&quot;easy!&quot;)
+ *       assert(f.builder.toString === &quot;ScalaTest is easy!&quot;)
+ *       assert(f.buffer.isEmpty)
+ *       f.buffer += &quot;sweet&quot;
+ *     }
+ * 
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) {
+ *       val f = fixture
+ *       f.builder.append(&quot;fun!&quot;)
+ *       assert(f.builder.toString === &quot;ScalaTest is fun!&quot;)
+ *       assert(f.buffer.isEmpty)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * The &amp;ldquo;&lt;code&gt;f.&lt;/code&gt;&amp;rdquo; in front of each use of a fixture object provides a visual indication of which objects 
+ * are part of the fixture, but if you prefer, you can import the the members with &amp;ldquo;&lt;code&gt;import f._&lt;/code&gt;&amp;rdquo; and use the names directly.
+ * &lt;/p&gt;
+ *
+ * &lt;h4&gt;Instantiating fixture traits&lt;/h4&gt;
+ *
+ * &lt;p&gt;
+ * A related technique is to place
+ * the fixture objects in a &lt;em&gt;fixture trait&lt;/em&gt; and run your test code in the context of a new anonymous class instance that mixes in
+ * the fixture trait, like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import collection.mutable.ListBuffer
+ * 
+ * class ExampleSpec extends FeatureSpec {
+ * 
+ *   trait Fixture {
+ *     val builder = new StringBuilder(&quot;ScalaTest is &quot;)
+ *     val buffer = new ListBuffer[String]
+ *   }
+ * 
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) {
+ *       new Fixture {
+ *         builder.append(&quot;easy!&quot;)
+ *         assert(builder.toString === &quot;ScalaTest is easy!&quot;)
+ *         assert(buffer.isEmpty)
+ *         buffer += &quot;sweet&quot;
+ *       }
+ *     }
+ * 
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) {
+ *       new Fixture {
+ *         builder.append(&quot;fun!&quot;)
+ *         assert(builder.toString === &quot;ScalaTest is fun!&quot;)
+ *         assert(buffer.isEmpty)
+ *       }
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;h4&gt;Mixing in &lt;code&gt;OneInstancePerTest&lt;/code&gt;&lt;/h4&gt;
+ *
+ * &lt;p&gt;
+ * If every test method requires the same set of
+ * mutable fixture objects, one other approach you can take is make them simply &lt;code&gt;val&lt;/code&gt;s and mix in trait
+ * &lt;a href=&quot;OneInstancePerTest.html&quot;&gt;&lt;code&gt;OneInstancePerTest&lt;/code&gt;&lt;/a&gt;.  If you mix in &lt;code&gt;OneInstancePerTest&lt;/code&gt;, each test
+ * will be run in its own instance of the &lt;code&gt;Suite&lt;/code&gt;, similar to the way JUnit tests are executed. Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.OneInstancePerTest
+ * import collection.mutable.ListBuffer
+ * 
+ * class ExampleSpec extends FeatureSpec with OneInstancePerTest {
+ * 
+ *   val builder = new StringBuilder(&quot;ScalaTest is &quot;)
+ *   val buffer = new ListBuffer[String]
+ * 
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) {
+ *       builder.append(&quot;easy!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is easy!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;sweet&quot;
+ *     }
+ * 
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) {
+ *       builder.append(&quot;fun!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is fun!&quot;)
+ *       assert(buffer.isEmpty)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * Although the create-fixture, fixture-trait, and &lt;code&gt;OneInstancePerTest&lt;/code&gt; approaches take care of setting up a fixture before each
+ * test, they don't address the problem of cleaning up a fixture after the test completes. In this situation, you'll need to either
+ * use side effects or the &lt;em&gt;loan pattern&lt;/em&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;h4&gt;Mixing in &lt;code&gt;BeforeAndAfter&lt;/code&gt;&lt;/h4&gt;
+ *
+ * &lt;p&gt;
+ * One way to use side effects is to mix in the &lt;a href=&quot;BeforeAndAfter.html&quot;&gt;&lt;code&gt;BeforeAndAfter&lt;/code&gt;&lt;/a&gt; trait.
+ * With this trait you can denote a bit of code to run before each test with &lt;code&gt;before&lt;/code&gt; and/or after each test
+ * each test with &lt;code&gt;after&lt;/code&gt;, like this:
+ * &lt;/p&gt;
+ * 
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.BeforeAndAfter
+ * import collection.mutable.ListBuffer
+ * 
+ * class ExampleSpec extends FeatureSpec with BeforeAndAfter {
+ * 
+ *   val builder = new StringBuilder
+ *   val buffer = new ListBuffer[String]
+ * 
+ *   before {
+ *     builder.append(&quot;ScalaTest is &quot;)
+ *   }
+ * 
+ *   after {
+ *     builder.clear()
+ *     buffer.clear()
+ *   }
+ * 
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) {
+ *       builder.append(&quot;easy!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is easy!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;sweet&quot;
+ *     }
+ * 
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) {
+ *       builder.append(&quot;fun!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is fun!&quot;)
+ *       assert(buffer.isEmpty)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ * 
+ * &lt;h4&gt;Overriding &lt;code&gt;withFixture(NoArgTest)&lt;/code&gt;&lt;/h4&gt;
+ *
+ * &lt;p&gt;
+ * An alternate way to take care of setup and cleanup via side effects
+ * is to override &lt;code&gt;withFixture&lt;/code&gt;. Trait &lt;code&gt;Suite&lt;/code&gt;'s implementation of
+ * &lt;code&gt;runTest&lt;/code&gt;, which is inherited by this trait, passes a no-arg test function to &lt;code&gt;withFixture&lt;/code&gt;. It is &lt;code&gt;withFixture&lt;/code&gt;'s
+ * responsibility to invoke that test function.  &lt;code&gt;Suite&lt;/code&gt;'s implementation of &lt;code&gt;withFixture&lt;/code&gt; simply
+ * invokes the function, like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * // Default implementation
+ * protected def withFixture(test: NoArgTest) {
+ *   test()
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * You can, therefore, override &lt;code&gt;withFixture&lt;/code&gt; to perform setup before, and cleanup after, invoking the test function. If
+ * you have cleanup to perform, you should invoke the test function
+ * inside a &lt;code&gt;try&lt;/code&gt; block and perform the cleanup in a &lt;code&gt;finally&lt;/code&gt; clause.
+ * Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import collection.mutable.ListBuffer
+ *
+ * class ExampleSpec extends FeatureSpec {
+ *
+ *   val builder = new StringBuilder
+ *   val buffer = new ListBuffer[String]
+ *
+ *   override def withFixture(test: NoArgTest) {
+ *     builder.append(&quot;ScalaTest is &quot;) // perform setup
+ *     try {
+ *       test() // invoke the test function
+ *     }
+ *     finally {
+ *       builder.clear() // perform cleanup
+ *       buffer.clear()
+ *     }
+ *   }
+ *
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) {
+ *       builder.append(&quot;easy!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is easy!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;sweet&quot;
+ *     }
+ *
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) {
+ *       builder.append(&quot;fun!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is fun!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;clear&quot;
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * Note that the &lt;a href=&quot;Suite$NoArgTest.html&quot;&gt;&lt;code&gt;NoArgTest&lt;/code&gt;&lt;/a&gt; passed to &lt;code&gt;withFixture&lt;/code&gt;, in addition to
+ * an &lt;code&gt;apply&lt;/code&gt; method that executes the test, also includes the test name as well as the &lt;a href=&quot;Suite.html#configMapSection&quot;&gt;config
+ * map&lt;/a&gt; passed to &lt;code&gt;runTest&lt;/code&gt;. Thus you can also use the test name and configuration objects in &lt;code&gt;withFixture&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * The reason you should perform cleanup in a &lt;code&gt;finally&lt;/code&gt; clause is that &lt;code&gt;withFixture&lt;/code&gt; is called by
+ * &lt;code&gt;runTest&lt;/code&gt;, which expects an exception to be thrown to indicate a failed test. Thus when you invoke
+ * the &lt;code&gt;test&lt;/code&gt; function inside &lt;code&gt;withFixture&lt;/code&gt;, it may complete abruptly with an exception. The &lt;code&gt;finally&lt;/code&gt;
+ * clause will ensure the fixture cleanup happens as that exception propagates back up the call stack to &lt;code&gt;runTest&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;h4&gt;Overriding &lt;code&gt;withFixture(OneArgTest)&lt;/code&gt;&lt;/h4&gt;
+ *
+ * &lt;p&gt;
+ * To use the loan pattern, you can extend &lt;code&gt;FixtureFeatureSpec&lt;/code&gt; (from the &lt;code&gt;org.scalatest.fixture&lt;/code&gt; package) instead of
+ * &lt;code&gt;FeatureSpec&lt;/code&gt;. Each test in a &lt;code&gt;FixtureFeatureSpec&lt;/code&gt; takes a fixture as a parameter, allowing you to pass the fixture into
+ * the test. You must indicate the type of the fixture parameter by specifying &lt;code&gt;FixtureParam&lt;/code&gt;, and implement a
+ * &lt;code&gt;withFixture&lt;/code&gt; method that takes a &lt;code&gt;OneArgTest&lt;/code&gt;. This &lt;code&gt;withFixture&lt;/code&gt; method is responsible for
+ * invoking the one-arg test function, so you can perform fixture set up before, and clean up after, invoking and passing
+ * the fixture into the test function. Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.fixture.FixtureFeatureSpec
+ * import java.io.FileWriter
+ * import java.io.File
+ * 
+ * class ExampleSpec extends FixtureFeatureSpec {
+ * 
+ *   final val tmpFile = &quot;temp.txt&quot;
+ * 
+ *   type FixtureParam = FileWriter
+ * 
+ *   def withFixture(test: OneArgTest) {
+ * 
+ *     val writer = new FileWriter(tmpFile) // set up the fixture
+ *     try {
+ *       test(writer) // &quot;loan&quot; the fixture to the test
+ *     }
+ *     finally {
+ *       writer.close() // clean up the fixture
+ *     }
+ *   }
+ * 
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) { writer =&gt;
+ *       writer.write(&quot;Hello, test!&quot;)
+ *       writer.flush()
+ *       assert(new File(tmpFile).length === 12)
+ *     }
+ * 
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) { writer =&gt;
+ *       writer.write(&quot;Hi, test!&quot;)
+ *       writer.flush()
+ *       assert(new File(tmpFile).length === 9)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * For more information, see the &lt;a href=&quot;fixture/FixtureFeatureSpec.html&quot;&gt;documentation for &lt;code&gt;FixtureFeatureSpec&lt;/code&gt;&lt;/a&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;a name=&quot;differentFixtures&quot;&gt;&lt;/a&gt;&lt;h2&gt;Providing different fixtures to different tests&lt;/h2&gt;
+ * 
+ * &lt;p&gt;
+ * If different tests in the same &lt;code&gt;FeatureSpec&lt;/code&gt; require different fixtures, you can combine the previous techniques and
+ * provide each test with just the fixture or fixtures it needs. Here's an example in which a &lt;code&gt;StringBuilder&lt;/code&gt; and a
+ * &lt;code&gt;ListBuffer&lt;/code&gt; are provided via fixture traits, and file writer (that requires cleanup) is provided via the loan pattern:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import java.io.FileWriter
+ * import java.io.File
+ * import collection.mutable.ListBuffer
+ * import org.scalatest.FeatureSpec
+ * 
+ * class ExampleSpec extends FeatureSpec {
+ * 
+ *   final val tmpFile = &quot;temp.txt&quot;
+ * 
+ *   trait Builder {
+ *     val builder = new StringBuilder(&quot;ScalaTest is &quot;)
+ *   }
+ * 
+ *   trait Buffer {
+ *     val buffer = ListBuffer(&quot;ScalaTest&quot;, &quot;is&quot;)
+ *   }
+ * 
+ *   def withWriter(testCode: FileWriter =&gt; Any) {
+ *     val writer = new FileWriter(tmpFile) // set up the fixture
+ *     try {
+ *       testCode(writer) // &quot;loan&quot; the fixture to the test
+ *     }
+ *     finally {
+ *       writer.close() // clean up the fixture
+ *     }
+ *   }
+ * 
+ *   scenario(&quot;user is productive using the test framework&quot;) { // This test needs the StringBuilder fixture
+ *     new Builder {
+ *       builder.append(&quot;productive!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is productive!&quot;)
+ *     }
+ *   }
+ * 
+ *   scenario(&quot;tests are readable&quot;) { // This test needs the ListBuffer[String] fixture
+ *     new Buffer {
+ *       buffer += (&quot;readable!&quot;)
+ *       assert(buffer === List(&quot;ScalaTest&quot;, &quot;is&quot;, &quot;readable!&quot;))
+ *     }
+ *   }
+ * 
+ *   scenario(&quot;the test framework is user-friendly&quot;) { // This test needs the FileWriter fixture
+ *     withWriter { writer =&gt;
+ *       writer.write(&quot;Hello, user!&quot;)
+ *       writer.flush()
+ *       assert(new File(tmpFile).length === 12)
+ *     }
+ *   }
+ * 
+ *   scenario(&quot;test code is clear and concise&quot;) { // This test needs the StringBuilder and ListBuffer
+ *     new Builder with Buffer {
+ *       builder.append(&quot;clear!&quot;)
+ *       buffer += (&quot;concise!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is clear!&quot;)
+ *       assert(buffer === List(&quot;ScalaTest&quot;, &quot;is&quot;, &quot;concise!&quot;))
+ *     }
+ *   }
+ * 
+ *   scenario(&quot;user composes test artifacts&quot;) { // This test needs all three fixtures
+ *     new Builder with Buffer {
+ *       builder.append(&quot;clear!&quot;)
+ *       buffer += (&quot;concise!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is clear!&quot;)
+ *       assert(buffer === List(&quot;ScalaTest&quot;, &quot;is&quot;, &quot;concise!&quot;))
+ *       withWriter { writer =&gt;
+ *         writer.write(builder.toString)
+ *         writer.flush()
+ *         assert(new File(tmpFile).length === 19)
+ *       }
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * In the previous example, &lt;code&gt;&quot;user is productive using the test framework&lt;/code&gt; uses only the &lt;code&gt;StringBuilder&lt;/code&gt; fixture, so it just instantiates
+ * a &lt;code&gt;new Builder&lt;/code&gt;, whereas &lt;code&gt;tests are readable&lt;/code&gt; uses only the &lt;code&gt;ListBuffer&lt;/code&gt; fixture, so it just intantiates
+ * a &lt;code&gt;new Buffer&lt;/code&gt;. &lt;code&gt;the test framework is user-friendly&lt;/code&gt; needs just the &lt;code&gt;FileWriter&lt;/code&gt; fixture, so it invokes
+ * &lt;code&gt;withWriter&lt;/code&gt;, which prepares and passes a &lt;code&gt;FileWriter&lt;/code&gt; to the test (and takes care of closing it afterwords).
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Two tests need multiple fixtures: &lt;code&gt;test code is clear and concise&lt;/code&gt; needs both the &lt;code&gt;StringBuilder&lt;/code&gt; and the
+ * &lt;code&gt;ListBuffer&lt;/code&gt;, so it instantiates a class that mixes in both fixture traits with &lt;code&gt;new Builder with Buffer&lt;/code&gt;.
+ * &lt;code&gt;user composes test artifacts&lt;/code&gt; needs all three fixtures, so in addition to &lt;code&gt;new Builder with Buffer&lt;/code&gt; it also invokes
+ * &lt;code&gt;withWriter&lt;/code&gt;, wrapping just the of the test code that needs the fixture.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Note that in this case, the loan pattern is being implemented via the &lt;code&gt;withWriter&lt;/code&gt; method that takes a function, not
+ * by overriding &lt;code&gt;FixtureFeatureSpec&lt;/code&gt;'s &lt;code&gt;withFixture(OneArgTest)&lt;/code&gt; method. &lt;code&gt;FixtureFeatureSpec&lt;/code&gt; makes the most sense
+ * if all (or at least most) tests need the same fixture, whereas in this &lt;code&gt;Suite&lt;/code&gt; only two tests need the
+ * &lt;code&gt;FileWriter&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * In the previous example, the &lt;code&gt;withWriter&lt;/code&gt; method passed an object into
+ * the tests. Passing fixture objects into tests is generally a good idea when possible, but sometimes a side affect is unavoidable.
+ * For example, if you need to initialize a database running on a server across a network, your with-fixture 
+ * method will likely have nothing to pass. In such cases, simply create a with-fixture method that takes a by-name parameter and
+ * performs setup and cleanup via side effects, like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * def withDataInDatabase(test: =&gt; Any) {
+ *   // initialize the database across the network
+ *   try {
+ *     test // &quot;loan&quot; the initialized database to the test
+ *   }
+ *   finally {
+ *     // clean up the database
+ *   }
+ * }
+ * &lt;/pre&gt;
+ * 
+ * &lt;p&gt;
+ * You can then use it like:
+ * &lt;/p&gt;
+ * 
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * scenario(&quot;user logs in&quot;) {
+ *   withDataInDatabase {
+ *     // test user logging in scenario
+ *   }
+ * }
+ * &lt;/pre&gt;
+ * 
+ * &lt;a name=&quot;composingFixtures&quot;&gt;&lt;/a&gt;&lt;h2&gt;Composing stackable fixture traits&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * In larger projects, teams often end up with several different fixtures that test classes need in different combinations,
+ * and possibly initialized (and cleaned up) in different orders. A good way to accomplish this in ScalaTest is to factor the individual
+ * fixtures into traits that can be composed using the &lt;em&gt;stackable trait&lt;/em&gt; pattern. This can be done, for example, by placing
+ * &lt;code&gt;withFixture&lt;/code&gt; methods in several traits, each of which call &lt;code&gt;super.withFixture&lt;/code&gt;. Here's an example in
+ * which the &lt;code&gt;StringBuilder&lt;/code&gt; and &lt;code&gt;ListBuffer[String]&lt;/code&gt; fixtures used in the previous examples have been
+ * factored out into two &lt;em&gt;stackable fixture traits&lt;/em&gt; named &lt;code&gt;Builder&lt;/code&gt; and &lt;code&gt;Buffer&lt;/code&gt;:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.AbstractSuite
+ * import collection.mutable.ListBuffer
+ * 
+ * trait Builder extends AbstractSuite { this: Suite =&gt;
+ *
+ *   val builder = new StringBuilder
+ *
+ *   abstract override def withFixture(test: NoArgTest) {
+ *     builder.append(&quot;ScalaTest is &quot;)
+ *     try {
+ *       super.withFixture(test) // To be stackable, must call super.withFixture
+ *     }
+ *     finally {
+ *       builder.clear()
+ *     }
+ *   }
+ * }
+ *
+ * trait Buffer extends AbstractSuite { this: Suite =&gt;
+ *
+ *   val buffer = new ListBuffer[String]
+ *
+ *   abstract override def withFixture(test: NoArgTest) {
+ *     try {
+ *       super.withFixture(test) // To be stackable, must call super.withFixture
+ *     }
+ *     finally {
+ *       buffer.clear()
+ *     }
+ *   }
+ * }
+ * 
+ * class ExampleSpec extends FeatureSpec with Builder with Buffer {
+ * 
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) {
+ *       builder.append(&quot;easy!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is easy!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;sweet&quot;
+ *     }
+ * 
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) {
+ *       builder.append(&quot;fun!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is fun!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;clear&quot;
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * By mixing in both the &lt;code&gt;Builder&lt;/code&gt; and &lt;code&gt;Buffer&lt;/code&gt; traits, &lt;code&gt;ExampleSpec&lt;/code&gt; gets both fixtures, which will be
+ * initialized before each test and cleaned up after. The order the traits are mixed together determines the order of execution.
+ * In this case, &lt;code&gt;Builder&lt;/code&gt; is &quot;super&quot; to &lt;/code&gt;Buffer&lt;/code&gt;. If you wanted &lt;code&gt;Buffer&lt;/code&gt; to be &quot;super&quot;
+ * to &lt;code&gt;Builder&lt;/code&gt;, you need only switch the order you mix them together, like this: 
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * class Example2Spec extends FeatureSpec with Buffer with Builder
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * And if you only need one fixture you mix in only that trait:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * class Example3Spec extends FeatureSpec with Builder
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * Another way to create stackable fixture traits is by extending the &lt;a href=&quot;BeforeAndAfterEach.html&quot;&gt;&lt;code&gt;BeforeAndAfterEach&lt;/code&gt;&lt;/a&gt;
+ * and/or &lt;a href=&quot;BeforeAndAfterAll.html&quot;&gt;&lt;code&gt;BeforeAndAfterAll&lt;/code&gt;&lt;/a&gt; traits.
+ * &lt;code&gt;BeforeAndAfterEach&lt;/code&gt; has a &lt;code&gt;beforeEach&lt;/code&gt; method that will be run before each test (like JUnit's &lt;code&gt;setUp&lt;/code&gt;),
+ * and an &lt;code&gt;afterEach&lt;/code&gt; method that will be run after (like JUnit's &lt;code&gt;tearDown&lt;/code&gt;).
+ * Similarly, &lt;code&gt;BeforeAndAfterAll&lt;/code&gt; has a &lt;code&gt;beforeAll&lt;/code&gt; method that will be run before all tests,
+ * and an &lt;code&gt;afterAll&lt;/code&gt; method that will be run after all tests. Here's what the previously shown example would look like if it
+ * were rewritten to use the &lt;code&gt;BeforeAndAfterEach&lt;/code&gt; methods instead of &lt;code&gt;withFixture&lt;/code&gt;:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.BeforeAndAfterEach
+ * import collection.mutable.ListBuffer
+ * 
+ * trait Builder extends BeforeAndAfterEach { this: Suite =&gt;
+ * 
+ *   val builder = new StringBuilder
+ * 
+ *   override def beforeEach() {
+ *     builder.append(&quot;ScalaTest is &quot;)
+ *     super.beforeEach() // To be stackable, must call super.beforeEach
+ *   }
+ * 
+ *   override def afterEach() {
+ *     try {
+ *       super.afterEach() // To be stackable, must call super.afterEach
+ *     }
+ *     finally {
+ *       builder.clear()
+ *     }
+ *   }
+ * }
+ * 
+ * trait Buffer extends BeforeAndAfterEach { this: Suite =&gt;
+ * 
+ *   val buffer = new ListBuffer[String]
+ * 
+ *   override def afterEach() {
+ *     try {
+ *       super.afterEach() // To be stackable, must call super.afterEach
+ *     }
+ *     finally {
+ *       buffer.clear()
+ *     }
+ *   }
+ * }
+ * 
+ * class ExampleSpec extends FeatureSpec with Builder with Buffer {
+ * 
+ *   feature(&quot;Fixtures can be shared&quot;) {
+ * 
+ *     scenario(&quot;user learns how to share fixtures&quot;) {
+ *       builder.append(&quot;easy!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is easy!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;sweet&quot;
+ *     }
+ * 
+ *     scenario(&quot;user enjoys writing tests with shared fixtures&quot;) {
+ *       builder.append(&quot;fun!&quot;)
+ *       assert(builder.toString === &quot;ScalaTest is fun!&quot;)
+ *       assert(buffer.isEmpty)
+ *       buffer += &quot;clear&quot;
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * To get the same ordering as &lt;code&gt;withFixture&lt;/code&gt;, place your &lt;code&gt;super.beforeEach&lt;/code&gt; call at the end of each
+ * &lt;code&gt;beforeEach&lt;/code&gt; method, and the &lt;code&gt;super.afterEach&lt;/code&gt; call at the beginning of each &lt;code&gt;afterEach&lt;/code&gt;
+ * method, as shown in the previous example. It is a good idea to invoke &lt;code&gt;super.afterEach&lt;/code&gt; in a &lt;code&gt;try&lt;/code&gt;
+ * block and perform cleanup in a &lt;code&gt;finally&lt;/code&gt; clause, as shown in the previous example, because this ensures the
+ * cleanup code is performed even if &lt;code&gt;super.afterAll&lt;/code&gt; throws an exception.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * One difference to bear in mind between the before-and-after traits and the &lt;code&gt;withFixture&lt;/code&gt; methods, is that if
+ * a &lt;code&gt;withFixture&lt;/code&gt; method completes abruptly with an exception, it is considered a failed test. By contrast, if any of the
+ * methods on the before-and-after traits (&lt;em&gt;i.e.&lt;/em&gt;, &lt;code&gt;before&lt;/code&gt;  and &lt;code&gt;after&lt;/code&gt; of &lt;code&gt;BeforeAndAfter&lt;/code&gt;,
+ * &lt;code&gt;beforeEach&lt;/code&gt; and &lt;code&gt;afterEach&lt;/code&gt; of &lt;code&gt;BeforeAndAfterEach&lt;/code&gt;,
+ * and &lt;code&gt;beforeAll&lt;/code&gt; and &lt;code&gt;afterAll&lt;/code&gt; of &lt;code&gt;BeforeAndAfterAll&lt;/code&gt;) complete abruptly, it is considered a
+ * failed suite, which will result in a &lt;a href=&quot;events/SuiteAborted.html&quot;&gt;&lt;code&gt;SuiteAborted&lt;/code&gt;&lt;/a&gt; event.
+ * &lt;/p&gt;
+ * 
+ * &lt;a name=&quot;SharedScenarios&quot;&gt;&lt;/a&gt;&lt;h2&gt;Shared scenarios&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * Sometimes you may want to run the same test code on different fixture objects. In other words, you may want to write tests that are &quot;shared&quot;
+ * by different fixture objects.
+ * To accomplish this in a &lt;code&gt;FeatureSpec&lt;/code&gt;, you first place shared tests (&lt;em&gt;i.e.&lt;/em&gt;, shared scenarios) in
+ * &lt;em&gt;behavior functions&lt;/em&gt;. These behavior functions will be
+ * invoked during the construction phase of any &lt;code&gt;FeatureSpec&lt;/code&gt; that uses them, so that the scenarios they contain will
+ * be registered as scenarios in that &lt;code&gt;FeatureSpec&lt;/code&gt;.
+ * For example, given this stack class:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import scala.collection.mutable.ListBuffer
+ * 
+ * class Stack[T] {
+ *
+ *   val MAX = 10
+ *   private var buf = new ListBuffer[T]
+ *
+ *   def push(o: T) {
+ *     if (!full)
+ *       o +: buf
+ *     else
+ *       throw new IllegalStateException(&quot;can't push onto a full stack&quot;)
+ *   }
+ *
+ *   def pop(): T = {
+ *     if (!empty)
+ *       buf.remove(0)
+ *     else
+ *       throw new IllegalStateException(&quot;can't pop an empty stack&quot;)
+ *   }
+ *
+ *   def peek: T = {
+ *     if (!empty)
+ *       buf(0)
+ *     else
+ *       throw new IllegalStateException(&quot;can't pop an empty stack&quot;)
+ *   }
+ *
+ *   def full: Boolean = buf.size == MAX
+ *   def empty: Boolean = buf.size == 0
+ *   def size = buf.size
+ *
+ *   override def toString = buf.mkString(&quot;Stack(&quot;, &quot;, &quot;, &quot;)&quot;)
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * You may want to test the &lt;code&gt;Stack&lt;/code&gt; class in different states: empty, full, with one item, with one item less than capacity,
+ * &lt;em&gt;etc&lt;/em&gt;. You may find you have several scenarios that make sense any time the stack is non-empty. Thus you'd ideally want to run
+ * those same scenarios for three stack fixture objects: a full stack, a stack with a one item, and a stack with one item less than
+ * capacity. With shared tests, you can factor these scenarios out into a behavior function, into which you pass the
+ * stack fixture to use when running the tests. So in your &lt;code&gt;FeatureSpec&lt;/code&gt; for stack, you'd invoke the
+ * behavior function three times, passing in each of the three stack fixtures so that the shared scenarios are run for all three fixtures.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * You can define a behavior function that encapsulates these shared scenarios inside the &lt;code&gt;FeatureSpec&lt;/code&gt; that uses them. If they are shared
+ * between different &lt;code&gt;FeatureSpec&lt;/code&gt;s, however, you could also define them in a separate trait that is mixed into
+ * each &lt;code&gt;FeatureSpec&lt;/code&gt; that uses them.
+ * &lt;a name=&quot;StackBehaviors&quot;&gt;For&lt;/a&gt; example, here the &lt;code&gt;nonEmptyStack&lt;/code&gt; behavior function (in this case, a
+ * behavior &lt;em&gt;method&lt;/em&gt;) is defined in a trait along with another
+ * method containing shared scenarios for non-full stacks:
+ * &lt;/p&gt;
+ * 
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.GivenWhenThen
+ * import org.scalatestexamples.helpers.Stack
+ * 
+ * trait FeatureSpecStackBehaviors { this: FeatureSpec with GivenWhenThen =&gt;
+ * 
+ *   def nonEmptyStack(createNonEmptyStack: =&gt; Stack[Int], lastItemAdded: Int) {
+ * 
+ *     scenario(&quot;empty is invoked on this non-empty stack: &quot; + createNonEmptyStack.toString) {
+ * 
+ *       given(&quot;a non-empty stack&quot;)
+ *       val stack = createNonEmptyStack
+ * 
+ *       when(&quot;empty is invoked on the stack&quot;)
+ *       then(&quot;empty returns false&quot;)
+ *       assert(!stack.empty)
+ *     }
+ * 
+ *     scenario(&quot;peek is invoked on this non-empty stack: &quot; + createNonEmptyStack.toString) {
+ * 
+ *       given(&quot;a non-empty stack&quot;)
+ *       val stack = createNonEmptyStack
+ *       val size = stack.size
+ * 
+ *       when(&quot;peek is invoked on the stack&quot;)
+ *       then(&quot;peek returns the last item added&quot;)
+ *       assert(stack.peek === lastItemAdded)
+ * 
+ *       and(&quot;the size of the stack is the same as before&quot;)
+ *       assert(stack.size === size)
+ *     }
+ * 
+ *     scenario(&quot;pop is invoked on this non-empty stack: &quot; + createNonEmptyStack.toString) {
+ * 
+ *       given(&quot;a non-empty stack&quot;)
+ *       val stack = createNonEmptyStack
+ *       val size = stack.size
+ * 
+ *       when(&quot;pop is invoked on the stack&quot;)
+ *       then(&quot;pop returns the last item added&quot;)
+ *       assert(stack.pop === lastItemAdded)
+ * 
+ *       and(&quot;the size of the stack one less than before&quot;)
+ *       assert(stack.size === size - 1)
+ *     }
+ *   }
+ *   
+ *   def nonFullStack(createNonFullStack: =&gt; Stack[Int]) {
+ *       
+ *     scenario(&quot;full is invoked on this non-full stack: &quot; + createNonFullStack.toString) {
+ * 
+ *       given(&quot;a non-full stack&quot;)
+ *       val stack = createNonFullStack
+ * 
+ *       when(&quot;full is invoked on the stack&quot;)
+ *       then(&quot;full returns false&quot;)
+ *       assert(!stack.full)
+ *     }
+ *       
+ *     scenario(&quot;push is invoked on this non-full stack: &quot; + createNonFullStack.toString) {
+ * 
+ *       given(&quot;a non-full stack&quot;)
+ *       val stack = createNonFullStack
+ *       val size = stack.size
+ * 
+ *       when(&quot;push is invoked on the stack&quot;)
+ *       stack.push(7)
+ * 
+ *       then(&quot;the size of the stack is one greater than before&quot;)
+ *       assert(stack.size === size + 1)
+ * 
+ *       and(&quot;the top of the stack contains the pushed value&quot;)
+ *       assert(stack.peek === 7)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * Given these behavior functions, you could invoke them directly, but &lt;code&gt;FeatureSpec&lt;/code&gt; offers a DSL for the purpose,
+ * which looks like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * scenariosFor(nonEmptyStack(stackWithOneItem, lastValuePushed))
+ * scenariosFor(nonFullStack(stackWithOneItem))
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * If you prefer to use an imperative style to change fixtures, for example by mixing in &lt;code&gt;BeforeAndAfterEach&lt;/code&gt; and
+ * reassigning a &lt;code&gt;stack&lt;/code&gt; &lt;code&gt;var&lt;/code&gt; in &lt;code&gt;beforeEach&lt;/code&gt;, you could write your behavior functions
+ * in the context of that &lt;code&gt;var&lt;/code&gt;, which means you wouldn't need to pass in the stack fixture because it would be
+ * in scope already inside the behavior function. In that case, your code would look like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * scenariosFor(nonEmptyStack) // assuming lastValuePushed is also in scope inside nonEmptyStack
+ * scenariosFor(nonFullStack)
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * The recommended style, however, is the functional, pass-all-the-needed-values-in style. Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.FeatureSpec
+ * import org.scalatest.GivenWhenThen
+ * import org.scalatestexamples.helpers.Stack
+ * 
+ * class StackFeatureSpec extends FeatureSpec with GivenWhenThen with FeatureSpecStackBehaviors {
+ * 
+ *   // Stack fixture creation methods
+ *   def emptyStack = new Stack[Int]
+ *  
+ *   def fullStack = {
+ *     val stack = new Stack[Int]
+ *     for (i &lt;- 0 until stack.MAX)
+ *       stack.push(i)
+ *     stack
+ *   }
+ *  
+ *   def stackWithOneItem = {
+ *     val stack = new Stack[Int]
+ *     stack.push(9)
+ *     stack
+ *   }
+ *  
+ *   def stackWithOneItemLessThanCapacity = {
+ *     val stack = new Stack[Int]
+ *     for (i &lt;- 1 to 9)
+ *       stack.push(i)
+ *     stack
+ *   }
+ *  
+ *   val lastValuePushed = 9
+ *  
+ *   feature(&quot;A Stack is pushed and popped&quot;) {
+ *  
+ *     scenario(&quot;empty is invoked on an empty stack&quot;) {
+ * 
+ *       given(&quot;an empty stack&quot;)
+ *       val stack = emptyStack
+ * 
+ *       when(&quot;empty is invoked on the stack&quot;)
+ *       then(&quot;empty returns true&quot;)
+ *       assert(stack.empty)
+ *     }
+ *  
+ *     scenario(&quot;peek is invoked on an empty stack&quot;) {
+ * 
+ *       given(&quot;an empty stack&quot;)
+ *       val stack = emptyStack
+ * 
+ *       when(&quot;peek is invoked on the stack&quot;)
+ *       then(&quot;peek throws IllegalStateException&quot;)
+ *       intercept[IllegalStateException] {
+ *         stack.peek
+ *       }
+ *     }
+ *  
+ *     scenario(&quot;pop is invoked on an empty stack&quot;) {
+ * 
+ *       given(&quot;an empty stack&quot;)
+ *       val stack = emptyStack
+ * 
+ *       when(&quot;pop is invoked on the stack&quot;)
+ *       then(&quot;pop throws IllegalStateException&quot;)
+ *       intercept[IllegalStateException] {
+ *         emptyStack.pop
+ *       }
+ *     }
+ *  
+ *     scenariosFor(nonEmptyStack(stackWithOneItem, lastValuePushed))
+ *     scenariosFor(nonFullStack(stackWithOneItem))
+ *  
+ *     scenariosFor(nonEmptyStack(stackWithOneItemLessThanCapacity, lastValuePushed))
+ *     scenariosFor(nonFullStack(stackWithOneItemLessThanCapacity))
+ *  
+ *     scenario(&quot;full is invoked on a full stack&quot;) {
+ * 
+ *       given(&quot;an full stack&quot;)
+ *       val stack = fullStack
+ * 
+ *       when(&quot;full is invoked on the stack&quot;)
+ *       then(&quot;full returns true&quot;)
+ *       assert(stack.full)
+ *     }
+ *  
+ *     scenariosFor(nonEmptyStack(fullStack, lastValuePushed))
+ *  
+ *     scenario(&quot;push is invoked on a full stack&quot;) {
+ * 
+ *       given(&quot;an full stack&quot;)
+ *       val stack = fullStack
+ * 
+ *       when(&quot;push is invoked on the stack&quot;)
+ *       then(&quot;push throws IllegalStateException&quot;)
+ *       intercept[IllegalStateException] {
+ *         stack.push(10)
+ *       }
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * If you load these classes into the Scala interpreter (with scalatest's JAR file on the class path), and execute it,
+ * you'll see:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * scala&gt; (new StackFeatureSpec).execute()
+ * &lt;span class=&quot;stGreen&quot;&gt;Feature: A Stack is pushed and popped 
+ *   Scenario: empty is invoked on an empty stack
+ *     Given an empty stack 
+ *     When empty is invoked on the stack 
+ *     Then empty returns true 
+ *   Scenario: peek is invoked on an empty stack
+ *     Given an empty stack 
+ *     When peek is invoked on the stack 
+ *     Then peek throws IllegalStateException 
+ *   Scenario: pop is invoked on an empty stack
+ *     Given an empty stack 
+ *     When pop is invoked on the stack 
+ *     Then pop throws IllegalStateException 
+ *   Scenario: empty is invoked on this non-empty stack: Stack(9)
+ *     Given a non-empty stack 
+ *     When empty is invoked on the stack 
+ *     Then empty returns false 
+ *   Scenario: peek is invoked on this non-empty stack: Stack(9)
+ *     Given a non-empty stack 
+ *     When peek is invoked on the stack 
+ *     Then peek returns the last item added 
+ *     And the size of the stack is the same as before 
+ *   Scenario: pop is invoked on this non-empty stack: Stack(9)
+ *     Given a non-empty stack 
+ *     When pop is invoked on the stack 
+ *     Then pop returns the last item added 
+ *     And the size of the stack one less than before 
+ *   Scenario: full is invoked on this non-full stack: Stack(9)
+ *     Given a non-full stack 
+ *     When full is invoked on the stack 
+ *     Then full returns false 
+ *   Scenario: push is invoked on this non-full stack: Stack(9)
+ *     Given a non-full stack 
+ *     When push is invoked on the stack 
+ *     Then the size of the stack is one greater than before 
+ *     And the top of the stack contains the pushed value 
+ *   Scenario: empty is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)
+ *     Given a non-empty stack 
+ *     When empty is invoked on the stack 
+ *     Then empty returns false 
+ *   Scenario: peek is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)
+ *     Given a non-empty stack 
+ *     When peek is invoked on the stack 
+ *     Then peek returns the last item added 
+ *     And the size of the stack is the same as before 
+ *   Scenario: pop is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)
+ *     Given a non-empty stack 
+ *     When pop is invoked on the stack 
+ *     Then pop returns the last item added 
+ *     And the size of the stack one less than before 
+ *   Scenario: full is invoked on this non-full stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)
+ *     Given a non-full stack 
+ *     When full is invoked on the stack 
+ *     Then full returns false 
+ *   Scenario: push is invoked on this non-full stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)
+ *     Given a non-full stack 
+ *     When push is invoked on the stack 
+ *     Then the size of the stack is one greater than before 
+ *     And the top of the stack contains the pushed value 
+ *   Scenario: full is invoked on a full stack
+ *     Given an full stack 
+ *     When full is invoked on the stack 
+ *     Then full returns true 
+ *   Scenario: empty is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+ *     Given a non-empty stack 
+ *     When empty is invoked on the stack 
+ *     Then empty returns false 
+ *   Scenario: peek is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+ *     Given a non-empty stack 
+ *     When peek is invoked on the stack 
+ *     Then peek returns the last item added 
+ *     And the size of the stack is the same as before 
+ *   Scenario: pop is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+ *     Given a non-empty stack 
+ *     When pop is invoked on the stack 
+ *     Then pop returns the last item added 
+ *     And the size of the stack one less than before 
+ *   Scenario: push is invoked on a full stack
+ *     Given an full stack 
+ *     When push is invoked on the stack 
+ *     Then push throws IllegalStateException&lt;/span&gt; 
+ * &lt;/pre&gt;
+ * 
+ * &lt;p&gt;
+ * One thing to keep in mind when using shared tests is that in ScalaTest, each test in a suite must have a unique name.
+ * If you register the same tests repeatedly in the same suite, one problem you may encounter is an exception at runtime
+ * complaining that multiple tests are being registered with the same test name.
+ * In a &lt;code&gt;FeatureSpec&lt;/code&gt; there is no nesting construct analogous to &lt;code&gt;Spec&lt;/code&gt;'s &lt;code&gt;describe&lt;/code&gt; clause.
+ * Therefore, you need to do a bit of
+ * extra work to ensure that the test names are unique. If a duplicate test name problem shows up in a
+ * &lt;code&gt;FeatureSpec&lt;/code&gt;, you'll need to pass in a prefix or suffix string to add to each test name. You can pass this string
+ * the same way you pass any other data needed by the shared tests, or just call &lt;code&gt;toString&lt;/code&gt; on the shared fixture object.
+ * This is the approach taken by the previous &lt;code&gt;FeatureSpecStackBehaviors&lt;/code&gt; example.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Given this &lt;code&gt;FeatureSpecStackBehaviors&lt;/code&gt; trait, calling it with the &lt;code&gt;stackWithOneItem&lt;/code&gt; fixture, like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * scenariosFor(nonEmptyStack(stackWithOneItem, lastValuePushed))
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * yields test names:
+ * &lt;/p&gt;
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;&lt;code&gt;empty is invoked on this non-empty stack: Stack(9)&lt;/code&gt;&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;peek is invoked on this non-empty stack: Stack(9)&lt;/code&gt;&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;pop is invoked on this non-empty stack: Stack(9)&lt;/code&gt;&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;
+ * Whereas calling it with the &lt;code&gt;stackWithOneItemLessThanCapacity&lt;/code&gt; fixture, like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * scenariosFor(nonEmptyStack(stackWithOneItemLessThanCapacity, lastValuePushed))
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * yields different test names:
+ * &lt;/p&gt;
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;&lt;code&gt;empty is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)&lt;/code&gt;&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;peek is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)&lt;/code&gt;&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;pop is invoked on this non-empty stack: Stack(9, 8, 7, 6, 5, 4, 3, 2, 1)&lt;/code&gt;&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Bill Venners
+ */</span>
+<span class="keyword">trait</span> <a title="trait FeatureSpec extends java.lang.Object with org.scalatest.Suite with ScalaObject" id="10049">FeatureSpec</a> <span title="ScalaObject" class="keyword">extends</span> <a href="Suite.scala.html#10073" title="org.scalatest.Suite">Suite</a> <span class="delimiter">{</span> thisSuite =&gt;
+
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">val</span> <a title="org.scalatest.Engine" id="42005">engine</a> = <span title="org.scalatest.Engine" class="keyword">new</span> <a href="Engine.scala.html#10262" title="org.scalatest.Engine">Engine</a><span class="delimiter">(</span><span title="java.lang.String(&quot;concurrentFeatureSpecMod&quot;)" class="string">&quot;concurrentFeatureSpecMod&quot;</span>, <span title="java.lang.String(&quot;FeatureSpec&quot;)" class="string">&quot;FeatureSpec&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">import</span> <a href="#42005" title="=&gt; org.scalatest.Engine">engine</a>._
+
+  <span class="comment">/**
+   * Returns an &lt;code&gt;Informer&lt;/code&gt; that during test execution will forward strings (and other objects) passed to its
+   * &lt;code&gt;apply&lt;/code&gt; method to the current reporter. If invoked in a constructor, it
+   * will register the passed string for forwarding later during test execution. If invoked while this
+   * &lt;code&gt;FeatureSpec&lt;/code&gt; is being executed, such as from inside a test function, it will forward the information to
+   * the current reporter immediately. If invoked at any other time, it will
+   * throw an exception. This method can be called safely by any thread.
+   */</span>
+  <span class="keyword">implicit</span> <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; org.scalatest.Informer" id="42008">info</a>: <a href="Informer.scala.html#9884" title="org.scalatest.Informer">Informer</a> = <a href="Engine.scala.html#36495" title="=&gt; java.util.concurrent.atomic.AtomicReference[org.scalatest.Informer]">atomicInformer</a>.<span title="()org.scalatest.Informer">get</span>
+
+  <span class="comment">/**
+   * Register a test with the given spec text, optional tags, and test function value that takes no arguments.
+   * An invocation of this method is called an &amp;#8220;example.&amp;#8221;
+   *
+   * This method will register the test for later execution via an invocation of one of the &lt;code&gt;execute&lt;/code&gt;
+   * methods. The name of the test will be a concatenation of the text of all surrounding describers,
+   * from outside in, and the passed spec text, with one space placed between each item. (See the documenation
+   * for &lt;code&gt;testNames&lt;/code&gt; for an example.) The resulting test name must not have been registered previously on
+   * this &lt;code&gt;Spec&lt;/code&gt; instance.
+   *
+   * @param specText the specification text, which will be combined with the descText of any surrounding describers
+   * to form the test name
+   * @param testTags the optional list of tags for this test
+   * @param testFun the test function
+   * @throws DuplicateTestNameException if a test with the same name has been registered previously
+   * @throws TestRegistrationClosedException if invoked after &lt;code&gt;run&lt;/code&gt; has been invoked on this suite
+   * @throws NullPointerException if &lt;code&gt;specText&lt;/code&gt; or any passed test tag is &lt;code&gt;null&lt;/code&gt;
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(specText: String, testTags: org.scalatest.Tag*)(testFun: =&gt; Unit)Unit" id="42009">scenario</a><span class="delimiter">(</span><a title="String" id="42023">specText</a>: <span title="String">String</span>, <a title="org.scalatest.Tag*" id="42024">testTags</a>: <span title="org.scalatest.Tag*">Tag</span>*<span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; Unit" id="42025">testFun</a>: =&gt; Unit<span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <a href="Engine.scala.html#36508" title="(testText: String, testFun: () =&gt; Unit, testRegistrationClosedResourceName: String, sourceFileName: String, methodName: String, testTags: org.scalatest.Tag*)String">registerTest</a><span title="Unit" class="delimiter">(</span><a href="Resources.scala.html#27793" title="(resourceName: String, o1: AnyRef*)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;scenario&quot;)" class="string">&quot;scenario&quot;</span>, <a href="#42023" title="String">specText</a><span class="delimiter">)</span>, <a href="#42025" title="=&gt; Unit">testFun</a> _, <span title="java.lang.String(&quot;scenarioCannotAppearInsideAnotherScenario&quot;)" class="string">&quot;scenarioCannotAppearInsideAnotherScenario&quot;</span>, <span title="java.lang.String(&quot;FeatureSpec.scala&quot;)" class="string">&quot;FeatureSpec.scala&quot;</span>, <span title="java.lang.String(&quot;scenario&quot;)" class="string">&quot;scenario&quot;</span>, <a href="#42024" title="org.scalatest.Tag*">testTags</a>: _*<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Register a test to ignore, which has the given spec text, optional tags, and test function value that takes no arguments.
+   * This method will register the test for later ignoring via an invocation of one of the &lt;code&gt;execute&lt;/code&gt;
+   * methods. This method exists to make it easy to ignore an existing test by changing the call to &lt;code&gt;it&lt;/code&gt;
+   * to &lt;code&gt;ignore&lt;/code&gt; without deleting or commenting out the actual test code. The test will not be executed, but a
+   * report will be sent that indicates the test was ignored. The name of the test will be a concatenation of the text of all surrounding describers,
+   * from outside in, and the passed spec text, with one space placed between each item. (See the documenation
+   * for &lt;code&gt;testNames&lt;/code&gt; for an example.) The resulting test name must not have been registered previously on
+   * this &lt;code&gt;Spec&lt;/code&gt; instance.
+   *
+   * @param specText the specification text, which will be combined with the descText of any surrounding describers
+   * to form the test name
+   * @param testTags the optional list of tags for this test
+   * @param testFun the test function
+   * @throws DuplicateTestNameException if a test with the same name has been registered previously
+   * @throws TestRegistrationClosedException if invoked after &lt;code&gt;run&lt;/code&gt; has been invoked on this suite
+   * @throws NullPointerException if &lt;code&gt;specText&lt;/code&gt; or any passed test tag is &lt;code&gt;null&lt;/code&gt;
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(specText: String, testTags: org.scalatest.Tag*)(testFun: =&gt; Unit)Unit" id="42010">ignore</a><span class="delimiter">(</span><a title="String" id="42042">specText</a>: <span title="String">String</span>, <a title="org.scalatest.Tag*" id="42043">testTags</a>: <span title="org.scalatest.Tag*">Tag</span>*<span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; Unit" id="42044">testFun</a>: =&gt; Unit<span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="Engine.scala.html#36509" title="(testText: String, f: () =&gt; Unit, testRegistrationClosedResourceName: String, sourceFileName: String, methodName: String, testTags: org.scalatest.Tag*)Unit">registerIgnoredTest</a><span class="delimiter">(</span><a href="Resources.scala.html#27793" title="(resourceName: String, o1: AnyRef*)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;scenario&quot;)" class="string">&quot;scenario&quot;</span>, <a href="#42042" title="String">specText</a><span class="delimiter">)</span>, <a href="#42044" title="=&gt; Unit">testFun</a> _, <span title="java.lang.String(&quot;ignoreCannotAppearInsideAScenario&quot;)" class="string">&quot;ignoreCannotAppearInsideAScenario&quot;</span>, <span title="java.lang.String(&quot;FeatureSpec.scala&quot;)" class="string">&quot;FeatureSpec.scala&quot;</span>, <span title="java.lang.String(&quot;ignore&quot;)" class="string">&quot;ignore&quot;</span>, <a href="#42043" title="org.scalatest.Tag*">testTags</a>: _*<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Describe a &amp;#8220;subject&amp;#8221; being specified and tested by the passed function value. The
+   * passed function value may contain more describers (defined with &lt;code&gt;describe&lt;/code&gt;) and/or tests
+   * (defined with &lt;code&gt;it&lt;/code&gt;). This trait's implementation of this method will register the
+   * description string and immediately invoke the passed function.
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(description: String)(fun: =&gt; Unit)Unit" id="42011">feature</a><span class="delimiter">(</span><a title="String" id="42059">description</a>: <span title="String">String</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; Unit" id="42060">fun</a>: =&gt; Unit<span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="Engine.scala.html#36507" title="=&gt; Boolean">currentBranchIsTrunk</a><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="Resources.scala.html#27791" title="(resourceName: String)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cantNestFeatureClauses&quot;)" class="string">&quot;cantNestFeatureClauses&quot;</span><span class="delimiter">)</span>, <a href="StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;FeatureSpec.scala&quot;)" class="string">&quot;FeatureSpec.scala&quot;</span>, <span title="java.lang.String(&quot;feature&quot;)" class="string">&quot;feature&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <a href="Engine.scala.html#36505" title="(description: String, childPrefix: Option[String], fun: =&gt; Unit, registrationClosedResource: String, sourceFile: String, methodName: String)Unit">registerNestedBranch</a><span class="delimiter">(</span><a href="#42059" title="String">description</a>, <span title="object None">None</span>, <a href="#42060" title="=&gt; Unit">fun</a>, <span title="java.lang.String(&quot;featureCannotAppearInsideAScenario&quot;)" class="string">&quot;featureCannotAppearInsideAScenario&quot;</span>, <span title="java.lang.String(&quot;FeatureSpec.scala&quot;)" class="string">&quot;FeatureSpec.scala&quot;</span>, <span title="java.lang.String(&quot;feature&quot;)" class="string">&quot;feature&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * A &lt;code&gt;Map&lt;/code&gt; whose keys are &lt;code&gt;String&lt;/code&gt; tag names to which tests in this &lt;code&gt;Spec&lt;/code&gt; belong, and values
+   * the &lt;code&gt;Set&lt;/code&gt; of test names that belong to each tag. If this &lt;code&gt;FeatureSpec&lt;/code&gt; contains no tags, this method returns an empty &lt;code&gt;Map&lt;/code&gt;.
+   *
+   * &lt;p&gt;
+   * This trait's implementation returns tags that were passed as strings contained in &lt;code&gt;Tag&lt;/code&gt; objects passed to 
+   * methods &lt;code&gt;test&lt;/code&gt; and &lt;code&gt;ignore&lt;/code&gt;. 
+   * &lt;/p&gt;
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Map[String,Set[String]]" id="42012">tags</a>: <span title="Map[String,Set[String]]">Map</span><span class="delimiter">[</span>String, Set<span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="Engine.scala.html#36491" title="=&gt; java.util.concurrent.atomic.AtomicReference[FeatureSpec.this.engine.Bundle]">atomic</a>.<span title="()FeatureSpec.this.engine.Bundle">get</span>.<a href="Engine.scala.html#36530" title="=&gt; Map[String,Set[String]]">tagsMap</a>
+
+  <span class="comment">/**
+   * Run a test. This trait's implementation runs the test registered with the name specified by
+   * &lt;code&gt;testName&lt;/code&gt;. Each test's name is a concatenation of the text of all describers surrounding a test,
+   * from outside in, and the test's  spec text, with one space placed between each item. (See the documenation
+   * for &lt;code&gt;testNames&lt;/code&gt; for an example.)
+   *
+   * @param testName the name of one test to execute.
+   * @param reporter the &lt;code&gt;Reporter&lt;/code&gt; to which results will be reported
+   * @param stopper the &lt;code&gt;Stopper&lt;/code&gt; that will be consulted to determine whether to stop execution early.
+   * @param configMap a &lt;code&gt;Map&lt;/code&gt; of properties that can be used by this &lt;code&gt;Spec&lt;/code&gt;'s executing tests.
+   * @throws NullPointerException if any of &lt;code&gt;testName&lt;/code&gt;, &lt;code&gt;reporter&lt;/code&gt;, &lt;code&gt;stopper&lt;/code&gt;, or &lt;code&gt;configMap&lt;/code&gt;
+   *     is &lt;code&gt;null&lt;/code&gt;.
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">override</span> <span class="keyword">def</span> <a title="(testName: String, reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, configMap: Map[String,Any], tracker: org.scalatest.Tracker)Unit" id="42013">runTest</a><span class="delimiter">(</span><a title="String" id="42076">testName</a>: <span title="String">String</span>, <a title="org.scalatest.Reporter" id="42077">reporter</a>: <a href="Reporter.scala.html#10103" title="org.scalatest.Reporter">Reporter</a>, <a title="org.scalatest.Stopper" id="42078">stopper</a>: <a href="Stopper.scala.html#9545" title="org.scalatest.Stopper">Stopper</a>, <a title="Map[String,Any]" id="42079">configMap</a>: <span title="Map[String,Any]">Map</span><span class="delimiter">[</span>String, Any<span class="delimiter">]</span>, <a title="org.scalatest.Tracker" id="42080">tracker</a>: <a href="Tracker.scala.html#9878" title="org.scalatest.Tracker">Tracker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="keyword">def</span> <a title="(theTest: FeatureSpec.this.engine.TestLeaf)Unit" id="42088">invokeWithFixture</a><span class="delimiter">(</span><a title="FeatureSpec.this.engine.TestLeaf" id="42089">theTest</a>: <a href="Engine.scala.html#36479" title="FeatureSpec.this.engine.TestLeaf">TestLeaf</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Map[String,Any]" id="42092">theConfigMap</a> = <a href="#42079" title="Map[String,Any]">configMap</a>
+      <a href="Suite.scala.html#15664" title="(test: FeatureSpec.this.NoArgTest)Unit">withFixture</a><span class="delimiter">(</span>
+        <a href="#42098" title="java.lang.Object with FeatureSpec.this.NoArgTest" class="keyword">new</a> <a title="anonymous class $anon extends java.lang.Object with FeatureSpec.this.NoArgTest" id="42098">NoArgTest</a> <span class="delimiter">{</span>
+          <span class="keyword">def</span> <a title="=&gt; String" id="42103">name</a> = <a href="#42076" title="String">testName</a>
+          <span class="keyword">def</span> <a title="()Unit" id="42104">apply</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#42089" title="FeatureSpec.this.engine.TestLeaf">theTest</a>.<a href="Engine.scala.html#36576" title="()Unit">testFun</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+          <span class="keyword">def</span> <a title="=&gt; Map[String,Any]" id="42105">configMap</a> = <a href="#42092" title="Map[String,Any]">theConfigMap</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="Engine.scala.html#36500" title="(theSuite: org.scalatest.Suite, testName: String, reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, configMap: Map[String,Any], tracker: org.scalatest.Tracker, includeIcon: Boolean, invokeWithFixture: FeatureSpec.this.engine.TestLeaf =&gt; Unit)Unit">runTestImpl</a><span class="delimiter">(</span><a href="#10049" title="org.scalatest.FeatureSpec">thisSuite</a>, <a href="#42076" title="String">testName</a>, <a href="#42077" title="org.scalatest.Reporter">reporter</a>, <a href="#42078" title="org.scalatest.Stopper">stopper</a>, <a href="#42079" title="Map[String,Any]">configMap</a>, <a href="#42080" title="org.scalatest.Tracker">tracker</a>, <span title="Boolean(false)" class="keyword">false</span>, <a href="#42088" title="(theTest: FeatureSpec.this.engine.TestLeaf)Unit">invokeWithFixture</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Run zero to many of this &lt;code&gt;FeatureSpec&lt;/code&gt;'s tests.
+   *
+   * &lt;p&gt;
+   * This method takes a &lt;code&gt;testName&lt;/code&gt; parameter that optionally specifies a test to invoke.
+   * If &lt;code&gt;testName&lt;/code&gt; is &lt;code&gt;Some&lt;/code&gt;, this trait's implementation of this method
+   * invokes &lt;code&gt;runTest&lt;/code&gt; on this object, passing in:
+   * &lt;/p&gt;
+   *
+   * &lt;ul&gt;
+   * &lt;li&gt;&lt;code&gt;testName&lt;/code&gt; - the &lt;code&gt;String&lt;/code&gt; value of the &lt;code&gt;testName&lt;/code&gt; &lt;code&gt;Option&lt;/code&gt; passed
+   *   to this method&lt;/li&gt;
+   * &lt;li&gt;&lt;code&gt;reporter&lt;/code&gt; - the &lt;code&gt;Reporter&lt;/code&gt; passed to this method, or one that wraps and delegates to it&lt;/li&gt;
+   * &lt;li&gt;&lt;code&gt;stopper&lt;/code&gt; - the &lt;code&gt;Stopper&lt;/code&gt; passed to this method, or one that wraps and delegates to it&lt;/li&gt;
+   * &lt;li&gt;&lt;code&gt;configMap&lt;/code&gt; - the &lt;code&gt;configMap&lt;/code&gt; passed to this method, or one that wraps and delegates to it&lt;/li&gt;
+   * &lt;/ul&gt;
+   *
+   * &lt;p&gt;
+   * This method takes a &lt;code&gt;Set&lt;/code&gt; of tag names that should be included (&lt;code&gt;tagsToInclude&lt;/code&gt;), and a &lt;code&gt;Set&lt;/code&gt;
+   * that should be excluded (&lt;code&gt;tagsToExclude&lt;/code&gt;), when deciding which of this &lt;code&gt;Suite&lt;/code&gt;'s tests to execute.
+   * If &lt;code&gt;tagsToInclude&lt;/code&gt; is empty, all tests will be executed
+   * except those those belonging to tags listed in the &lt;code&gt;tagsToExclude&lt;/code&gt; &lt;code&gt;Set&lt;/code&gt;. If &lt;code&gt;tagsToInclude&lt;/code&gt; is non-empty, only tests
+   * belonging to tags mentioned in &lt;code&gt;tagsToInclude&lt;/code&gt;, and not mentioned in &lt;code&gt;tagsToExclude&lt;/code&gt;
+   * will be executed. However, if &lt;code&gt;testName&lt;/code&gt; is &lt;code&gt;Some&lt;/code&gt;, &lt;code&gt;tagsToInclude&lt;/code&gt; and &lt;code&gt;tagsToExclude&lt;/code&gt; are essentially ignored.
+   * Only if &lt;code&gt;testName&lt;/code&gt; is &lt;code&gt;None&lt;/code&gt; will &lt;code&gt;tagsToInclude&lt;/code&gt; and &lt;code&gt;tagsToExclude&lt;/code&gt; be consulted to
+   * determine which of the tests named in the &lt;code&gt;testNames&lt;/code&gt; &lt;code&gt;Set&lt;/code&gt; should be run. For more information on trait tags, see the main documentation for this trait.
+   * &lt;/p&gt;
+   *
+   * &lt;p&gt;
+   * If &lt;code&gt;testName&lt;/code&gt; is &lt;code&gt;None&lt;/code&gt;, this trait's implementation of this method
+   * invokes &lt;code&gt;testNames&lt;/code&gt; on this &lt;code&gt;Suite&lt;/code&gt; to get a &lt;code&gt;Set&lt;/code&gt; of names of tests to potentially execute.
+   * (A &lt;code&gt;testNames&lt;/code&gt; value of &lt;code&gt;None&lt;/code&gt; essentially acts as a wildcard that means all tests in
+   * this &lt;code&gt;Suite&lt;/code&gt; that are selected by &lt;code&gt;tagsToInclude&lt;/code&gt; and &lt;code&gt;tagsToExclude&lt;/code&gt; should be executed.)
+   * For each test in the &lt;code&gt;testName&lt;/code&gt; &lt;code&gt;Set&lt;/code&gt;, in the order
+   * they appear in the iterator obtained by invoking the &lt;code&gt;elements&lt;/code&gt; method on the &lt;code&gt;Set&lt;/code&gt;, this trait's implementation
+   * of this method checks whether the test should be run based on the &lt;code&gt;tagsToInclude&lt;/code&gt; and &lt;code&gt;tagsToExclude&lt;/code&gt; &lt;code&gt;Set&lt;/code&gt;s.
+   * If so, this implementation invokes &lt;code&gt;runTest&lt;/code&gt;, passing in:
+   * &lt;/p&gt;
+   *
+   * &lt;ul&gt;
+   * &lt;li&gt;&lt;code&gt;testName&lt;/code&gt; - the &lt;code&gt;String&lt;/code&gt; name of the test to run (which will be one of the names in the &lt;code&gt;testNames&lt;/code&gt; &lt;code&gt;Set&lt;/code&gt;)&lt;/li&gt;
+   * &lt;li&gt;&lt;code&gt;reporter&lt;/code&gt; - the &lt;code&gt;Reporter&lt;/code&gt; passed to this method, or one that wraps and delegates to it&lt;/li&gt;
+   * &lt;li&gt;&lt;code&gt;stopper&lt;/code&gt; - the &lt;code&gt;Stopper&lt;/code&gt; passed to this method, or one that wraps and delegates to it&lt;/li&gt;
+   * &lt;li&gt;&lt;code&gt;configMap&lt;/code&gt; - the &lt;code&gt;configMap&lt;/code&gt; passed to this method, or one that wraps and delegates to it&lt;/li&gt;
+   * &lt;/ul&gt;
+   *
+   * @param testName an optional name of one test to run. If &lt;code&gt;None&lt;/code&gt;, all relevant tests should be run.
+   *                 I.e., &lt;code&gt;None&lt;/code&gt; acts like a wildcard that means run all relevant tests in this &lt;code&gt;Suite&lt;/code&gt;.
+   * @param reporter the &lt;code&gt;Reporter&lt;/code&gt; to which results will be reported
+   * @param stopper the &lt;code&gt;Stopper&lt;/code&gt; that will be consulted to determine whether to stop execution early.
+   * @param filter a &lt;code&gt;Filter&lt;/code&gt; with which to filter tests based on their tags
+   * @param configMap a &lt;code&gt;Map&lt;/code&gt; of key-value pairs that can be used by the executing &lt;code&gt;Suite&lt;/code&gt; of tests.
+   * @param distributor an optional &lt;code&gt;Distributor&lt;/code&gt;, into which to put nested &lt;code&gt;Suite&lt;/code&gt;s to be run
+   *              by another entity, such as concurrently by a pool of threads. If &lt;code&gt;None&lt;/code&gt;, nested &lt;code&gt;Suite&lt;/code&gt;s will be run sequentially.
+   * @param tracker a &lt;code&gt;Tracker&lt;/code&gt; tracking &lt;code&gt;Ordinal&lt;/code&gt;s being fired by the current thread.
+   * @throws NullPointerException if any of the passed parameters is &lt;code&gt;null&lt;/code&gt;.
+   * @throws IllegalArgumentException if &lt;code&gt;testName&lt;/code&gt; is defined, but no test with the specified test name
+   *     exists in this &lt;code&gt;Suite&lt;/code&gt;
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">override</span> <span class="keyword">def</span> <a title="(testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker)Unit" id="42014">runTests</a><span class="delimiter">(</span><a title="Option[String]" id="42129">testName</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span>, <a title="org.scalatest.Reporter" id="42130">reporter</a>: <a href="Reporter.scala.html#10103" title="org.scalatest.Reporter">Reporter</a>, <a title="org.scalatest.Stopper" id="42131">stopper</a>: <a href="Stopper.scala.html#9545" title="org.scalatest.Stopper">Stopper</a>, <a title="org.scalatest.Filter" id="42132">filter</a>: <a href="Filter.scala.html#10079" title="org.scalatest.Filter">Filter</a>,
+      <a title="Map[String,Any]" id="42133">configMap</a>: <span title="Map[String,Any]">Map</span><span class="delimiter">[</span>String, Any<span class="delimiter">]</span>, <a title="Option[org.scalatest.Distributor]" id="42134">distributor</a>: <span title="Option[org.scalatest.Distributor]">Option</span><span class="delimiter">[</span>Distributor<span class="delimiter">]</span>, <a title="org.scalatest.Tracker" id="42135">tracker</a>: <a href="Tracker.scala.html#9878" title="org.scalatest.Tracker">Tracker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    
+    <a href="Engine.scala.html#36503" title="(theSuite: org.scalatest.Suite, testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker, info: String =&gt; Unit, includeIcon: Boolean, runTest: (String, org.scalatest.Reporter, org.scalatest.Stopper, Map[String,Any], org.scalatest.Tracker) =&gt; Unit)Unit">runTestsImpl</a><span class="delimiter">(</span><a href="#10049" title="org.scalatest.FeatureSpec">thisSuite</a>, <a href="#42129" title="Option[String]">testName</a>, <a href="#42130" title="org.scalatest.Reporter">reporter</a>, <a href="#42131" title="org.scalatest.Stopper">stopper</a>, <a href="#42132" title="org.scalatest.Filter">filter</a>, <a href="#42133" title="Map[String,Any]">configMap</a>, <a href="#42134" title="Option[org.scalatest.Distributor]">distributor</a>, <a href="#42135" title="org.scalatest.Tracker">tracker</a>, <a href="#42008" title="=&gt; org.scalatest.Informer">info</a>, <span title="Boolean(false)" class="keyword">false</span>, <a href="#42013" title="(testName: String, reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, configMap: Map[String,Any], tracker: org.scalatest.Tracker)Unit">runTest</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * An immutable &lt;code&gt;Set&lt;/code&gt; of test names. If this &lt;code&gt;FeatureSpec&lt;/code&gt; contains no tests, this method returns an
+   * empty &lt;code&gt;Set&lt;/code&gt;.
+   *
+   * &lt;p&gt;
+   * This trait's implementation of this method will return a set that contains the names of all registered tests. The set's
+   * iterator will return those names in the order in which the tests were registered. Each test's name is composed
+   * of the concatenation of the text of each surrounding describer, in order from outside in, and the text of the
+   * example itself, with all components separated by a space. For example, consider this &lt;code&gt;FeatureSpec&lt;/code&gt;:
+   * &lt;/p&gt;
+   *
+   * &lt;pre class=&quot;stHighlight&quot;&gt;
+   * import org.scalatest.FeatureSpec
+   *
+   * class StackSpec extends FeatureSpec {
+   *   feature(&quot;A Stack&quot;) {
+   *     scenario(&quot;(when not empty) must allow me to pop&quot;) {}
+   *     scenario(&quot;(when not full) must allow me to push&quot;) {}
+   *   }
+   * }
+   * &lt;/pre&gt;
+   *
+   * &lt;p&gt;
+   * Invoking &lt;code&gt;testNames&lt;/code&gt; on this &lt;code&gt;Spec&lt;/code&gt; will yield a set that contains the following
+   * two test name strings:
+   * &lt;/p&gt;
+   *
+   * &lt;pre&gt;
+   * &quot;A Stack (when not empty) must allow me to pop&quot;
+   * &quot;A Stack (when not full) must allow me to push&quot;
+   * &lt;/pre&gt;
+   */</span>
+  <span class="comment">// override def testNames: Set[String] = ListSet(atomic.get.testsList.map(_.testName): _*)</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Set[String]" id="42015">testNames</a>: <span title="Set[String]">Set</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="comment">// I'm returning a ListSet here so that they tests will be run in registration order</span>
+    <span title="(elems: String*)scala.collection.immutable.ListSet[String]">ListSet</span><span class="delimiter">(</span><a href="Engine.scala.html#36491" title="=&gt; java.util.concurrent.atomic.AtomicReference[FeatureSpec.this.engine.Bundle]">atomic</a>.<span title="()FeatureSpec.this.engine.Bundle">get</span>.<a href="Engine.scala.html#36526" title="=&gt; List[String]">testNamesList</a>.<span title="(implicit evidence$1: ClassManifest[String])Array[String]">toArray</span>: _*<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker)Unit" id="42016">run</a><span class="delimiter">(</span><a title="Option[String]" id="42266">testName</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span>, <a title="org.scalatest.Reporter" id="42267">reporter</a>: <a href="Reporter.scala.html#10103" title="org.scalatest.Reporter">Reporter</a>, <a title="org.scalatest.Stopper" id="42268">stopper</a>: <a href="Stopper.scala.html#9545" title="org.scalatest.Stopper">Stopper</a>, <a title="org.scalatest.Filter" id="42269">filter</a>: <a href="Filter.scala.html#10079" title="org.scalatest.Filter">Filter</a>,
+      <a title="Map[String,Any]" id="42270">configMap</a>: <span title="Map[String,Any]">Map</span><span class="delimiter">[</span>String, Any<span class="delimiter">]</span>, <a title="Option[org.scalatest.Distributor]" id="42271">distributor</a>: <span title="Option[org.scalatest.Distributor]">Option</span><span class="delimiter">[</span>Distributor<span class="delimiter">]</span>, <a title="org.scalatest.Tracker" id="42272">tracker</a>: <a href="Tracker.scala.html#9878" title="org.scalatest.Tracker">Tracker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <a href="Engine.scala.html#36504" title="(theSuite: org.scalatest.Suite, testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker, superRun: (Option[String], org.scalatest.Reporter, org.scalatest.Stopper, org.scalatest.Filter, Map[String,Any], Option[org.scalatest.Distributor], org.scalatest.Tracker) =&gt; Unit)Unit">runImpl</a><span class="delimiter">(</span><a href="#10049" title="org.scalatest.FeatureSpec">thisSuite</a>, <a href="#42266" title="Option[String]">testName</a>, <a href="#42267" title="org.scalatest.Reporter">reporter</a>, <a href="#42268" title="org.scalatest.Stopper">stopper</a>, <a href="#42269" title="org.scalatest.Filter">filter</a>, <a href="#42270" title="Map[String,Any]">configMap</a>, <a href="#42271" title="Option[org.scalatest.Distributor]">distributor</a>, <a href="#42272" title="org.scalatest.Tracker">tracker</a>, <a href="#10049" title="org.scalatest.FeatureSpec" class="keyword">super</a>.<a href="Suite.scala.html#15669" title="(testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker)Unit">run</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Registers shared scenarios.
+   *
+   * &lt;p&gt;
+   * This method enables the following syntax for shared scenarios in a &lt;code&gt;FeatureSpec&lt;/code&gt;:
+   * &lt;/p&gt;
+   *
+   * &lt;pre class=&quot;stHighlight&quot;&gt;
+   * scenariosFor(nonEmptyStack(lastValuePushed))
+   * &lt;/pre&gt;
+   *
+   * &lt;p&gt;
+   * This method just provides syntax sugar intended to make the intent of the code clearer.
+   * Because the parameter passed to it is
+   * type &lt;code&gt;Unit&lt;/code&gt;, the expression will be evaluated before being passed, which
+   * is sufficient to register the shared scenarios. For examples of shared scenarios, see the
+   * &lt;a href=&quot;#SharedScenarios&quot;&gt;Shared scenarios section&lt;/a&gt; in the main documentation for this trait.
+   * &lt;/p&gt;
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(unit: Unit)Unit" id="42017">scenariosFor</a><span class="delimiter">(</span><a title="Unit" id="42291">unit</a>: <span title="Unit">Unit</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span><span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

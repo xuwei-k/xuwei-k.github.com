@@ -1,0 +1,890 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>org/scalatest/concurrent/Conductor.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*
+ * Copyright 2001-2008 Artima, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+<span class="keyword">package</span> org.scalatest.concurrent
+
+<span class="keyword">import</span> org.scalatest._
+<span class="keyword">import</span> <span title="object java.lang.Thread">Thread</span>.<span title="object java.lang.Thread.State">State</span>._
+<span class="keyword">import</span> <a href="PimpedThreadGroup.scala.html#10650" title="object org.scalatest.concurrent.PimpedThreadGroup">PimpedThreadGroup</a>._
+<span class="keyword">import</span> _root_.java.util.concurrent._
+<span class="keyword">import</span> _root_.java.util.concurrent.atomic.AtomicReference
+<span class="keyword">import</span> org.scalatest.<a href="../StackDepthException.scala.html#9555" title="object org.scalatest.StackDepthExceptionHelper">StackDepthExceptionHelper</a>.getStackDepth
+
+<span class="comment">/**
+ * Class that facilitates the testing of classes, traits, and libraries designed
+ * to be used by multiple threads concurrently.
+ *
+ * &lt;p&gt;
+ * A &lt;code&gt;Conductor&lt;/code&gt; conducts a multi-threaded scenario by maintaining
+ * a clock of &quot;beats.&quot; Beats are numbered starting with 0. You can ask a
+ * &lt;code&gt;Conductor&lt;/code&gt; to run threads that interact with the class, trait,
+ * or library (the &lt;em&gt;subject&lt;/em&gt;)
+ * you want to test. A thread can call the &lt;code&gt;Conductor&lt;/code&gt;'s
+ * &lt;code&gt;waitForBeat&lt;/code&gt; method, which will cause the thread to block
+ * until that beat has been reached. The &lt;code&gt;Conductor&lt;/code&gt; will advance
+ * the beat only when all threads participating in the test are blocked. By
+ * tying the timing of thread activities to specific beats, you can write
+ * tests for concurrent systems that have deterministic interleavings of
+ * threads.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;code&gt;Conductor&lt;/code&gt; object has a three-phase lifecycle. It begins its life
+ * in the &lt;em&gt;setup&lt;/em&gt; phase. During this phase, you can start threads by
+ * invoking the &lt;code&gt;thread&lt;/code&gt; method on the &lt;code&gt;Conductor&lt;/code&gt;.
+ * When &lt;code&gt;conduct&lt;/code&gt; is invoked on a &lt;code&gt;Conductor&lt;/code&gt;, it enters
+ * the &lt;em&gt;conducting&lt;/em&gt; phase. During this phase it conducts the one multi-threaded
+ * scenario it was designed to conduct. After all participating threads have exited, either by
+ * returning normally or throwing an exception, the &lt;code&gt;conduct&lt;/code&gt; method
+ * will complete, either by returning normally or throwing an exception. As soon as
+ * the &lt;code&gt;conduct&lt;/code&gt; method completes, the &lt;code&gt;Conductor&lt;/code&gt;
+ * enters its &lt;em&gt;defunct&lt;/em&gt; phase. Once the &lt;code&gt;Conductor&lt;/code&gt; has conducted
+ * a multi-threaded scenario, it is defunct and can't be reused. To run the same test again,
+ * you'll need to create a new instance of &lt;code&gt;Conductor&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Here's an example of the use of &lt;code&gt;Conductor&lt;/code&gt; to test the &lt;code&gt;ArrayBlockingQueue&lt;/code&gt;
+ * class from &lt;code&gt;java.util.concurrent&lt;/code&gt;:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.fixture.FunSuite
+ * import org.scalatest.matchers.ShouldMatchers
+ * import java.util.concurrent.ArrayBlockingQueue
+ *
+ * class ArrayBlockingQueueSuite extends FunSuite with ShouldMatchers {
+ * 
+ *   test(&quot;calling put on a full queue blocks the producer thread&quot;) {
+ *
+ *     val conductor = new Conductor
+ *     import conductor._
+ *
+ *     val buf = new ArrayBlockingQueue[Int](1)
+ * 
+ *     thread(&quot;producer&quot;) {
+ *       buf put 42
+ *       buf put 17
+ *       beat should be (1)
+ *     }
+ * 
+ *     thread(&quot;consumer&quot;) {
+ *       waitForBeat(1)
+ *       buf.take should be (42)
+ *       buf.take should be (17)
+ *     }
+ * 
+ *     whenFinished {
+ *       buf should be ('empty)
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * When the test shown is run, it will create one thread named &lt;em&gt;producer&lt;/em&gt; and another named
+ * &lt;em&gt;consumer&lt;/em&gt;. The producer thread will eventually execute the code passed as a by-name
+ * parameter to &lt;code&gt;thread(&quot;producer&quot;)&lt;/code&gt;:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * buf put 42
+ * buf put 17
+ * beat should be (1)
+ * &lt;/pre&gt;
+ *
+ * Similarly, the consumer thread will eventually execute the code passed as a by-name parameter
+ * to &lt;code&gt;thread(&quot;consumer&quot;)&lt;/code&gt;:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * waitForBeat(1)
+ * buf.take should be (42)
+ * buf.take should be (17)
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * The &lt;code&gt;thread&lt;/code&gt; calls create the threads and starts them, but they will not immediately
+ * execute the by-name parameter passed to them. They will first block, waiting for the &lt;code&gt;Conductor&lt;/code&gt;
+ * to give them a green light to proceed.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * The next call in the test is &lt;code&gt;whenFinished&lt;/code&gt;. This method will first call &lt;code&gt;conduct&lt;/code&gt; on
+ * the &lt;code&gt;Conductor&lt;/code&gt;, which will wait until all threads that were created (in this case, producer and consumer) are
+ * at the &quot;starting line&quot;, &lt;em&gt;i.e.&lt;/em&gt;, they have all started and are blocked, waiting on the green light.
+ * The &lt;code&gt;conduct&lt;/code&gt; method will then give these threads the green light and they will
+ * all start executing their blocks concurrently.
+ * &lt;/p&gt;
+ * 
+ * &lt;p&gt;
+ * When the threads are given the green light, the beat is 0. The first thing the producer thread does is put 42 in
+ * into the queue. As the queue is empty at this point, this succeeds. The producer thread next attempts to put a 17
+ * into the queue, but because the queue has size 1, this can't succeed until the consumer thread has read the 42
+ * from the queue. This hasn't happened yet, so producer blocks. Meanwhile, the consumer thread's first act is to
+ * call &lt;code&gt;waitForBeat(1)&lt;/code&gt;. Because the beat starts out at 0, this call will block the consumer thread.
+ * As a result, once the producer thread has executed &lt;code&gt;buf put 17&lt;/code&gt; and the consumer thread has executed
+ * &lt;code&gt;waitForBeat(1)&lt;/code&gt;, both threads will be blocked.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * The &lt;code&gt;Conductor&lt;/code&gt; maintains a clock that wakes up periodically and checks to see if all threads
+ * participating in the multi-threaded scenario (in this case, producer and consumer) are blocked. If so, it
+ * increments the beat. Thus sometime later the beat will be incremented, from 0 to 1. Because consumer was
+ * waiting for beat 1, it will wake up (&lt;em&gt;i.e.&lt;/em&gt;, the &lt;code&gt;waitForBeat(1)&lt;/code&gt; call will return) and
+ * execute the next line of code in its block, &lt;code&gt;buf.take should be (42)&lt;/code&gt;. This will succeed, because
+ * the producer thread had previously (during beat 0) put 42 into the queue. This act will also make
+ * producer runnable again, because it was blocked on the second &lt;code&gt;put&lt;/code&gt;, which was waiting for another
+ * thread to read that 42.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Now both threads are unblocked and able to execute their next statement. The order is
+ * non-deterministic, and can even be simultaneous if running on multiple cores. If the &lt;code&gt;consumer&lt;/code&gt; thread
+ * happens to execute &lt;code&gt;buf.take should be (17)&lt;/code&gt; first, it will block (&lt;code&gt;buf.take&lt;/code&gt; will not return), because the queue is
+ * at that point empty. At some point later, the producer thread will execute &lt;code&gt;buf put 17&lt;/code&gt;, which will
+ * unblock the consumer thread. Again both threads will be runnable and the order non-deterministic and
+ * possibly simulataneous. The producer thread may charge ahead and run its next statement, &lt;code&gt;beat should be (1)&lt;/code&gt;.
+ * This will succeed because the beat is indeed 1 at this point. As this is the last statement in the producer's block,
+ * the producer thread will exit normally (it won't throw an exception). At some point later the consumer thread will
+ * be allowed to complete its last statement, the &lt;code&gt;buf.take&lt;/code&gt; call will return 17. The consumer thread will
+ * execute &lt;code&gt;17 should be (17)&lt;/code&gt;. This will succeed and as this was the last statement in its block, the consumer will return
+ * normally.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * If either the producer or consumer thread had completed abruptbly with an exception, the &lt;code&gt;conduct&lt;/code&gt; method
+ * (which was called by &lt;code&gt;whenFinished&lt;/code&gt;) would have completed abruptly with an exception to indicate the test
+ * failed. However, since both threads returned normally, &lt;code&gt;conduct&lt;/code&gt; will return. Because &lt;code&gt;conduct&lt;/code&gt; doesn't
+ * throw an exception, &lt;code&gt;whenFinished&lt;/code&gt; will execute the block of code passed as a by-name parameter to it: &lt;code&gt;buf should be ('empty)&lt;/code&gt;.
+ * This will succeed, because the queue is indeed empty at this point. The &lt;code&gt;whenFinished&lt;/code&gt; method will then return, and
+ * because the &lt;code&gt;whenFinished&lt;/code&gt; call was the last statement in the test and it didn't throw an exception, the test completes successfully.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * This test tests &lt;code&gt;ArrayBlockingQueue&lt;/code&gt;, to make sure it works as expected. If there were a bug in &lt;code&gt;ArrayBlockingQueue&lt;/code&gt;
+ * such as a &lt;code&gt;put&lt;/code&gt; called on a full queue didn't block, but instead overwrote the previous value, this test would detect
+ * it. However, if there were a bug in &lt;code&gt;ArrayBlockingQueue&lt;/code&gt; such that a call to &lt;code&gt;take&lt;/code&gt; called on an empty queue
+ * never blocked and always returned 0, this test might not detect it. The reason is that whether the consumer thread will ever call
+ * &lt;code&gt;take&lt;/code&gt; on an empty queue during this test is non-deterministic. It depends on how the threads get scheduled during beat 1.
+ * What is deterministic in this test, because the consumer thread blocks during beat 0, is that the producer thread will definitely 
+ * attempt to write to a full queue. To make sure the other scenario is tested, you'd need a different test:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * test(&quot;calling take on an empty queue blocks the consumer thread&quot;) {
+ *
+ *   val conductor = new Conductor
+ *   import conductor._
+ *
+ *   val buf = new ArrayBlockingQueue[Int](1)
+ *
+ *   thread(&quot;producer&quot;) {
+ *     waitForBeat(1)
+ *     buf put 42
+ *     buf put 17
+ *   }
+ *
+ *   thread(&quot;consumer&quot;) {
+ *     buf.take should be (42)
+ *     buf.take should be (17)
+ *     beat should be (1)
+ *   }
+ *
+ *   whenFinished {
+ *     buf should be ('empty)
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * In this test, the producer thread will block, waiting for beat 1. The consumer thread will invoke &lt;code&gt;buf.take&lt;/code&gt;
+ * as its first act. This will block, because the queue is empty. Because both threads are blocked, the &lt;code&gt;Conductor&lt;/code&gt;
+ * will at some point later increment the beat to 1. This will awaken the producer thread. It will return from its
+ * &lt;code&gt;waitForBeat(1)&lt;/code&gt; call and execute &lt;code&gt;buf put 42&lt;/code&gt;. This will unblock the consumer thread, which will
+ * take the 42, and so on.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * The problem that &lt;code&gt;Conductor&lt;/code&gt; is designed to address is the difficulty, caused by the non-deterministic nature
+ * of thread scheduling, of testing classes, traits, and libraries that are intended to be used by multiple threads.
+ * If you just create a test in which one thread reads from an &lt;code&gt;ArrayBlockingQueue&lt;/code&gt; and
+ * another writes to it, you can't be sure that you have tested all possible interleavings of threads, no matter
+ * how many times you run the test. The purpose of &lt;code&gt;Conductor&lt;/code&gt;
+ * is to enable you to write tests with deterministic interleavings of threads. If you write one test for each possible
+ * interleaving of threads, then you can be sure you have all the scenarios tested. The two tests shown here, for example,
+ * ensure that both the scenario in which a producer thread tries to write to a full queue and the scenario in which a
+ * consumer thread tries to take from an empty queue are tested.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Class &lt;code&gt;Conductor&lt;/code&gt; was inspired by the
+ * &lt;a href=&quot;http://www.cs.umd.edu/projects/PL/multithreadedtc/&quot;&gt;MultithreadedTC project&lt;/a&gt;,
+ * created by Bill Pugh and Nat Ayewah of the University of Maryland.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Although useful, bear in mind that a &lt;code&gt;Conductor&lt;/code&gt;'s results are not guaranteed to be
+ * accurate 100% of the time. The reason is that it uses &lt;code&gt;java.lang.Thread&lt;/code&gt;'s &lt;code&gt;getState&lt;/code&gt; method to
+ * decide when to advance the beat. This kind of use is advised against in the Javadoc documentation for
+ * &lt;code&gt;getState&lt;/code&gt;, which says, &quot;This method is designed for use in monitoring of the system state, not for
+ * synchronization.&quot; In short, sometimes the return value of &lt;code&gt;getState&lt;/code may be inacurrate, which in turn means
+ * that sometimes a &lt;code&gt;Conductor&lt;/code&gt; may decide to advance the beat too early.
+ * &lt;/p&gt;
+ *
+ * @author Josh Cough
+ * @author Bill Venners
+ */</span>
+<span class="keyword">final</span> <span class="keyword">class</span> <a title="class Conductor extends java.lang.Object with ScalaObject" id="10664">Conductor</a> <a href="#10664" title="ScalaObject" class="delimiter">{</a>
+
+  <span class="comment">/**
+   * The metronome used to coordinate between threads.
+   * This clock is advanced by the clock thread.
+   * The clock will not advance if it is frozen.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">val</span> <a title="Conductor.this.Clock" id="56689">clock</a> = <span title="Conductor.this.Clock" class="keyword">new</span> <a href="#56723" title="Conductor.this.Clock">Clock</a>
+
+  <span class="comment">/////////////////////// thread management start //////////////////////////////</span>
+
+  <span class="comment">// place all threads in a new thread group</span>
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">val</span> <a title="java.lang.ThreadGroup" id="56691">threadGroup</a> = <span title="java.lang.ThreadGroup" class="keyword">new</span> <span title="java.lang.ThreadGroup">ThreadGroup</span><span class="delimiter">(</span><span title="java.lang.String(&quot;Orchestra&quot;)" class="string">&quot;Orchestra&quot;</span><span class="delimiter">)</span>
+
+  <span class="comment">// all the threads in this test</span>
+  <span class="comment">// This need not be volatile, because it is initialized with one object and</span>
+  <span class="comment">// that stays forever. Because it is final, it </span>
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">val</span> <a title="java.util.concurrent.CopyOnWriteArrayList[java.lang.Thread]" id="56693">threads</a> = <span title="java.util.concurrent.CopyOnWriteArrayList[java.lang.Thread]" class="keyword">new</span> <span title="java.util.concurrent.CopyOnWriteArrayList[java.lang.Thread]">CopyOnWriteArrayList</span><span class="delimiter">[</span>Thread<span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">// Used to keep track of what names have been created so far, so that</span>
+  <span class="comment">// it can be enforced that the names are unique.</span>
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">val</span> <a title="java.util.concurrent.CopyOnWriteArrayList[String]" id="56695">threadNames</a> = <span title="java.util.concurrent.CopyOnWriteArrayList[String]" class="keyword">new</span> <span title="java.util.concurrent.CopyOnWriteArrayList[String]">CopyOnWriteArrayList</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">// the main test thread</span>
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">val</span> <a title="java.lang.Thread" id="56697">mainThread</a> = <span title="=&gt; java.lang.Thread">currentThread</span>
+
+  <span class="comment">/**
+   * Creates a new thread that will execute the specified function.
+   *
+   * &lt;p&gt;
+   * The name of the thread will be of the form Conductor-Thread-N, where N is some integer.
+   * &lt;/p&gt;
+   *
+   * &lt;p&gt;
+   * This method may be safely called by any thread.
+   * &lt;/p&gt;
+   *
+   * @param fun the function to be executed by the newly created thread
+   * @return the newly created thread
+   */</span>
+  <span class="keyword">def</span> <a title="(fun: =&gt; Unit)java.lang.Thread" id="56699">thread</a><span class="delimiter">(</span><a title="=&gt; Unit" id="57584">fun</a>: =&gt; Unit<span class="delimiter">)</span>: <span title="java.lang.Thread">Thread</span> = <a href="#56700" title="(name: String)(fun: =&gt; Unit)java.lang.Thread">thread</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor-Thread-&quot;)" class="string">&quot;Conductor-Thread-&quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#56693" title="=&gt; java.util.concurrent.CopyOnWriteArrayList[java.lang.Thread]">threads</a>.<span title="()Int">size</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#57584" title="=&gt; Unit">fun</a> <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Creates a new thread with the specified name that will execute the specified function.
+   *
+   * &lt;p&gt;
+   * This method may be safely called by any thread.
+   * &lt;/p&gt;
+   *
+   * @param name the name of the newly created thread
+   * @param fun the function to be executed by the newly created thread
+   * @return the newly created thread
+   */</span>
+  <span class="keyword">def</span> <a title="(name: String)(fun: =&gt; Unit)java.lang.Thread" id="56700">thread</a><span class="delimiter">(</span><a title="String" id="57590">name</a>: <span title="String">String</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; Unit" id="57591">fun</a>: =&gt; Unit<span class="delimiter">)</span>: <span title="java.lang.Thread">Thread</span> = <span class="delimiter">{</span>
+    <a href="#56718" title="=&gt; java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]">currentState</a>.<span title="()Conductor.this.ConductorState">get</span> <span title="java.lang.Thread" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a href="#58467" title="Nothing">TestFinished</a> =&gt;
+        <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27791" title="(resourceName: String)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;threadCalledAfterConductingHasCompleted&quot;)" class="string">&quot;threadCalledAfterConductingHasCompleted&quot;</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;thread&quot;)" class="string">&quot;thread&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <span title="Conductor.this.TestThread">_</span> =&gt;
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#56695" title="=&gt; java.util.concurrent.CopyOnWriteArrayList[String]">threadNames</a> <span title="(x$1: Any)Boolean">contains</span> <a href="#57590" title="String">name</a><span class="delimiter">)</span>
+          <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27793" title="(resourceName: String, o1: AnyRef*)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cantRegisterThreadsWithSameName&quot;)" class="string">&quot;cantRegisterThreadsWithSameName&quot;</span>, <a href="#57590" title="String">name</a><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;thread&quot;)" class="string">&quot;thread&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="Conductor.this.TestThread" id="57608">t</a> = <a href="#57623" title="(name: String, f: () =&gt; Unit)Conductor.this.TestThread">TestThread</a><span class="delimiter">(</span><a href="#57590" title="String">name</a>, <a href="#57591" title="=&gt; Unit">fun</a> _<span class="delimiter">)</span>
+        <a href="#56693" title="=&gt; java.util.concurrent.CopyOnWriteArrayList[java.lang.Thread]">threads</a> <span title="(x$1: java.lang.Thread)Boolean">add</span> <a href="#57608" title="Conductor.this.TestThread">t</a>
+        <a href="#56695" title="=&gt; java.util.concurrent.CopyOnWriteArrayList[String]">threadNames</a> <span title="(x$1: String)Boolean">add</span> <a href="#57590" title="String">name</a>
+        <a href="#57608" title="Conductor.this.TestThread">t</a>.<span title="()Unit">start</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#57608" title="Conductor.this.TestThread">t</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">// The reason that the thread is started immediately, is so that nested threads</span>
+  <span class="comment">// will start immediately, without requiring the user to explicitly start() them.</span>
+  <span class="comment">// Also, so that the thread method can return a Thread object.</span>
+
+  <span class="comment">/*
+   * A test thread runs the given function.
+   * It only does so after it is given permission to do so by the main thread.
+   * The main thread grants permission after it receives notication that
+   * all test threads are ready to go.
+   */</span>
+  <span class="keyword">private</span> case <span class="keyword">class</span> <a title="class TestThread extends java.lang.Thread with ScalaObject with Product with Serializable" id="57623">TestThread</a><a href="#57623" title="ScalaObject" class="delimiter">(</a><a title="String" id="57634">name</a>: <span title="String">String</span>, <a title="() =&gt; Unit" id="57635">f</a>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Unit<span class="delimiter">)</span> <span class="keyword">extends</span> <span title="java.lang.Thread">Thread</span><span class="delimiter">(</span><a href="#56691" title="=&gt; java.lang.ThreadGroup">threadGroup</a>, <a href="#57634" title="String">name</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="comment">// Indicate a TestThread has been created that has not yet started running</span>
+    <a href="#56713" title="=&gt; org.scalatest.concurrent.TestThreadsStartingCounter">testThreadsStartingCounter</a>.<a href="TestThreadsStartingCounter.scala.html#57570" title="()Unit">increment</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="57631">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">try</span> <span class="delimiter">{</span>
+        <span class="comment">// Indicate to the TestThreadsStartingCounter that one more thread is ready to go </span>
+        <a href="#56713" title="=&gt; org.scalatest.concurrent.TestThreadsStartingCounter">testThreadsStartingCounter</a>.<a href="TestThreadsStartingCounter.scala.html#57571" title="()Unit">decrement</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+        <span class="comment">// wait for the main thread to say its ok to go.</span>
+        <a href="#56715" title="=&gt; java.util.concurrent.CountDownLatch">greenLightForTestThreads</a>.<span title="()Unit">await</span>
+
+        <span class="comment">// go</span>
+        <a href="#57635" title="()Unit">f</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a title="Unit" id="57688">t</a> =&gt;
+          <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a>.<span title="()Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="comment">// The mainThread is likely joined to some test thread, so it needs to be awakened. If it</span>
+            <span class="comment">// is joined to this thread, it will wake up shortly because this thread is about to die</span>
+            <span class="comment">// by returning. If it is joined to a different thread, then it needs to be interrupted,</span>
+            <span class="comment">// but this thread can't interrupt it, because then there's a race condition if it is</span>
+            <span class="comment">// actually joined to this thread, between join returning because this thread returns</span>
+            <span class="comment">// or join throwing an InterruptedException. So here just offer the throwable to</span>
+            <span class="comment">// the firstExceptionThrown queue and return. Only the first will be accepted by the queue.</span>
+            <span class="comment">// ThreadDeath exceptions that arise from being stopped will not go in because the queue</span>
+            <span class="comment">// is already full. The clock thread checks the firestExceptionThrown queue each cycle, and</span>
+            <span class="comment">// if it finds it is non-empty, it stops any live thread.</span>
+            <a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a> <span title="(x$1: Throwable)Boolean">offer</span> <a href="#57688" title="java.lang.Throwable">t</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * A BlockingQueue containing the first exception that occured
+   * in test threads, or that was thrown by the clock thread.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.ArrayBlockingQueue[Throwable]" id="56704">firstExceptionThrown</a> = <span title="java.util.concurrent.ArrayBlockingQueue[Throwable]" class="keyword">new</span> <span title="java.util.concurrent.ArrayBlockingQueue[Throwable]">ArrayBlockingQueue</span><span class="delimiter">[</span>Throwable<span class="delimiter">]</span><span class="delimiter">(</span><span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+
+  <span class="comment">// Won't write one that takes clockPeriod and timeout for 1.0. For now people</span>
+  <span class="comment">// can just call conduct(a, b) directly followed by the code they want to run</span>
+  <span class="comment">// afterwords. See if anyone asks for a whenFinished(a, b) {}</span>
+  <span class="comment">/**
+   * Invokes &lt;code&gt;conduct&lt;/code&gt; and after &lt;code&gt;conduct&lt;/code&gt; method returns,
+   * if &lt;code&gt;conduct&lt;/code&gt; returns normally (&lt;em&gt;i.e.&lt;/em&gt;, without throwing
+   * an exception), invokes the passed function.
+   *
+   * &lt;p&gt;
+   * If &lt;code&gt;conduct&lt;/code&gt; completes abruptly with an exception, this method
+   * will complete abruptly with the same exception and not execute the passed
+   * function.
+   * &lt;/p&gt;
+   *
+   * &lt;p&gt;
+   * This method must be called by the thread that instantiated this &lt;code&gt;Conductor&lt;/code&gt;,
+   * and that same thread will invoke &lt;code&gt;conduct&lt;/code&gt; and, if it returns noramlly, execute
+   * the passed function.
+   * &lt;/p&gt;
+   *
+   * &lt;p&gt;
+   * Because &lt;code&gt;whenFinished&lt;/code&gt; invokes &lt;code&gt;conduct&lt;/code&gt;, it can only be invoked
+   * once on a &lt;code&gt;Conductor&lt;/code&gt; instance. As a result, if you need to pass a block of
+   * code to &lt;code&gt;whenFinished&lt;/code&gt; it should be the last statement of your test. If you
+   * don't have a block of code that needs to be run once all the threads have finished
+   * successfully, then you can simply invoke &lt;code&gt;conduct&lt;/code&gt; and never invoke
+   * &lt;code&gt;whenFinished&lt;/code&gt;.
+   * &lt;/p&gt;
+   *
+   * @param fun the function to execute after &lt;code&gt;conduct&lt;/code&gt; call returns
+   * @throws NotAllowedException if the calling thread is not the thread that
+   *   instantiated this &lt;code&gt;Conductor&lt;/code&gt;, or if &lt;code&gt;conduct&lt;/code&gt; has already
+   *    been invoked on this conductor.
+   */</span>
+  <span class="keyword">def</span> <a title="(fun: =&gt; Unit)Unit" id="56706">whenFinished</a><span class="delimiter">(</span><a title="=&gt; Unit" id="57760">fun</a>: =&gt; Unit<span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; java.lang.Thread">currentThread</span> <span title="(x$1: AnyRef)Boolean">!=</span> <a href="#56697" title="=&gt; java.lang.Thread">mainThread</a><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27791" title="(resourceName: String)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;whenFinishedCanOnlyBeCalledByMainThread&quot;)" class="string">&quot;whenFinishedCanOnlyBeCalledByMainThread&quot;</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;whenFinished&quot;)" class="string">&quot;whenFinished&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#56720" title="=&gt; Boolean">conductingHasBegun</a><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27791" title="(resourceName: String)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cannotInvokeWhenFinishedAfterConduct&quot;)" class="string">&quot;cannotInvokeWhenFinishedAfterConduct&quot;</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;whenFinished&quot;)" class="string">&quot;whenFinished&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    
+    <a href="#56717" title="()Unit">conduct</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#57760" title="=&gt; Unit">fun</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Blocks the current thread until the thread beat reaches the
+   * specified value, at which point the current thread will be unblocked.
+   *
+   * @param beat the tick value to wait for
+   * @throws NotAllowedException if the a &lt;code&gt;beat&lt;/code&gt; less than or equal to zero is passed
+   */</span>
+  <span class="keyword">def</span> <a title="(beat: Int)Unit" id="56707">waitForBeat</a><span class="delimiter">(</span><a title="Int" id="57801">beat</a>: <span title="Int">Int</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#57801" title="Int">beat</a> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27791" title="(resourceName: String)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cannotWaitForBeatZero&quot;)" class="string">&quot;cannotWaitForBeatZero&quot;</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;waitForBeat&quot;)" class="string">&quot;waitForBeat&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span> 
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#57801" title="Int">beat</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27791" title="(resourceName: String)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cannotWaitForNegativeBeat&quot;)" class="string">&quot;cannotWaitForNegativeBeat&quot;</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;waitForBeat&quot;)" class="string">&quot;waitForBeat&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span> 
+    <a href="#56689" title="=&gt; Conductor.this.Clock">clock</a> <a href="#56750" title="(beat: Int)Unit">waitForBeat</a> <a href="#57801" title="Int">beat</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * The current value of the thread clock.
+   *
+   * @return the current beat value
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Int" id="56708">beat</a>: <span title="Int">Int</span> = <a href="#56689" title="=&gt; Conductor.this.Clock">clock</a>.<a href="#56749" title="=&gt; Int">currentBeat</a>
+
+  <span class="comment">/**
+   * Executes the passed function with the &lt;code&gt;Conductor&lt;/code&gt; &lt;em&gt;frozen&lt;/em&gt; so that it
+   * won't advance the clock.
+   *
+   * &lt;p&gt;
+   * While the &lt;code&gt;Conductor&lt;/code&gt; is frozen, the beat will not advance. Once the
+   * passed function has completed executing, the &lt;code&gt;Conductor&lt;/code&gt; will be unfrozen
+   * so that the beat will advance when all threads are blocked, as normal.
+   * &lt;/p&gt;
+   *
+   * @param fun the function to execute while the &lt;code&gt;Conductor&lt;/code&gt; is frozen.
+   */</span>
+  <span class="keyword">def</span> <a title="[T](fun: =&gt; T)Unit" id="56709">withConductorFrozen</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="56711">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="57837">fun</a>: =&gt; T<span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#56689" title="=&gt; Conductor.this.Clock">clock</a>.<a href="#56752" title="(fun: =&gt; T)T">withClockFrozen</a><span title="Unit" class="delimiter">(</span><a href="#57837" title="=&gt; T">fun</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Indicates whether the conductor has been frozen.
+   *
+   * &lt;p&gt;
+   * Note: The only way a thread
+   * can freeze the conductor is by calling &lt;code&gt;withConductorFrozen&lt;/code&gt;.
+   * &lt;/p&gt;
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="56712">isConductorFrozen</a>: <span title="Boolean">Boolean</span> = <a href="#56689" title="=&gt; Conductor.this.Clock">clock</a>.<a href="#56755" title="=&gt; Boolean">isFrozen</a>
+
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="org.scalatest.concurrent.TestThreadsStartingCounter" id="56713">testThreadsStartingCounter</a> = <span title="org.scalatest.concurrent.TestThreadsStartingCounter" class="keyword">new</span> <a href="TestThreadsStartingCounter.scala.html#10691" title="org.scalatest.concurrent.TestThreadsStartingCounter">TestThreadsStartingCounter</a>
+
+  <span class="comment">/**
+   * Keeps the test threads from executing their bodies until the main thread
+   * allows them to.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.CountDownLatch" id="56715">greenLightForTestThreads</a> = <span title="java.util.concurrent.CountDownLatch" class="keyword">new</span> <span title="java.util.concurrent.CountDownLatch">CountDownLatch</span><span class="delimiter">(</span><span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Conducts a multithreaded test with a default clock period of 10 milliseconds
+   * and default run limit of 5 seconds.
+   */</span>
+  <span class="keyword">def</span> <a title="()Unit" id="56717">conduct</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="Int" id="57845">DefaultClockPeriod</a> = <span title="Int(10)" class="int">10</span> <span class="comment">// milliseconds</span>
+    <span class="keyword">val</span> <a title="Int" id="57846">DefaultRunLimit</a> = <span title="Int(5)" class="int">5</span> <span class="comment">// seconds</span>
+    <a href="#56721" title="(clockPeriod: Int, timeout: Int)Unit">conduct</a><span class="delimiter">(</span><a href="#57845" title="Int">DefaultClockPeriod</a>, <a href="#57846" title="Int">DefaultRunLimit</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]" id="56718">currentState</a>: <span title="java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]">AtomicReference</span><span class="delimiter">[</span>ConductorState<span class="delimiter">]</span> = <span title="java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]" class="keyword">new</span> <span title="java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]">AtomicReference</span><span class="delimiter">(</span><a href="#58441" title="object Conductor.this.Setup">Setup</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Indicates whether either of the two overloaded &lt;code&gt;conduct&lt;/code&gt; methods
+   * have been invoked.
+   *
+   * &lt;p&gt;
+   * This method returns true if either &lt;code&gt;conduct&lt;/code&gt; method has been invoked. The
+   * &lt;code&gt;conduct&lt;/code&gt; method may have returned or not. (In other words, a &lt;code&gt;true&lt;/code&gt;
+   * result from this method does not mean the &lt;code&gt;conduct&lt;/code&gt; method has returned,
+   * just that it was already been invoked and,therefore, the multi-threaded scenario it
+   * conducts has definitely begun.)
+   * &lt;/p&gt;
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="56720">conductingHasBegun</a>: <span title="Boolean">Boolean</span> = <a href="#56718" title="=&gt; java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]">currentState</a>.<span title="()Conductor.this.ConductorState">get</span>.<a href="#58424" title="=&gt; Boolean">testWasStarted</a>
+
+  <span class="comment">/**
+   * Conducts a multithreaded test with the specified clock period (in milliseconds)
+   * and timeout (in seconds).
+   *
+   * &lt;p&gt;
+   * A &lt;code&gt;Conductor&lt;/code&gt; instance maintains an internal clock, which will wake up
+   * periodically and check to see if it should advance the beat, abort the test, or go back to sleep.
+   * It sleeps &lt;code&gt;clockPeriod&lt;/code&gt; milliseconds each time. It will abort the test
+   * if either deadlock is suspected or the beat has not advanced for the number of
+   * seconds specified as &lt;code&gt;timeout&lt;/code&gt;. Suspected deadlock will be declared if
+   * for some number of consecutive clock cycles, all test threads are in the &lt;code&gt;BLOCKED&lt;/code&gt; or
+   * &lt;code&gt;WAITING&lt;/code&gt; states and none of them are waiting for a beat.
+   * &lt;/p&gt;
+   *
+   * @param clockPeriod The period (in ms) the clock will sleep each time it sleeps
+   * @param timeout The maximum allowed time between successive advances of the beat. If this time
+   *    is exceeded, the Conductor will abort the test.
+   * @throws Throwable The first error or exception that is thrown by one of the test threads, or
+   *    a &lt;code&gt;TestFailedException&lt;/code&gt; if the test was aborted due to a timeout or suspected deadlock.
+   */</span>
+  <span class="keyword">def</span> <a title="(clockPeriod: Int, timeout: Int)Unit" id="56721">conduct</a><span class="delimiter">(</span><a title="Int" id="57797">clockPeriod</a>: <span title="Int">Int</span>, <a title="Int" id="57798">timeout</a>: <span title="Int">Int</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#57797" title="Int">clockPeriod</a> <span title="(x: Int)Boolean">&lt;=</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27793" title="(resourceName: String, o1: AnyRef*)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cannotPassNonPositiveClockPeriod&quot;)" class="string">&quot;cannotPassNonPositiveClockPeriod&quot;</span>, <a href="#57797" title="Int">clockPeriod</a>.<span title="()java.lang.String">toString</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;conduct&quot;)" class="string">&quot;conduct&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#57798" title="Int">timeout</a> <span title="(x: Int)Boolean">&lt;=</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27793" title="(resourceName: String, o1: AnyRef*)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cannotPassNonPositiveTimeout&quot;)" class="string">&quot;cannotPassNonPositiveTimeout&quot;</span>, <a href="#57798" title="Int">timeout</a>.<span title="()java.lang.String">toString</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;conduct&quot;)" class="string">&quot;conduct&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <span class="comment">// if the test was started already, explode</span>
+    <span class="comment">// otherwise, change state to TestStarted                          </span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#56720" title="=&gt; Boolean">conductingHasBegun</a><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <span title="org.scalatest.NotAllowedException" class="keyword">new</span> <a href="../NotAllowedException.scala.html#9725" title="org.scalatest.NotAllowedException">NotAllowedException</a><span class="delimiter">(</span><a href="../Resources.scala.html#27791" title="(resourceName: String)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;cannotCallConductTwice&quot;)" class="string">&quot;cannotCallConductTwice&quot;</span><span class="delimiter">)</span>, <a href="../StackDepthException.scala.html#36443" title="(fileName: String, methodName: String)org.scalatest.StackDepthException =&gt; Int">getStackDepth</a><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor.scala&quot;)" class="string">&quot;Conductor.scala&quot;</span>, <span title="java.lang.String(&quot;conduct&quot;)" class="string">&quot;conduct&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="keyword">else</span>
+      <a href="#56718" title="=&gt; java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]">currentState</a> <span title="(x$1: Conductor.this.ConductorState)Unit">set</span> <a href="#58454" title="object Conductor.this.TestStarted">TestStarted</a>
+
+    <span class="comment">// wait until all threads are definitely ready to go</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#56693" title="=&gt; java.util.concurrent.CopyOnWriteArrayList[java.lang.Thread]">threads</a>.<span title="()Int">size</span> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <a href="#56713" title="=&gt; org.scalatest.concurrent.TestThreadsStartingCounter">testThreadsStartingCounter</a>.<a href="TestThreadsStartingCounter.scala.html#57572" title="()Unit">waitUntilAllTestThreadsHaveStarted</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="comment">// release the latch, allowing all threads to start</span>
+    <span class="comment">// wait for all the test threads to start before starting the clock</span>
+    <a href="#56715" title="=&gt; java.util.concurrent.CountDownLatch">greenLightForTestThreads</a>.<span title="()Unit">countDown</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="comment">// start the clock thread</span>
+    <span class="keyword">val</span> <a title="Conductor.this.ClockThread" id="57857">clockThread</a> = <a href="#57907" title="(clockPeriod: Int, maxRunTime: Int)Conductor.this.ClockThread">ClockThread</a><span class="delimiter">(</span><a href="#57797" title="Int">clockPeriod</a>, <a href="#57798" title="Int">timeout</a><span class="delimiter">)</span>
+    <a href="#57857" title="Conductor.this.ClockThread">clockThread</a>.<span title="()Unit">start</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="comment">// wait until all threads have ended</span>
+    <a href="#56722" title="=&gt; Unit">waitForThreads</a>
+
+    <span class="comment">// change state to test finished</span>
+    <a href="#56718" title="=&gt; java.util.concurrent.atomic.AtomicReference[Conductor.this.ConductorState]">currentState</a> <span title="(x$1: Conductor.this.ConductorState)Unit">set</span> <a href="#58467" title="object Conductor.this.TestFinished">TestFinished</a>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a>.<span title="()Boolean">isEmpty</span><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a>.<span title="()Throwable">peek</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Wait for all of the test case threads to complete, or for one
+   * of the threads to throw an exception, or for the clock thread to
+   * interrupt this (main) thread of execution. When the clock thread
+   * or other threads fail, the error is placed in the shared error array
+   * and thrown by this method.
+   *
+   * @param threads List of all the test case threads and the clock thread
+   */</span>
+  <span class="comment">// Explain how we understand it works: if the thread that's been joined already dies with an exception</span>
+  <span class="comment">// that will go into errors, and this thread that called join will return. If the thread that's been joined returns and doesn't</span>
+  <span class="comment">// die, that means all went well, and join will return and it can loop to the next one.</span>
+  <span class="comment">// There should be no race condition between the last thread being waited on by join, it dies, join</span>
+  <span class="comment">// returns, and after that the error gets into the errors. Because if you look in run() in the</span>
+  <span class="comment">// thread inside createTestThread, the signaling error happens in a catch Throwable block before the thread</span>
+  <span class="comment">// returns.</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; Unit" id="56722">waitForThreads</a> <span class="delimiter">{</span>
+    <span class="keyword">var</span> <a title="Boolean" id="57938">interrupted</a> = <span title="Boolean(false)" class="keyword">false</span>
+    <span title="Unit" class="keyword">while</span><span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#57938" title="Boolean">interrupted</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="PimpedThreadGroup.scala.html#56686" title="implicit org.scalatest.concurrent.PimpedThreadGroup.threadGroupToPimpedThreadGroup : (tg: java.lang.ThreadGroup)org.scalatest.concurrent.PimpedThreadGroup">threadGroup</a>.<a href="PimpedThreadGroup.scala.html#57181" title="=&gt; Boolean">areAnyThreadsAlive</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="PimpedThreadGroup.scala.html#56686" title="implicit org.scalatest.concurrent.PimpedThreadGroup.threadGroupToPimpedThreadGroup : (tg: java.lang.ThreadGroup)org.scalatest.concurrent.PimpedThreadGroup">threadGroup</a>.<a href="PimpedThreadGroup.scala.html#57177" title="=&gt; List[java.lang.Thread]">getThreads</a>.<span title="(f: java.lang.Thread =&gt; Unit)Unit">foreach</span> <a href="#57939" title="()Unit" class="delimiter">{</a> <a title="java.lang.Thread" id="58038">t</a> =&gt;
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#57938" title="Boolean">interrupted</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#58038" title="java.lang.Thread">t</a>.<span title="()Boolean">isAlive</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a>.<span title="()Boolean">isEmpty</span><span class="delimiter">)</span>
+          <span class="keyword">try</span> <span class="delimiter">{</span>
+            <a href="#58038" title="java.lang.Thread">t</a>.<span title="()Unit">join</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span>
+          <span class="keyword">catch</span> <span class="delimiter">{</span>
+            <span class="comment">// main thread will be interrupted if a timeout occurs, deadlock is suspected,</span>
+            <span class="comment">// or a test thread completes abruptly with an exception. Just loop here, because</span>
+            <span class="comment">// firstExceptionThrown should be non-empty after InterruptedException is caught, and</span>
+            <span class="comment">// if not, then I don't know how it got interrupted, but just keep looping.</span>
+            <span class="keyword">case</span> <a title="Unit" id="58041">e</a>: <span title="java.lang.InterruptedException">InterruptedException</span> =&gt;
+              <a href="#57938" title="Boolean">interrupted</a> = <span title="Boolean(true)" class="keyword">true</span>
+          <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+
+
+  <span class="comment">/**
+   * A Clock manages the current beat in a Conductor.
+   * Several duties stem from that responsibility.
+   *
+   * The clock will:
+   *
+   * &lt;ol&gt;
+   * &lt;li&gt;Block a thread until the tick has reached a particular time.&lt;/li&gt;
+   * &lt;li&gt;Report the current time&lt;/li&gt;
+   * &lt;li&gt;Run operations with the clock frozen.&lt;/li&gt;
+   * &lt;/ol&gt;
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">class</span> <a title="class Clock extends java.lang.Object with ScalaObject" id="56723">Clock</a> <a href="#56723" title="ScalaObject" class="delimiter">{</a>
+
+    <span class="keyword">import</span> java.util.concurrent.locks.ReentrantReadWriteLock
+    <span class="keyword">import</span> <a href="PimpedReadWriteLock.scala.html#10653" title="object org.scalatest.concurrent.PimpedReadWriteLock">PimpedReadWriteLock</a>._
+
+    <span class="comment">// clock starts at time 0</span>
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Int" id="56739">currentTime</a> = <span title="Int(0)" class="int">0</span>
+
+    <span class="comment">// methods in Clock that access or modify the private instance vars of this</span>
+    <span class="comment">// Clock are synchronized on the object referenced from lock</span>
+    <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.lang.Object" id="56741">lock</a> = <span title="java.lang.Object" class="keyword">new</span> <span title="java.lang.Object">AnyRef</span>
+
+    <span class="comment">/**
+     * Read locks are acquired when clock is frozen and must be
+     * released before the clock can advance in a advance(). (In a
+     * ReentrantReadWriteLock, multiple threads can hold the read lock (and these
+     * threads might read the value of currentTime (the currentBeat method), or just execute a
+     * function with the clock frozen (the withClockFrozen method). The write lock
+     * of a ReentrantReadWriteLock is exclusive, so only one can hold it, and it
+     * can't be held if there are a thread or threads holding the read lock. This
+     * is why the clock can't advance during a withClockFrozen, because the read
+     * lock is grabbed before the function is executed in withClockFrozen, thus
+     * advance will not be able to acquire the write lock to update currentTime
+     * until after withClockFrozen has released the read lock (and there are no other
+     * threads holding a read lock or the write lock).
+     */</span>
+    <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.locks.ReentrantReadWriteLock" id="56743">rwLock</a> = <span title="java.util.concurrent.locks.ReentrantReadWriteLock" class="keyword">new</span> <span title="java.util.concurrent.locks.ReentrantReadWriteLock">ReentrantReadWriteLock</span>
+
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Int" id="56746">highestBeatBeingWaitedOn</a> = <span title="Int(0)" class="int">0</span>
+
+    <span class="comment">/**
+     * Advance the current beat. In order to do so, the clock will wait
+     * until it has become unfrozen.
+     *
+     * All threads waiting for the clock to advance (they would have been put in the lock
+     * object's wait set by invoking the waitForBeat method) will be notified after the advance.
+     *
+     * Only the clock thread should be calling this.
+     *
+     * If the clock has been frozen by a thread, then that thread will own the readLock. Write
+     * lock can only be acquired when there are no readers, so ticks won't progress while someone
+     * has the clock frozen. Other methods also grab the read lock, like time (which gets
+     * the current beat.)
+     */</span>
+    <span class="keyword">def</span> <a title="()Unit" id="56748">advance</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#56741" title="=&gt; java.lang.Object">lock</a>.<span title="(x$1: Unit)Unit">synchronized</span> <span class="delimiter">{</span>
+        <a href="PimpedReadWriteLock.scala.html#56761" title="implicit org.scalatest.concurrent.PimpedReadWriteLock.pimpMyReadWriteLock : (lock: java.util.concurrent.locks.ReadWriteLock)org.scalatest.concurrent.PimpedReadWriteLock">rwLock</a>.<a href="PimpedReadWriteLock.scala.html#58117" title="(f: =&gt; Unit)Unit">write</a> <span class="delimiter">{</span>
+          <a href="#56739" title="(x$1: Int)Unit">currentTime</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+        <span class="delimiter">}</span>
+        <a href="#56741" title="=&gt; java.lang.Object">lock</a>.<span title="()Unit">notifyAll</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * The current beat.
+     */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="56749">currentBeat</a>: <span title="Int">Int</span> =
+      <a href="#56741" title="=&gt; java.lang.Object">lock</a>.<span title="(x$1: Int)Int">synchronized</span> <span class="delimiter">{</span>
+        <a href="PimpedReadWriteLock.scala.html#56761" title="implicit org.scalatest.concurrent.PimpedReadWriteLock.pimpMyReadWriteLock : (lock: java.util.concurrent.locks.ReadWriteLock)org.scalatest.concurrent.PimpedReadWriteLock">rwLock</a> <a href="PimpedReadWriteLock.scala.html#58111" title="(f: =&gt; Int)Int">read</a> <a href="#56739" title="=&gt; Int">currentTime</a>
+      <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * When wait for beat is called, the current thread will block until
+     * the given beat is reached by the clock.
+     */</span>
+    <span class="keyword">def</span> <a title="(beat: Int)Unit" id="56750">waitForBeat</a><span class="delimiter">(</span><a title="Int" id="56768">beat</a>: <span title="Int">Int</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#56741" title="=&gt; java.lang.Object">lock</a>.<span title="(x$1: Unit)Unit">synchronized</span> <span class="delimiter">{</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#56768" title="Int">beat</a> <span title="(x: Int)Boolean">&gt;</span> <a href="#56746" title="=&gt; Int">highestBeatBeingWaitedOn</a><span class="delimiter">)</span>
+          <a href="#56746" title="(x$1: Int)Unit">highestBeatBeingWaitedOn</a> = <a href="#56768" title="Int">beat</a>
+        <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#56749" title="=&gt; Int">currentBeat</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#56768" title="Int">beat</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#58170" title="()Unit" class="keyword">try</a> <span class="delimiter">{</span>
+            <a href="#56741" title="=&gt; java.lang.Object">lock</a>.<span title="()Unit">wait</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>     <span class="comment">// TODO: this is probably fine, but check JCIP about InterEx again</span>
+            <span class="keyword">case</span> <a title="Nothing" id="58177">e</a>: <span title="java.lang.InterruptedException">InterruptedException</span> =&gt; <span title="Nothing" class="keyword">throw</span> <span title="(x$1: Any)java.lang.AssertionError" class="keyword">new</span> <span title="java.lang.AssertionError">AssertionError</span><span class="delimiter">(</span><a href="#58177" title="java.lang.InterruptedException">e</a><span class="delimiter">)</span>
+          <span class="delimiter">}</span>         <span class="comment">// Actually I&quot;m not sure. Maybe should reset the interupted status</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">// The reason there's no race condition between calling currentBeat in the while and calling</span>
+    <span class="comment">// lock.wait() later (between that) and some other thread incrementing the beat and doing</span>
+    <span class="comment">// a notify that this thread would miss (which it would want to know about if that's the</span>
+    <span class="comment">// new time that it's waiting for) is because both this and the currentBeat method are synchronized</span>
+    <span class="comment">// on the lock.</span>
+
+    <span class="comment">/**
+     * Returns true if any thread is waiting for a beat in the future (greater than the current beat)
+     */</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="56751">isAnyThreadWaitingForABeat</a> = <span class="delimiter">{</span>
+      <a href="#56741" title="=&gt; java.lang.Object">lock</a>.<span title="(x$1: Boolean)Boolean">synchronized</span> <span class="delimiter">{</span> <a href="#56746" title="=&gt; Int">highestBeatBeingWaitedOn</a> <span title="(x: Int)Boolean">&gt;</span> <a href="#56739" title="=&gt; Int">currentTime</a> <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * When the clock is frozen, it will not advance even when all threads
+     * are blocked. Use this to block the current thread with a time limit,
+     * but prevent the clock from advancing due to a waitForBeat(Int) in
+     * another thread.
+     */</span>
+    <span class="keyword">def</span> <a title="[T](fun: =&gt; T)T" id="56752">withClockFrozen</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="56754">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="56783">fun</a>: =&gt; T<span class="delimiter">)</span>: <a href="#56754" title="T">T</a> = <a href="PimpedReadWriteLock.scala.html#56761" title="implicit org.scalatest.concurrent.PimpedReadWriteLock.pimpMyReadWriteLock : (lock: java.util.concurrent.locks.ReadWriteLock)org.scalatest.concurrent.PimpedReadWriteLock">rwLock</a> <a href="PimpedReadWriteLock.scala.html#58111" title="(f: =&gt; T)T">read</a> <a href="#56783" title="=&gt; T">fun</a>
+
+    <span class="comment">/**
+     * Check if the clock has been frozen by any threads.
+     */</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="56755">isFrozen</a>: <span title="Boolean">Boolean</span> = <a href="#56743" title="=&gt; java.util.concurrent.locks.ReentrantReadWriteLock">rwLock</a>.<span title="()Int">getReadLockCount</span> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * The clock thread is the manager of the multi-threaded scenario.
+   * Periodically checks all the test threads and regulates them.
+   * If all the threads are blocked and at least one is waiting for a beat,
+   * the clock advances to the next beat and all waiting threads are notified.
+   * If none of the threads are waiting for a tick or in timed waiting,
+   * a deadlock is detected. The clock thread times out if a thread is in runnable
+   * or all are blocked and one is in timed waiting for longer than the runLimit.
+   *
+   * Algorithm in detail:
+   *
+   * While there are threads alive
+   *
+   *    If there are threads RUNNING
+   *
+   *       If they have been running too long
+   *
+   *          stop the test with a timeout error
+   *
+   *    else if there are threads waiting for a beat
+   *
+   *       advance the clock
+   *
+   *    else if there are threads in TIMED_WAITING
+   *
+   *       increment the deadlock counter
+   *
+   *       if the deadlock counter has reached a threshold
+   *
+   *          stop the test due to potential deadlock
+   *
+   *    sleep clockPeriod ms
+   *
+   *
+   * @param mainThread The main test thread. This thread will be waiting
+   * for all the test threads to finish. It will be interrupted if the
+   * ClockThread detects a deadlock or timeout.
+   *
+   * @param clockPeriod The period (in ms) between checks for the clock
+   *
+   * @param maxRunTime The limit to run the test in seconds
+   */</span>
+  <span class="keyword">private</span> case <span class="keyword">class</span> <a title="class ClockThread extends java.lang.Thread with ScalaObject with Product with Serializable" id="57907">ClockThread</a><a href="#57907" title="ScalaObject" class="delimiter">(</a><a title="Int" id="57929">clockPeriod</a>: <span title="Int">Int</span>, <a title="Int" id="57930">maxRunTime</a>: <span title="Int">Int</span><span class="delimiter">)</span> <span class="keyword">extends</span> <span title="java.lang.Thread">Thread</span><span class="delimiter">(</span><span title="java.lang.String(&quot;Conductor-Clock&quot;)" class="string">&quot;Conductor-Clock&quot;</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="comment">// When a test thread throws an exception, the main thread will stop all the other threads,</span>
+    <span class="comment">// but won't stop the clock thread. This is because the clock thread will simply return after</span>
+    <span class="comment">// all the other threads have died. Thus the clock thread could last beyond the end of the</span>
+    <span class="comment">// application, if the clock period was set high. Thus by making the clock thread a daemon</span>
+    <span class="comment">// thread, it won't keep the application up just because it is still asleep and hasn't noticed</span>
+    <span class="comment">// yet that all the test threads are gone.</span>
+    <a href="#57907" title="ClockThread.this.type" class="keyword">this</a> <span title="(x$1: Boolean)Unit">setDaemon</span> <span title="Boolean(true)" class="keyword">true</span>
+
+    <span class="comment">// used in detecting timeouts</span>
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Long" id="57916">lastProgress</a> = <span title="object java.lang.System">System</span>.<span title="()Long">currentTimeMillis</span>
+
+    <span class="comment">// used in detecting deadlocks</span>
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Int" id="57919">deadlockCount</a> = <span title="Int(0)" class="int">0</span>
+    <span class="keyword">private</span> <span class="keyword">val</span> <a title="Int" id="57921">MaxDeadlockDetectionsBeforeDeadlock</a> = <span title="Int(50)" class="int">50</span>
+
+    <span class="comment">/**
+     * Runs the steps described above.
+     */</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="57923">run</a> <span class="delimiter">{</span>
+      
+      <span class="comment">// While there are threads that are not NEW or TERMINATED. (A thread is</span>
+      <span class="comment">// NEW after it has been instantiated, but run() hasn't been called yet.)</span>
+      <span class="comment">// So this means there are threads that are RUNNABLE, BLOCKED, WAITING, or</span>
+      <span class="comment">// TIMED_WAITING. (BLOCKED is waiting for a lock. WAITING is in the wait set.)</span>
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="PimpedThreadGroup.scala.html#56686" title="implicit org.scalatest.concurrent.PimpedThreadGroup.threadGroupToPimpedThreadGroup : (tg: java.lang.ThreadGroup)org.scalatest.concurrent.PimpedThreadGroup">threadGroup</a>.<a href="PimpedThreadGroup.scala.html#57181" title="=&gt; Boolean">areAnyThreadsAlive</a><span class="delimiter">)</span> <a href="#58219" title="()Unit" class="delimiter">{</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a>.<span title="()Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span class="comment">// If any exception has been thrown, stop any live test thread.</span>
+          <a href="PimpedThreadGroup.scala.html#56686" title="implicit org.scalatest.concurrent.PimpedThreadGroup.threadGroupToPimpedThreadGroup : (tg: java.lang.ThreadGroup)org.scalatest.concurrent.PimpedThreadGroup">threadGroup</a>.<a href="PimpedThreadGroup.scala.html#57177" title="=&gt; List[java.lang.Thread]">getThreads</a>.<span title="(f: java.lang.Thread =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span> <a title="java.lang.Thread" id="58250">t</a> =&gt;
+            <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#58250" title="java.lang.Thread">t</a>.<span title="()Boolean">isAlive</span><span class="delimiter">)</span>
+              <a href="#58250" title="java.lang.Thread">t</a>.<span title="()Unit">stop</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <span class="comment">// If any threads are in the RUNNABLE state, just check to see if there's been</span>
+        <span class="comment">// no progress for more than the timeout amount of time. If RUNNABLE threads</span>
+        <span class="comment">// exist, but the timeout limit has not been reached, then just go</span>
+        <span class="comment">// back to sleep.</span>
+        <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="PimpedThreadGroup.scala.html#56686" title="implicit org.scalatest.concurrent.PimpedThreadGroup.threadGroupToPimpedThreadGroup : (tg: java.lang.ThreadGroup)org.scalatest.concurrent.PimpedThreadGroup">threadGroup</a>.<a href="PimpedThreadGroup.scala.html#57182" title="=&gt; Boolean">areAnyThreadsRunning</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#57924" title="=&gt; Boolean">runningTooLong</a><span class="delimiter">)</span> <a href="#57925" title="()Unit">timeout</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <span class="comment">// No RUNNABLE threads, so if any threads are waiting for a beat, advance</span>
+        <span class="comment">// the beat.</span>
+        <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#56689" title="=&gt; Conductor.this.Clock">clock</a>.<a href="#56751" title="=&gt; Boolean">isAnyThreadWaitingForABeat</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#56689" title="=&gt; Conductor.this.Clock">clock</a>.<a href="#56748" title="()Unit">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>
+          <a href="#57919" title="(x$1: Int)Unit">deadlockCount</a> = <span title="Int(0)" class="int">0</span>
+          <a href="#57916" title="(x$1: Long)Unit">lastProgress</a> = <span title="object java.lang.System">System</span>.<span title="()Long">currentTimeMillis</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="PimpedThreadGroup.scala.html#56686" title="implicit org.scalatest.concurrent.PimpedThreadGroup.threadGroupToPimpedThreadGroup : (tg: java.lang.ThreadGroup)org.scalatest.concurrent.PimpedThreadGroup">threadGroup</a>.<a href="PimpedThreadGroup.scala.html#57183" title="=&gt; Boolean">areAnyThreadsInTimedWaiting</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span class="comment">// At this point, no threads are RUNNABLE, None</span>
+          <span class="comment">// are waiting for a beat, and none are in TimedWaiting.</span>
+          <span class="comment">// If this persists for MaxDeadlockDetectionsBeforeDeadlock,</span>
+          <span class="comment">// go ahead and abort.</span>
+          <a href="#57926" title="()Unit">detectDeadlock</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <span title="object java.lang.Thread">Thread</span> <span title="(x$1: Long)Unit">sleep</span> <a href="#57929" title="=&gt; Long">clockPeriod</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Threads have been running too long (timeout) if
+     * The number of seconds since the last progress are more
+     * than the allowed maximum run time.
+     */</span>
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; Boolean" id="57924">runningTooLong</a> = <span title="object java.lang.System">System</span>.<span title="()Long">currentTimeMillis</span> <span title="(x: Long)Long">-</span> <a href="#57916" title="=&gt; Long">lastProgress</a> <span title="(x: Long)Boolean">&gt;</span> <span title="Long(1000L)" class="long">1000L</span> <span title="(x: Int)Long">*</span> <a href="#57930" title="=&gt; Int">maxRunTime</a>
+
+    <span class="comment">/**
+     * Stop the test due to a timeout.
+     */</span>
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="57925">timeout</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="String" id="58323">errorMessage</a> = <a href="../Resources.scala.html#27793" title="(resourceName: String, o1: AnyRef*)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;testTimedOut&quot;)" class="string">&quot;testTimedOut&quot;</span>, <a href="#57930" title="=&gt; Int">maxRunTime</a>.<span title="()java.lang.String">toString</span><span class="delimiter">)</span>
+      <span class="comment">// The mainThread is likely joined to some test thread, so wake it up. It will look and</span>
+      <span class="comment">// notice that the firstExceptionThrown is no longer empty, and will stop all live test threads,</span>
+      <span class="comment">// then rethrow the rirst exception thrown.</span>
+      <a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a> <span title="(x$1: Throwable)Boolean">offer</span> <span title="(x$1: java.lang.String)java.lang.RuntimeException" class="keyword">new</span> <span title="java.lang.RuntimeException">RuntimeException</span><span class="delimiter">(</span><a href="#58323" title="String">errorMessage</a><span class="delimiter">)</span>
+      <a href="#56697" title="=&gt; java.lang.Thread">mainThread</a>.<span title="()Unit">interrupt</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Determine if there is a deadlock and if so, stop the test.
+     */</span>
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="57926">detectDeadlock</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="comment">// Should never get to &gt;= before ==, but just playing it safe</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#57919" title="=&gt; Int">deadlockCount</a> <span title="(x: Int)Boolean">&gt;=</span> <a href="#57921" title="=&gt; Int">MaxDeadlockDetectionsBeforeDeadlock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// val errorMessage = &quot;Apparent Deadlock! Threads waiting 50 clock periods (&quot; + (clockPeriod * 50) + &quot;ms)&quot;</span>
+         <span class="keyword">val</span> <a title="String" id="58340">errorMessage</a> = <a href="../Resources.scala.html#27793" title="(resourceName: String, o1: AnyRef*)String">Resources</a><span class="delimiter">(</span><span title="java.lang.String(&quot;suspectedDeadlock&quot;)" class="string">&quot;suspectedDeadlock&quot;</span>, <a href="#57921" title="=&gt; Int">MaxDeadlockDetectionsBeforeDeadlock</a>.<span title="()java.lang.String">toString</span>, <span class="delimiter">(</span><a href="#57929" title="=&gt; Int">clockPeriod</a> <span title="(x: Int)Int">*</span> <a href="#57921" title="=&gt; Int">MaxDeadlockDetectionsBeforeDeadlock</a><span class="delimiter">)</span>.<span title="()java.lang.String">toString</span><span class="delimiter">)</span>
+        <a href="#56704" title="=&gt; java.util.concurrent.ArrayBlockingQueue[Throwable]">firstExceptionThrown</a> <span title="(x$1: Throwable)Boolean">offer</span> <span title="(x$1: java.lang.String)java.lang.RuntimeException" class="keyword">new</span> <span title="java.lang.RuntimeException">RuntimeException</span><span class="delimiter">(</span><a href="#58340" title="String">errorMessage</a><span class="delimiter">)</span>
+
+        <span class="comment">// The mainThread is likely joined to some test thread, so wake it up. It will look and</span>
+        <span class="comment">// notice that the firstExceptionThrown is no longer empty, and will stop all live test threads,</span>
+        <span class="comment">// then rethrow the rirst exception thrown.</span>
+        <a href="#56697" title="=&gt; java.lang.Thread">mainThread</a>.<span title="()Unit">interrupt</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <span class="keyword">else</span> <a href="#57919" title="(x$1: Int)Unit">deadlockCount</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Base class for the possible states of the Conductor.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">sealed</span> <span class="keyword">class</span> <a title="class ConductorState extends java.lang.Object with ScalaObject" id="56727">ConductorState</a><a href="#56727" title="ScalaObject" class="delimiter">(</a><span class="keyword">val</span> <a title="Boolean" id="58424">testWasStarted</a>: <span title="Boolean">Boolean</span>, <span class="keyword">val</span> <a title="Boolean" id="58425">testIsFinished</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * The initial state of the Conductor.
+   * Any calls the thread{ ... } will result in started Threads that quickly block waiting for the
+   * main thread to give it the green light.
+   * Any call to conduct will start the test.
+   */</span>
+  <span class="keyword">private</span> case <span class="keyword">object</span> <a href="#58438" title="object Conductor.this.Setup" id="58441">Setup</a> <span title="ScalaObject" class="keyword">extends</span> <a href="#56727" title="Conductor.this.ConductorState">ConductorState</a><span class="delimiter">(</span><span title="Boolean(false)" class="keyword">false</span>, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * The state of the Conductor while its running.
+   * Any calls the thread{ ... } will result in running Threads.
+   * Any further call to conduct will result in an exception.
+   */</span>
+  <span class="keyword">private</span> case <span class="keyword">object</span> <a href="#58451" title="object Conductor.this.TestStarted" id="58454">TestStarted</a> <span title="ScalaObject" class="keyword">extends</span> <a href="#56727" title="Conductor.this.ConductorState">ConductorState</a><span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span>, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * The state of the Conductor after all threads have finished,
+   * and the whenFinished method has completed.
+   * Any calls the thread{ ... } will result in an exception
+   * Any call to conduct will result in an exception.
+   */</span>
+  <span class="keyword">private</span> case <span class="keyword">object</span> <a href="#58464" title="object Conductor.this.TestFinished" id="58467">TestFinished</a> <span title="ScalaObject" class="keyword">extends</span> <a href="#56727" title="Conductor.this.ConductorState">ConductorState</a><span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span>, <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,538 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>org/scalatest/PropSpec.scala</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*
+ * Copyright 2001-2008 Artima, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+<span class="keyword">package</span> org.scalatest
+
+<span class="keyword">import</span> scala.collection.immutable.ListSet
+<span class="keyword">import</span> java.util.ConcurrentModificationException
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicReference
+<span class="keyword">import</span> org.scalatest.<a href="StackDepthException.scala.html#9555" title="object org.scalatest.StackDepthExceptionHelper">StackDepthExceptionHelper</a>.getStackDepth
+<span class="keyword">import</span> org.scalatest.events._
+<span class="keyword">import</span> <a href="Suite.scala.html#10074" title="object org.scalatest.Suite">Suite</a>.anErrorThatShouldCauseAnAbort
+<span class="keyword">import</span> <a href="Suite.scala.html#10074" title="object org.scalatest.Suite">Suite</a>.checkRunTestParamsForNull
+
+<span class="comment">/**
+ * A suite of property-based tests.
+ *
+ * &lt;p&gt;
+ * This trait facilitates a style of testing in which each test is composed
+ * of one property check. Tests are registered via a &quot;&lt;code&gt;property&lt;/code&gt;&quot; method, and given a name and a body.
+ * (A &lt;code&gt;PropSpec&lt;/code&gt; behaves just like a &lt;code&gt;FunSuite&lt;/code&gt;, except &lt;code&gt;test&lt;/code&gt; is replaced with
+ * &lt;code&gt;property&lt;/code&gt;.) You can do anything in the body of the test, but the intention is that you'd check
+ * one property in each test. To write properties in the ScalaCheck style, mix &lt;code&gt;Checkers&lt;/code&gt; into
+ * your &lt;code&gt;PropSpec&lt;/code&gt;. To write them in the ScalaTest style, mix in &lt;code&gt;PropertyChecks&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * For example, given this &lt;code&gt;Fraction&lt;/code&gt; class:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * class Fraction(n: Int, d: Int) {
+ *   require(d != 0)
+ *   require(d != Integer.MIN_VALUE)
+ *   require(n != Integer.MIN_VALUE)
+ *
+ *   val numer = if (d &lt; 0) -1 * n else n
+ *   val denom = d.abs
+ *
+ *   override def toString = numer + &quot; / &quot; + denom
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * You could write a &lt;code&gt;PropSpec&lt;/code&gt; in the ScalaTest property style that specifies the &lt;code&gt;Fraction&lt;/code&gt; behavior like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.PropSpec
+ * import org.scalatest.prop.PropertyChecks
+ * import org.scalatest.matchers.ShouldMatchers
+ *
+ * class FractionSpec extends PropSpec with PropertyChecks with ShouldMatchers {
+ *
+ *   property(&quot;Fraction constructor normalizes numerator and denominator&quot;) {
+ *
+ *     forAll { (n: Int, d: Int) =&gt;
+ *       whenever (d != 0 &amp;&amp; d != Integer.MIN_VALUE
+ *           &amp;&amp; n != Integer.MIN_VALUE) {
+ *
+ *         val f = new Fraction(n, d)
+ *
+ *         if (n &lt; 0 &amp;&amp; d &lt; 0 || n &gt; 0 &amp;&amp; d &gt; 0)
+ *           f.numer should be &gt; 0
+ *         else if (n != 0)
+ *           f.numer should be &lt; 0
+ *         else
+ *           f.numer should be === 0
+ *
+ *         f.denom should be &gt; 0
+ *       }
+ *     }
+ *   }
+ *
+ *   property(&quot;Fraction constructor throws IAE on bad data.&quot;) {
+ *
+ *     val invalidCombos =
+ *       Table(
+ *         (&quot;n&quot;,               &quot;d&quot;),
+ *         (Integer.MIN_VALUE, Integer.MIN_VALUE),
+ *         (1,                 Integer.MIN_VALUE),
+ *         (Integer.MIN_VALUE, 1),
+ *         (Integer.MIN_VALUE, 0),
+ *         (1,                 0)
+ *       )
+ *
+ *     forAll (invalidCombos) { (n: Int, d: Int) =&gt;
+ *       evaluating {
+ *         new Fraction(n, d)
+ *       } should produce [IllegalArgumentException]
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * &amp;#8220;&lt;code&gt;property&lt;/code&gt;&amp;#8221; is a method, defined in &lt;code&gt;PropSpec&lt;/code&gt;, which will be invoked
+ * by the primary constructor of &lt;code&gt;MathSpec&lt;/code&gt;. You specify the name of the property as
+ * a string between the parentheses, and the test code containing the property check between curly braces.
+ * The test code is a function passed as a by-name parameter to &lt;code&gt;property&lt;/code&gt;, which registers
+ * it for later execution.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;code&gt;PropSpec&lt;/code&gt;'s lifecycle has two phases: the &lt;em&gt;registration&lt;/em&gt; phase and the
+ * &lt;em&gt;ready&lt;/em&gt; phase. It starts in registration phase and enters ready phase the first time
+ * &lt;code&gt;run&lt;/code&gt; is called on it. It then remains in ready phase for the remainder of its lifetime.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Properties can only be registered with the &lt;code&gt;property&lt;/code&gt; method while the &lt;code&gt;PropSpec&lt;/code&gt; is
+ * in its registration phase. Any attempt to register a property after the &lt;code&gt;PropSpec&lt;/code&gt; has
+ * entered its ready phase, &lt;em&gt;i.e.&lt;/em&gt;, after &lt;code&gt;run&lt;/code&gt; has been invoked on the &lt;code&gt;PropSpec&lt;/code&gt;,
+ * will be met with a thrown &lt;code&gt;TestRegistrationClosedException&lt;/code&gt;. The recommended style
+ * of using &lt;code&gt;PropSpec&lt;/code&gt; is to register properties during object construction as is done in all
+ * the examples shown here. If you keep to the recommended style, you should never see a
+ * &lt;code&gt;TestRegistrationClosedException&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * &lt;em&gt;Note: Trait &lt;code&gt;PropSpec&lt;/code&gt; is in part inspired by class &lt;code&gt;org.scalacheck.Properties&lt;/code&gt;, designed by
+ * Rickard Nilsson for the &lt;a href=&quot;http://code.google.com/p/scalacheck/&quot;&gt;ScalaCheck test framework&lt;/a&gt;.&lt;/em&gt;
+ * &lt;/p&gt;
+ *
+ * &lt;h2&gt;Ignored tests&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * To support the common use case of &amp;#8220;temporarily&amp;#8221; disabling a test, with the
+ * good intention of resurrecting the test at a later time, &lt;code&gt;PropSpec&lt;/code&gt; provides registration
+ * methods that start with &lt;code&gt;ignore&lt;/code&gt; instead of &lt;code&gt;property&lt;/code&gt;. For example, to temporarily
+ * disable the test named &lt;code&gt;addition&lt;/code&gt;, just change &amp;#8220;&lt;code&gt;property&lt;/code&gt;&amp;#8221; into &amp;#8220;&lt;code&gt;ignore&lt;/code&gt;,&amp;#8221; like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.PropSpec
+ * import org.scalatest.prop.PropertyChecks
+ * import org.scalatest.matchers.ShouldMatchers
+ *
+ * class MathSpec extends PropSpec with PropertyChecks with ShouldMatchers {
+ *
+ *   ignore(&quot;addition&quot;, SlowTest) {
+ *     forAll { (i: Int) =&gt; i + i should equal (2 * i) }
+ *   }
+ *
+ *   property(&quot;subtraction&quot;, SlowTest, DbTest) {
+ *     forAll { (i: Int) =&gt; i - i should equal (0) }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * If you run this version of &lt;code&gt;MathSpec&lt;/code&gt; with:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * scala&gt; (new MathSpec).execute()
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * It will run only &lt;code&gt;subtraction&lt;/code&gt; and report that &lt;code&gt;addition&lt;/code&gt; was ignored:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;MathSpec:&lt;/span&gt;
+ * &lt;span class=&quot;stYellow&quot;&gt;- addition !!! IGNORED !!!&lt;/span&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;- subtraction&lt;/span&gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;h2&gt;Informers&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * One of the parameters to the &lt;code&gt;run&lt;/code&gt; method is a &lt;code&gt;Reporter&lt;/code&gt;, which
+ * will collect and report information about the running suite of tests.
+ * Information about suites and tests that were run, whether tests succeeded or failed, 
+ * and tests that were ignored will be passed to the &lt;code&gt;Reporter&lt;/code&gt; as the suite runs.
+ * Most often the reporting done by default by &lt;code&gt;PropSpec&lt;/code&gt;'s methods will be sufficient, but
+ * occasionally you may wish to provide custom information to the &lt;code&gt;Reporter&lt;/code&gt; from a test.
+ * For this purpose, an &lt;code&gt;Informer&lt;/code&gt; that will forward information to the current &lt;code&gt;Reporter&lt;/code&gt;
+ * is provided via the &lt;code&gt;info&lt;/code&gt; parameterless method.
+ * You can pass the extra information to the &lt;code&gt;Informer&lt;/code&gt; via one of its &lt;code&gt;apply&lt;/code&gt; methods.
+ * The &lt;code&gt;Informer&lt;/code&gt; will then pass the information to the &lt;code&gt;Reporter&lt;/code&gt; via an &lt;code&gt;InfoProvided&lt;/code&gt; event.
+ * Here's an example:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.PropSpec
+ * import org.scalatest.prop.PropertyChecks
+ * import org.scalatest.matchers.ShouldMatchers
+ *
+ * class MathSpec extends PropSpec with PropertyChecks with ShouldMatchers {
+ *
+ *   property(&quot;addition&quot;, SlowTest) {
+ *     forAll { (i: Int) =&gt; i + i should equal (2 * i) }
+ *     info(&quot;Addition seems to work&quot;)
+ *   }
+ *
+ *   property(&quot;subtraction&quot;, SlowTest, DbTest) {
+ *     forAll { (i: Int) =&gt; i - i should equal (0) }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * If you run this &lt;code&gt;PropSpec&lt;/code&gt; from the interpreter, you will see the following message
+ * included in the printed report:
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;MathSpec:
+ * - addition
+ *   + Addition seems to work&lt;/span&gt; 
+ * &lt;/pre&gt;
+ *
+ * &lt;h2&gt;Pending tests&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;em&gt;pending test&lt;/em&gt; is one that has been given a name but is not yet implemented. The purpose of
+ * pending tests is to facilitate a style of testing in which documentation of behavior is sketched
+ * out before tests are written to verify that behavior (and often, before the behavior of
+ * the system being tested is itself implemented). Such sketches form a kind of specification of
+ * what tests and functionality to implement later.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * To support this style of testing, a test can be given a name that specifies one
+ * bit of behavior required by the system being tested. The test can also include some code that
+ * sends more information about the behavior to the reporter when the tests run. At the end of the test,
+ * it can call method &lt;code&gt;pending&lt;/code&gt;, which will cause it to complete abruptly with &lt;code&gt;TestPendingException&lt;/code&gt;.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Because tests in ScalaTest can be designated as pending with &lt;code&gt;TestPendingException&lt;/code&gt;, both the test name and any information
+ * sent to the reporter when running the test can appear in the report of a test run. (In other words,
+ * the code of a pending test is executed just like any other test.) However, because the test completes abruptly
+ * with &lt;code&gt;TestPendingException&lt;/code&gt;, the test will be reported as pending, to indicate
+ * the actual test, and possibly the functionality, has not yet been implemented.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * Although pending tests may be used more often in specification-style suites, such as
+ * &lt;code&gt;org.scalatest.Spec&lt;/code&gt;, you can also use it in &lt;code&gt;PropSpec&lt;/code&gt;, like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.PropSpec
+ * import org.scalatest.prop.PropertyChecks
+ * import org.scalatest.matchers.ShouldMatchers
+ *
+ * class MathSpec extends PropSpec with PropertyChecks with ShouldMatchers {
+ *
+ *   ignore(&quot;addition&quot;) {
+ *     forAll { (i: Int) =&gt; i + i should equal (2 * i) }
+ *   }
+ *
+ *   property(&quot;subtraction&quot;) (pending)
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * (Note: &quot;&lt;code&gt;(pending)&lt;/code&gt;&quot; is the body of the test. Thus the test contains just one statement, an invocation
+ * of the &lt;code&gt;pending&lt;/code&gt; method, which throws &lt;code&gt;TestPendingException&lt;/code&gt;.)
+ * If you run this version of &lt;code&gt;MathSpec&lt;/code&gt; with:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * scala&gt; (new MathSpec).execute()
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * It will run both tests, but report that &lt;code&gt;subtraction&lt;/code&gt; is pending. You'll see:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stREPL&quot;&gt;
+ * &lt;span class=&quot;stGreen&quot;&gt;MathSpec:
+ * - addition&lt;/span&gt;
+ * &lt;span class=&quot;stYellow&quot;&gt;- subtraction (pending)&lt;/span&gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;h2&gt;Tagging tests&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * A &lt;code&gt;PropSpec&lt;/code&gt;'s tests may be classified into groups by &lt;em&gt;tagging&lt;/em&gt; them with string names.
+ * As with any suite, when executing a &lt;code&gt;PropSpec&lt;/code&gt;, groups of tests can
+ * optionally be included and/or excluded. To tag a &lt;code&gt;PropSpec&lt;/code&gt;'s tests,
+ * you pass objects that extend abstract class &lt;code&gt;org.scalatest.Tag&lt;/code&gt; to methods
+ * that register tests, &lt;code&gt;test&lt;/code&gt; and &lt;code&gt;ignore&lt;/code&gt;. Class &lt;code&gt;Tag&lt;/code&gt; takes one parameter, a string name.  If you have
+ * created Java annotation interfaces for use as group names in direct subclasses of &lt;code&gt;org.scalatest.Suite&lt;/code&gt;,
+ * then you will probably want to use group names on your &lt;code&gt;PropSpec&lt;/code&gt;s that match. To do so, simply 
+ * pass the fully qualified names of the Java interfaces to the &lt;code&gt;Tag&lt;/code&gt; constructor. For example, if you've
+ * defined Java annotation interfaces with fully qualified names, &lt;code&gt;com.mycompany.tags.SlowTest&lt;/code&gt; and
+ * &lt;code&gt;com.mycompany.tags.DbTest&lt;/code&gt;, then you could
+ * create matching groups for &lt;code&gt;PropSpec&lt;/code&gt;s like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.Tag
+ *
+ * object SlowTest extends Tag(&quot;com.mycompany.tags.SlowTest&quot;)
+ * object DbTest extends Tag(&quot;com.mycompany.tags.DbTest&quot;)
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * Given these definitions, you could tag a &lt;code&gt;PropSpec&lt;/code&gt;'s tests like this:
+ * &lt;/p&gt;
+ *
+ * &lt;pre class=&quot;stHighlight&quot;&gt;
+ * import org.scalatest.PropSpec
+ * import org.scalatest.prop.PropertyChecks
+ * import org.scalatest.matchers.ShouldMatchers
+ *
+ * class MathSpec extends PropSpec with PropertyChecks with ShouldMatchers {
+ *
+ *   property(&quot;addition&quot;, SlowTest) {
+ *     forAll { (i: Int) =&gt; i + i should equal (2 * i) }
+ *   }
+ *
+ *   property(&quot;subtraction&quot;, SlowTest, DbTest) {
+ *     forAll { (i: Int) =&gt; i - i should equal (0) }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ * This code marks both tests, &quot;addition&quot; and &quot;subtraction,&quot; with the &lt;code&gt;com.mycompany.tags.SlowTest&lt;/code&gt; tag, 
+ * and test &quot;subtraction&quot; with the &lt;code&gt;com.mycompany.tags.DbTest&lt;/code&gt; tag.
+ * &lt;/p&gt;
+ *
+ * &lt;p&gt;
+ * The &lt;code&gt;run&lt;/code&gt; method takes a &lt;code&gt;Filter&lt;/code&gt;, whose constructor takes an optional
+ * &lt;code&gt;Set[String]&lt;/code&gt; called &lt;code&gt;tagsToInclude&lt;/code&gt; and a &lt;code&gt;Set[String]&lt;/code&gt; called
+ * &lt;code&gt;tagsToExclude&lt;/code&gt;. If &lt;code&gt;tagsToInclude&lt;/code&gt; is &lt;code&gt;None&lt;/code&gt;, all tests will be run
+ * except those those belonging to tags listed in the
+ * &lt;code&gt;tagsToExclude&lt;/code&gt; &lt;code&gt;Set&lt;/code&gt;. If &lt;code&gt;tagsToInclude&lt;/code&gt; is defined, only tests
+ * belonging to tags mentioned in the &lt;code&gt;tagsToInclude&lt;/code&gt; set, and not mentioned in &lt;code&gt;tagsToExclude&lt;/code&gt;,
+ * will be run.
+ * &lt;/p&gt;
+ *
+ * &lt;a name=&quot;sharedFixtures&quot;&gt;&lt;/a&gt;&lt;h2&gt;Shared fixtures&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * A test &lt;em&gt;fixture&lt;/em&gt; is objects or other artifacts (such as files, sockets, database
+ * connections, &lt;em&gt;etc.&lt;/em&gt;) used by tests to do their work. You can use fixtures in
+ * &lt;code&gt;PropSpec&lt;/code&gt;s with the same approaches suggested for &lt;code&gt;FunSuite&lt;/code&gt; in
+ * its documentation. For more information, see the &lt;a href=&quot;FunSuite.html#SharedFixtures&quot;&gt;Shared fixtures&lt;/a&gt; section of &lt;code&gt;FunSuite&lt;/code&gt;'s
+ * documentation (and substitute &lt;code&gt;property&lt;/code&gt; for &lt;code&gt;test&lt;/code&gt;).
+ * &lt;/p&gt;
+ *
+ * &lt;a name=&quot;SharedTests&quot;&gt;&lt;/a&gt;&lt;h2&gt;Shared tests&lt;/h2&gt;
+ *
+ * &lt;p&gt;
+ * Sometimes you may want to run the same test code on different fixture objects. In other words, you may want to write tests that are &quot;shared&quot;
+ * by different fixture objects.
+ * You accomplish this in a &lt;code&gt;PropSpec&lt;/code&gt; in the same way you would do it in a &lt;code&gt;FunSuite&lt;/code&gt;, exception instead of &lt;code&gt;test&lt;/code&gt;
+ * you say &lt;code&gt;property&lt;/code&gt;, and instead of &lt;code&gt;testsFor&lt;/code&gt; you say &lt;code&gt;propertiesFor&lt;/code&gt;. 
+ * For more information, see the &lt;a href=&quot;FunSuite.html#SharedTests&quot;&gt;Shared tests&lt;/a&gt; section of &lt;code&gt;FunSuite&lt;/code&gt;'s
+ * documentation.
+ * &lt;/p&gt;
+ *
+ * @author Bill Venners
+ */</span>
+<span class="keyword">trait</span> <a title="trait PropSpec extends java.lang.Object with org.scalatest.Suite with ScalaObject" id="9509">PropSpec</a> <span title="ScalaObject" class="keyword">extends</span> <a href="Suite.scala.html#10073" title="org.scalatest.Suite">Suite</a> <span class="delimiter">{</span> thisSuite =&gt;
+
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">val</span> <a title="org.scalatest.Engine" id="45617">engine</a> = <span title="org.scalatest.Engine" class="keyword">new</span> <a href="Engine.scala.html#10262" title="org.scalatest.Engine">Engine</a><span class="delimiter">(</span><span title="java.lang.String(&quot;concurrentPropSpecMod&quot;)" class="string">&quot;concurrentPropSpecMod&quot;</span>, <span title="java.lang.String(&quot;PropSpec&quot;)" class="string">&quot;PropSpec&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">import</span> <a href="#45617" title="=&gt; org.scalatest.Engine">engine</a>._
+
+  <span class="comment">/**
+   * Returns an &lt;code&gt;Informer&lt;/code&gt; that during test execution will forward strings (and other objects) passed to its
+   * &lt;code&gt;apply&lt;/code&gt; method to the current reporter. If invoked in a constructor, it
+   * will register the passed string for forwarding later during test execution. If invoked while this
+   * &lt;code&gt;PropSpec&lt;/code&gt; is being executed, such as from inside a test function, it will forward the information to
+   * the current reporter immediately. If invoked at any other time, it will
+   * throw an exception. This method can be called safely by any thread.
+   */</span>
+  <span class="keyword">implicit</span> <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; org.scalatest.Informer" id="45620">info</a>: <a href="Informer.scala.html#9884" title="org.scalatest.Informer">Informer</a> = <a href="Engine.scala.html#36495" title="=&gt; java.util.concurrent.atomic.AtomicReference[org.scalatest.Informer]">atomicInformer</a>.<span title="()org.scalatest.Informer">get</span>
+
+  <span class="comment">/**
+   * Register a property-based test with the specified name, optional tags, and function value that takes no arguments.
+   * This method will register the test for later execution via an invocation of one of the &lt;code&gt;run&lt;/code&gt;
+   * methods. The passed test name must not have been registered previously on
+   * this &lt;code&gt;PropSpec&lt;/code&gt; instance.
+   *
+   * @param testName the name of the property
+   * @param testTags the optional list of tags for this property
+   * @param testFun the property function
+   * @throws TestRegistrationClosedException if invoked after &lt;code&gt;run&lt;/code&gt; has been invoked on this suite
+   * @throws DuplicateTestNameException if a test with the same name has been registered previously
+   * @throws NotAllowedException if &lt;code&gt;testName&lt;/code&gt; had been registered previously
+   * @throws NullPointerException if &lt;code&gt;testName&lt;/code&gt; or any passed test tag is &lt;code&gt;null&lt;/code&gt;
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(testName: String, testTags: org.scalatest.Tag*)(testFun: =&gt; Unit)Unit" id="45621">property</a><span class="delimiter">(</span><a title="String" id="45633">testName</a>: <span title="String">String</span>, <a title="org.scalatest.Tag*" id="45634">testTags</a>: <span title="org.scalatest.Tag*">Tag</span>*<span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; Unit" id="45635">testFun</a>: =&gt; Unit<span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="Engine.scala.html#36508" title="(testText: String, testFun: () =&gt; Unit, testRegistrationClosedResourceName: String, sourceFileName: String, methodName: String, testTags: org.scalatest.Tag*)String">registerTest</a><span title="Unit" class="delimiter">(</span><a href="#45633" title="String">testName</a>, <a href="#45635" title="=&gt; Unit">testFun</a> _, <span title="java.lang.String(&quot;propertyCannotAppearInsideAnotherProperty&quot;)" class="string">&quot;propertyCannotAppearInsideAnotherProperty&quot;</span>, <span title="java.lang.String(&quot;PropSpec.scala&quot;)" class="string">&quot;PropSpec.scala&quot;</span>, <span title="java.lang.String(&quot;property&quot;)" class="string">&quot;property&quot;</span>, <a href="#45634" title="org.scalatest.Tag*">testTags</a>: _*<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Register a property-based test to ignore, which has the specified name, optional tags, and function value that takes no arguments.
+   * This method will register the test for later ignoring via an invocation of one of the &lt;code&gt;run&lt;/code&gt;
+   * methods. This method exists to make it easy to ignore an existing test by changing the call to &lt;code&gt;test&lt;/code&gt;
+   * to &lt;code&gt;ignore&lt;/code&gt; without deleting or commenting out the actual test code. The test will not be run, but a
+   * report will be sent that indicates the test was ignored. The passed test name must not have been registered previously on
+   * this &lt;code&gt;PropSpec&lt;/code&gt; instance.
+   *
+   * @param testName the name of the test
+   * @param testTags the optional list of tags for this test
+   * @param testFun the test function
+   * @throws TestRegistrationClosedException if invoked after &lt;code&gt;run&lt;/code&gt; has been invoked on this suite
+   * @throws DuplicateTestNameException if a test with the same name has been registered previously
+   * @throws NotAllowedException if &lt;code&gt;testName&lt;/code&gt; had been registered previously
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(testName: String, testTags: org.scalatest.Tag*)(testFun: =&gt; Unit)Unit" id="45622">ignore</a><span class="delimiter">(</span><a title="String" id="45644">testName</a>: <span title="String">String</span>, <a title="org.scalatest.Tag*" id="45645">testTags</a>: <span title="org.scalatest.Tag*">Tag</span>*<span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; Unit" id="45646">testFun</a>: =&gt; Unit<span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="Engine.scala.html#36509" title="(testText: String, f: () =&gt; Unit, testRegistrationClosedResourceName: String, sourceFileName: String, methodName: String, testTags: org.scalatest.Tag*)Unit">registerIgnoredTest</a><span class="delimiter">(</span><a href="#45644" title="String">testName</a>, <a href="#45646" title="=&gt; Unit">testFun</a> _, <span title="java.lang.String(&quot;ignoreCannotAppearInsideAProperty&quot;)" class="string">&quot;ignoreCannotAppearInsideAProperty&quot;</span>, <span title="java.lang.String(&quot;PropSpec.scala&quot;)" class="string">&quot;PropSpec.scala&quot;</span>, <span title="java.lang.String(&quot;ignore&quot;)" class="string">&quot;ignore&quot;</span>, <a href="#45645" title="org.scalatest.Tag*">testTags</a>: _*<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+  * An immutable &lt;code&gt;Set&lt;/code&gt; of test names. If this &lt;code&gt;PropSpec&lt;/code&gt; contains no tests, this method returns an empty &lt;code&gt;Set&lt;/code&gt;.
+  *
+  * &lt;p&gt;
+  * This trait's implementation of this method will return a set that contains the names of all registered tests. The set's iterator will
+  * return those names in the order in which the tests were registered.
+  * &lt;/p&gt;
+  */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Set[String]" id="45623">testNames</a>: <span title="Set[String]">Set</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="comment">// I'm returning a ListSet here so that they tests will be run in registration order</span>
+    <span title="(elems: String*)scala.collection.immutable.ListSet[String]">ListSet</span><span class="delimiter">(</span><a href="Engine.scala.html#36491" title="=&gt; java.util.concurrent.atomic.AtomicReference[PropSpec.this.engine.Bundle]">atomic</a>.<span title="()PropSpec.this.engine.Bundle">get</span>.<a href="Engine.scala.html#36526" title="=&gt; List[String]">testNamesList</a>.<span title="(implicit evidence$1: ClassManifest[String])Array[String]">toArray</span>: _*<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Run a test. This trait's implementation runs the test registered with the name specified by &lt;code&gt;testName&lt;/code&gt;.
+   *
+   * @param testName the name of one test to run.
+   * @param reporter the &lt;code&gt;Reporter&lt;/code&gt; to which results will be reported
+   * @param stopper the &lt;code&gt;Stopper&lt;/code&gt; that will be consulted to determine whether to stop execution early.
+   * @param configMap a &lt;code&gt;Map&lt;/code&gt; of properties that can be used by the executing &lt;code&gt;Suite&lt;/code&gt; of tests.
+   * @throws IllegalArgumentException if &lt;code&gt;testName&lt;/code&gt; is defined but a test with that name does not exist on this &lt;code&gt;PropSpec&lt;/code&gt;
+   * @throws NullPointerException if any of &lt;code&gt;testName&lt;/code&gt;, &lt;code&gt;reporter&lt;/code&gt;, &lt;code&gt;stopper&lt;/code&gt;, or &lt;code&gt;configMap&lt;/code&gt;
+   *     is &lt;code&gt;null&lt;/code&gt;.
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">override</span> <span class="keyword">def</span> <a title="(testName: String, reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, configMap: Map[String,Any], tracker: org.scalatest.Tracker)Unit" id="45624">runTest</a><span class="delimiter">(</span><a title="String" id="45682">testName</a>: <span title="String">String</span>, <a title="org.scalatest.Reporter" id="45683">reporter</a>: <a href="Reporter.scala.html#10103" title="org.scalatest.Reporter">Reporter</a>, <a title="org.scalatest.Stopper" id="45684">stopper</a>: <a href="Stopper.scala.html#9545" title="org.scalatest.Stopper">Stopper</a>, <a title="Map[String,Any]" id="45685">configMap</a>: <span title="Map[String,Any]">Map</span><span class="delimiter">[</span>String, Any<span class="delimiter">]</span>, <a title="org.scalatest.Tracker" id="45686">tracker</a>: <a href="Tracker.scala.html#9878" title="org.scalatest.Tracker">Tracker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="keyword">def</span> <a title="(theTest: PropSpec.this.engine.TestLeaf)Unit" id="45688">invokeWithFixture</a><span class="delimiter">(</span><a title="PropSpec.this.engine.TestLeaf" id="45689">theTest</a>: <a href="Engine.scala.html#36479" title="PropSpec.this.engine.TestLeaf">TestLeaf</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Map[String,Any]" id="45692">theConfigMap</a> = <a href="#45685" title="Map[String,Any]">configMap</a>
+      <a href="Suite.scala.html#15664" title="(test: PropSpec.this.NoArgTest)Unit">withFixture</a><span class="delimiter">(</span>
+        <a href="#45695" title="java.lang.Object with PropSpec.this.NoArgTest" class="keyword">new</a> <a title="anonymous class $anon extends java.lang.Object with PropSpec.this.NoArgTest" id="45695">NoArgTest</a> <span class="delimiter">{</span>
+          <span class="keyword">def</span> <a title="=&gt; String" id="45699">name</a> = <a href="#45682" title="String">testName</a>
+          <span class="keyword">def</span> <a title="()Unit" id="45700">apply</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#45689" title="PropSpec.this.engine.TestLeaf">theTest</a>.<a href="Engine.scala.html#36576" title="()Unit">testFun</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+          <span class="keyword">def</span> <a title="=&gt; Map[String,Any]" id="45701">configMap</a> = <a href="#45692" title="Map[String,Any]">theConfigMap</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="Engine.scala.html#36500" title="(theSuite: org.scalatest.Suite, testName: String, reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, configMap: Map[String,Any], tracker: org.scalatest.Tracker, includeIcon: Boolean, invokeWithFixture: PropSpec.this.engine.TestLeaf =&gt; Unit)Unit">runTestImpl</a><span class="delimiter">(</span><a href="#9509" title="org.scalatest.PropSpec">thisSuite</a>, <a href="#45682" title="String">testName</a>, <a href="#45683" title="org.scalatest.Reporter">reporter</a>, <a href="#45684" title="org.scalatest.Stopper">stopper</a>, <a href="#45685" title="Map[String,Any]">configMap</a>, <a href="#45686" title="org.scalatest.Tracker">tracker</a>, <span title="Boolean(true)" class="keyword">true</span>, <a href="#45688" title="(theTest: PropSpec.this.engine.TestLeaf)Unit">invokeWithFixture</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * A &lt;code&gt;Map&lt;/code&gt; whose keys are &lt;code&gt;String&lt;/code&gt; tag names to which tests in this &lt;code&gt;PropSpec&lt;/code&gt; belong, and values
+   * the &lt;code&gt;Set&lt;/code&gt; of test names that belong to each tag. If this &lt;code&gt;PropSpec&lt;/code&gt; contains no tags, this method returns an empty &lt;code&gt;Map&lt;/code&gt;.
+   *
+   * &lt;p&gt;
+   * This trait's implementation returns tags that were passed as strings contained in &lt;code&gt;Tag&lt;/code&gt; objects passed to 
+   * methods &lt;code&gt;test&lt;/code&gt; and &lt;code&gt;ignore&lt;/code&gt;. 
+   * &lt;/p&gt;
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Map[String,Set[String]]" id="45625">tags</a>: <span title="Map[String,Set[String]]">Map</span><span class="delimiter">[</span>String, Set<span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="Engine.scala.html#36491" title="=&gt; java.util.concurrent.atomic.AtomicReference[PropSpec.this.engine.Bundle]">atomic</a>.<span title="()PropSpec.this.engine.Bundle">get</span>.<a href="Engine.scala.html#36530" title="=&gt; Map[String,Set[String]]">tagsMap</a>
+
+  <span class="comment">/**
+   * Run zero to many of this &lt;code&gt;Spec&lt;/code&gt;'s tests.
+   *
+   * @param testName an optional name of one test to run. If &lt;code&gt;None&lt;/code&gt;, all relevant tests should be run.
+   *                 I.e., &lt;code&gt;None&lt;/code&gt; acts like a wildcard that means run all relevant tests in this &lt;code&gt;Suite&lt;/code&gt;.
+   * @param reporter the &lt;code&gt;Reporter&lt;/code&gt; to which results will be reported
+   * @param stopper the &lt;code&gt;Stopper&lt;/code&gt; that will be consulted to determine whether to stop execution early.
+   * @param filter a &lt;code&gt;Filter&lt;/code&gt; with which to filter tests based on their tags
+   * @param configMap a &lt;code&gt;Map&lt;/code&gt; of key-value pairs that can be used by the executing &lt;code&gt;Suite&lt;/code&gt; of tests.
+   * @param distributor an optional &lt;code&gt;Distributor&lt;/code&gt;, into which to put nested &lt;code&gt;Suite&lt;/code&gt;s to be run
+   *              by another entity, such as concurrently by a pool of threads. If &lt;code&gt;None&lt;/code&gt;, nested &lt;code&gt;Suite&lt;/code&gt;s will be run sequentially.
+   * @param tracker a &lt;code&gt;Tracker&lt;/code&gt; tracking &lt;code&gt;Ordinal&lt;/code&gt;s being fired by the current thread.
+   * @throws NullPointerException if any of the passed parameters is &lt;code&gt;null&lt;/code&gt;.
+   * @throws IllegalArgumentException if &lt;code&gt;testName&lt;/code&gt; is defined, but no test with the specified test name
+   *     exists in this &lt;code&gt;Suite&lt;/code&gt;
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">override</span> <span class="keyword">def</span> <a title="(testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker)Unit" id="45626">runTests</a><span class="delimiter">(</span><a title="Option[String]" id="45723">testName</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span>, <a title="org.scalatest.Reporter" id="45724">reporter</a>: <a href="Reporter.scala.html#10103" title="org.scalatest.Reporter">Reporter</a>, <a title="org.scalatest.Stopper" id="45725">stopper</a>: <a href="Stopper.scala.html#9545" title="org.scalatest.Stopper">Stopper</a>, <a title="org.scalatest.Filter" id="45726">filter</a>: <a href="Filter.scala.html#10079" title="org.scalatest.Filter">Filter</a>,
+      <a title="Map[String,Any]" id="45727">configMap</a>: <span title="Map[String,Any]">Map</span><span class="delimiter">[</span>String, Any<span class="delimiter">]</span>, <a title="Option[org.scalatest.Distributor]" id="45728">distributor</a>: <span title="Option[org.scalatest.Distributor]">Option</span><span class="delimiter">[</span>Distributor<span class="delimiter">]</span>, <a title="org.scalatest.Tracker" id="45729">tracker</a>: <a href="Tracker.scala.html#9878" title="org.scalatest.Tracker">Tracker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <a href="Engine.scala.html#36503" title="(theSuite: org.scalatest.Suite, testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker, info: String =&gt; Unit, includeIcon: Boolean, runTest: (String, org.scalatest.Reporter, org.scalatest.Stopper, Map[String,Any], org.scalatest.Tracker) =&gt; Unit)Unit">runTestsImpl</a><span class="delimiter">(</span><a href="#9509" title="org.scalatest.PropSpec">thisSuite</a>, <a href="#45723" title="Option[String]">testName</a>, <a href="#45724" title="org.scalatest.Reporter">reporter</a>, <a href="#45725" title="org.scalatest.Stopper">stopper</a>, <a href="#45726" title="org.scalatest.Filter">filter</a>, <a href="#45727" title="Map[String,Any]">configMap</a>, <a href="#45728" title="Option[org.scalatest.Distributor]">distributor</a>, <a href="#45729" title="org.scalatest.Tracker">tracker</a>, <a href="#45620" title="=&gt; org.scalatest.Informer">info</a>, <span title="Boolean(true)" class="keyword">true</span>, <a href="#45624" title="(testName: String, reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, configMap: Map[String,Any], tracker: org.scalatest.Tracker)Unit">runTest</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker)Unit" id="45627">run</a><span class="delimiter">(</span><a title="Option[String]" id="45737">testName</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span>, <a title="org.scalatest.Reporter" id="45738">reporter</a>: <a href="Reporter.scala.html#10103" title="org.scalatest.Reporter">Reporter</a>, <a title="org.scalatest.Stopper" id="45739">stopper</a>: <a href="Stopper.scala.html#9545" title="org.scalatest.Stopper">Stopper</a>, <a title="org.scalatest.Filter" id="45740">filter</a>: <a href="Filter.scala.html#10079" title="org.scalatest.Filter">Filter</a>,
+      <a title="Map[String,Any]" id="45741">configMap</a>: <span title="Map[String,Any]">Map</span><span class="delimiter">[</span>String, Any<span class="delimiter">]</span>, <a title="Option[org.scalatest.Distributor]" id="45742">distributor</a>: <span title="Option[org.scalatest.Distributor]">Option</span><span class="delimiter">[</span>Distributor<span class="delimiter">]</span>, <a title="org.scalatest.Tracker" id="45743">tracker</a>: <a href="Tracker.scala.html#9878" title="org.scalatest.Tracker">Tracker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <a href="Engine.scala.html#36504" title="(theSuite: org.scalatest.Suite, testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker, superRun: (Option[String], org.scalatest.Reporter, org.scalatest.Stopper, org.scalatest.Filter, Map[String,Any], Option[org.scalatest.Distributor], org.scalatest.Tracker) =&gt; Unit)Unit">runImpl</a><span class="delimiter">(</span><a href="#9509" title="org.scalatest.PropSpec">thisSuite</a>, <a href="#45737" title="Option[String]">testName</a>, <a href="#45738" title="org.scalatest.Reporter">reporter</a>, <a href="#45739" title="org.scalatest.Stopper">stopper</a>, <a href="#45740" title="org.scalatest.Filter">filter</a>, <a href="#45741" title="Map[String,Any]">configMap</a>, <a href="#45742" title="Option[org.scalatest.Distributor]">distributor</a>, <a href="#45743" title="org.scalatest.Tracker">tracker</a>, <a href="#9509" title="org.scalatest.PropSpec" class="keyword">super</a>.<a href="Suite.scala.html#15669" title="(testName: Option[String], reporter: org.scalatest.Reporter, stopper: org.scalatest.Stopper, filter: org.scalatest.Filter, configMap: Map[String,Any], distributor: Option[org.scalatest.Distributor], tracker: org.scalatest.Tracker)Unit">run</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Registers shared tests.
+   *
+   * &lt;p&gt;
+   * This method enables the following syntax for shared tests in a &lt;code&gt;PropSpec&lt;/code&gt;:
+   * &lt;/p&gt;
+   *
+   * &lt;pre class=&quot;stHighlight&quot;&gt;
+   * propertiesFor(nonEmptyStack(lastValuePushed))
+   * &lt;/pre&gt;
+   *
+   * &lt;p&gt;
+   * This method just provides syntax sugar intended to make the intent of the code clearer.
+   * Because the parameter passed to it is
+   * type &lt;code&gt;Unit&lt;/code&gt;, the expression will be evaluated before being passed, which
+   * is sufficient to register the shared tests. For examples of shared tests, see the
+   * &lt;a href=&quot;#SharedTests&quot;&gt;Shared tests section&lt;/a&gt; in the main documentation for this trait.
+   * &lt;/p&gt;
+   */</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(unit: Unit)Unit" id="45628">propertiesFor</a><span class="delimiter">(</span><a title="Unit" id="45754">unit</a>: <span title="Unit">Unit</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span><span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
