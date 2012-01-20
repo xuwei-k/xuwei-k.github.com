@@ -1,0 +1,976 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/actors/threadpool/locks/ReentrantLock.java</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Written by Doug Lea with assistance from members of JCP JSR-166
+ * Expert Group and released to the public domain, as explained at
+ * http://creativecommons.org/licenses/publicdomain
+ */
+
+<span class="keyword">package</span> scala.actors.threadpool.locks;
+
+<span class="keyword">import</span> java.util.Collection;
+<span class="keyword">import</span> scala.actors.threadpool.*;
+<span class="keyword">import</span> scala.actors.threadpool.helpers.*;
+
+/**
+ * A reentrant mutual exclusion {@link Lock} with the same basic
+ * behavior and semantics as the implicit monitor lock accessed using
+ * {@code synchronized} methods and statements, but with extended
+ * capabilities.
+ *
+ * &lt;p&gt;A {@code ReentrantLock} is &lt;em&gt;owned&lt;/em&gt; by the thread last
+ * successfully locking, but not yet unlocking it. A thread invoking
+ * {@code lock} will return, successfully acquiring the lock, when
+ * the lock is not owned by another thread. The method will return
+ * immediately if the current thread already owns the lock. This can
+ * be checked using methods {@link #isHeldByCurrentThread}, and {@link
+ * #getHoldCount}.
+ *
+ * &lt;p&gt;The constructor for this class accepts an optional
+ * &lt;em&gt;fairness&lt;/em&gt; parameter.  When set {@code true}, under
+ * contention, locks favor granting access to the longest-waiting
+ * thread.  Otherwise this lock does not guarantee any particular
+ * access order.  Programs using fair locks accessed by many threads
+ * may display lower overall throughput (i.e., are slower; often much
+ * slower) than those using the default setting, but have smaller
+ * variances in times to obtain locks and guarantee lack of
+ * starvation. Note however, that fairness of locks does not guarantee
+ * fairness of thread scheduling. Thus, one of many threads using a
+ * fair lock may obtain it multiple times in succession while other
+ * active threads are not progressing and not currently holding the
+ * lock.
+ * Also note that the untimed {@link #tryLock() tryLock} method does not
+ * honor the fairness setting. It will succeed if the lock
+ * is available even if other threads are waiting.
+ *
+ * &lt;p&gt;It is recommended practice to &lt;em&gt;always&lt;/em&gt; immediately
+ * follow a call to {@code lock} with a {@code try} block, most
+ * typically in a before/after construction such as:
+ *
+ * &lt;pre&gt;
+ * class X {
+ *   private final ReentrantLock lock = new ReentrantLock();
+ *   // ...
+ *
+ *   public void m() {
+ *     lock.lock();  // block until condition holds
+ *     try {
+ *       // ... method body
+ *     } finally {
+ *       lock.unlock()
+ *     }
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;In addition to implementing the {@link Lock} interface, this
+ * class defines methods {@code isLocked} and
+ * {@code getLockQueueLength}, as well as some associated
+ * {@code protected} access methods that may be useful for
+ * instrumentation and monitoring.
+ *
+ * &lt;p&gt;Serialization of this class behaves in the same way as built-in
+ * locks: a deserialized lock is in the unlocked state, regardless of
+ * its state when serialized.
+ *
+ * &lt;p&gt;This lock supports a maximum of 2147483647 recursive locks by
+ * the same thread. Attempts to exceed this limit result in
+ * {@link Error} throws from locking methods.
+ *
+ * @since 1.5
+ * @author Doug Lea
+ * @author Dawid Kurzyniec
+ */
+public <span class="keyword">class</span> <a title="object scala.actors.threadpool.locks.ReentrantLock" id="9986">ReentrantLock</a> implements <a href="Lock.java.html#9956" title="scala.actors.threadpool.locks.Lock">Lock</a>, java.io.<span title="java.io.Serializable">Serializable</span>,
+                                      <a href="CondVar.java.html#9984" title="object scala.actors.threadpool.locks.CondVar">CondVar</a>.<a href="CondVar.java.html#86025" title="scala.actors.threadpool.locks.CondVar.ExclusiveLock">ExclusiveLock</a> <span class="delimiter">{</span>
+    <span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="86169">serialVersionUID</a> = <span class="long">7373984872572414699L</span>;
+
+    <span class="keyword">private</span> <span class="keyword">final</span> Sync <a title="scala.actors.threadpool.locks.ReentrantLock.Sync" id="86027">sync</a>;
+
+    /**
+     * Base of synchronization control for this lock. Subclassed
+     * into fair and nonfair versions below.
+     */
+    static <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="object scala.actors.threadpool.locks.ReentrantLock.Sync" id="86172">Sync</a> implements java.io.Serializable <span class="delimiter">{</span>
+        <span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="1608192">serialVersionUID</a> = -<span class="long">5179523762034025860L</span>;
+
+        <span class="keyword">protected</span> transient Thread <span title="">owner_</span> = <span class="keyword">null</span>;
+        <span class="keyword">protected</span> transient int <span title="">holds_</span> = <span class="int">0</span>;
+
+        <span class="keyword">protected</span> Sync<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span><span class="delimiter">}</span>
+
+        /**
+         * Performs {@link Lock#lock}. The main reason for subclassing
+         * is to allow fast path for nonfair version.
+         */
+        public <span class="keyword">abstract</span> void lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+        public <span class="keyword">abstract</span> void lockInterruptibly<span class="delimiter">(</span><span class="delimiter">)</span> throws InterruptedException;
+
+        <span class="keyword">final</span> void incHolds<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            int nextHolds = ++holds_;
+            <span class="keyword">if</span> <span class="delimiter">(</span>nextHolds &lt; <span class="int">0</span><span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> Error<span class="delimiter">(</span><span class="string">&quot;Maximum lock count exceeded&quot;</span><span class="delimiter">)</span>;
+            holds_ = nextHolds;
+        <span class="delimiter">}</span>
+
+        public boolean tryLock<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    owner_ = caller;
+                    holds_ = <span class="int">1</span>;
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> <span class="keyword">false</span>;
+        <span class="delimiter">}</span>
+
+        public <span class="keyword">abstract</span> boolean tryLock<span class="delimiter">(</span>long nanos<span class="delimiter">)</span> throws InterruptedException;
+
+        public <span class="keyword">abstract</span> void unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+        public synchronized int getHoldCount<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> isHeldByCurrentThread<span class="delimiter">(</span><span class="delimiter">)</span> ? holds_ : <span class="int">0</span>;
+        <span class="delimiter">}</span>
+
+        public synchronized boolean isHeldByCurrentThread<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> holds_ &gt; <span class="int">0</span> &amp;&amp; Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span> == owner_;
+        <span class="delimiter">}</span>
+
+        public synchronized boolean isLocked<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> owner_ != <span class="keyword">null</span>;
+        <span class="delimiter">}</span>
+
+        public <span class="keyword">abstract</span> boolean isFair<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+        <span class="keyword">protected</span> synchronized Thread getOwner<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> owner_;
+        <span class="delimiter">}</span>
+
+        public boolean hasQueuedThreads<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> UnsupportedOperationException<span class="delimiter">(</span><span class="string">&quot;Use FAIR version&quot;</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public int getQueueLength<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> UnsupportedOperationException<span class="delimiter">(</span><span class="string">&quot;Use FAIR version&quot;</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public Collection getQueuedThreads<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> UnsupportedOperationException<span class="delimiter">(</span><span class="string">&quot;Use FAIR version&quot;</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public boolean isQueued<span class="delimiter">(</span>Thread thread<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> UnsupportedOperationException<span class="delimiter">(</span><span class="string">&quot;Use FAIR version&quot;</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Sync object for non-fair locks
+     */
+    <span class="keyword">final</span> static <span class="keyword">class</span> <a title="object scala.actors.threadpool.locks.ReentrantLock.NonfairSync" id="86175">NonfairSync</a> <span class="keyword">extends</span> Sync <span class="delimiter">{</span>
+        <span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="1608194">serialVersionUID</a> = <span class="long">7316153563782823691L</span>;
+
+        NonfairSync<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span><span class="delimiter">}</span>
+
+        /**
+         * Performs lock.  Try immediate barge, backing up to normal
+         * acquire on failure.
+         */
+        public void lock<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    owner_ = caller;
+                    holds_ = <span class="int">1</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="delimiter">{</span>
+                    boolean wasInterrupted = Thread.interrupted<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">try</span> <span class="delimiter">{</span>
+                        <span class="keyword">while</span> <span class="delimiter">(</span><span class="keyword">true</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                            <span class="keyword">try</span> <span class="delimiter">{</span>
+                                wait<span class="delimiter">(</span><span class="delimiter">)</span>;
+                            <span class="delimiter">}</span>
+                            <span class="keyword">catch</span> <span class="delimiter">(</span>InterruptedException e<span class="delimiter">)</span> <span class="delimiter">{</span>
+                                wasInterrupted = <span class="keyword">true</span>;
+                                // no need to notify; if we were signalled, we
+                                // will act as signalled, ignoring the
+                                // interruption
+                            <span class="delimiter">}</span>
+                            <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                                owner_ = caller;
+                                holds_ = <span class="int">1</span>;
+                                <span class="keyword">return</span>;
+                            <span class="delimiter">}</span>
+                        <span class="delimiter">}</span>
+                    <span class="delimiter">}</span>
+                    <span class="keyword">finally</span> <span class="delimiter">{</span>
+                        <span class="keyword">if</span> <span class="delimiter">(</span>wasInterrupted<span class="delimiter">)</span> Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public void lockInterruptibly<span class="delimiter">(</span><span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>Thread.interrupted<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">throw</span> <span class="keyword">new</span> InterruptedException<span class="delimiter">(</span><span class="delimiter">)</span>;
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    owner_ = caller;
+                    holds_ = <span class="int">1</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="delimiter">{</span>
+                    <span class="keyword">try</span> <span class="delimiter">{</span>
+                        <span class="keyword">do</span> <span class="delimiter">{</span> wait<span class="delimiter">(</span><span class="delimiter">)</span>; <span class="delimiter">}</span> <span class="keyword">while</span> <span class="delimiter">(</span>owner_ != <span class="keyword">null</span><span class="delimiter">)</span>;
+                        owner_ = caller;
+                        holds_ = <span class="int">1</span>;
+                        <span class="keyword">return</span>;
+                    <span class="delimiter">}</span>
+                    <span class="keyword">catch</span> <span class="delimiter">(</span>InterruptedException ex<span class="delimiter">)</span> <span class="delimiter">{</span>
+                        <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> notify<span class="delimiter">(</span><span class="delimiter">)</span>;
+                        <span class="keyword">throw</span> ex;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public boolean tryLock<span class="delimiter">(</span>long nanos<span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>Thread.interrupted<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">throw</span> <span class="keyword">new</span> InterruptedException<span class="delimiter">(</span><span class="delimiter">)</span>;
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    owner_ = caller;
+                    holds_ = <span class="int">1</span>;
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>nanos &lt;= <span class="int">0</span><span class="delimiter">)</span>
+                    <span class="keyword">return</span> <span class="keyword">false</span>;
+                <span class="keyword">else</span> <span class="delimiter">{</span>
+                    long deadline = Utils.nanoTime<span class="delimiter">(</span><span class="delimiter">)</span> + nanos;
+                    <span class="keyword">try</span> <span class="delimiter">{</span>
+                        <span class="keyword">for</span> <span class="delimiter">(</span>; ; <span class="delimiter">)</span> <span class="delimiter">{</span>
+                            TimeUnit.NANOSECONDS.timedWait<span class="delimiter">(</span><span class="keyword">this</span>, nanos<span class="delimiter">)</span>;
+                            <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                                incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                                <span class="keyword">return</span> <span class="keyword">true</span>;
+                            <span class="delimiter">}</span>
+                            <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                                owner_ = caller;
+                                holds_ = <span class="int">1</span>;
+                                <span class="keyword">return</span> <span class="keyword">true</span>;
+                            <span class="delimiter">}</span>
+                            <span class="keyword">else</span> <span class="delimiter">{</span>
+                                nanos = deadline - Utils.nanoTime<span class="delimiter">(</span><span class="delimiter">)</span>;
+                                <span class="keyword">if</span> <span class="delimiter">(</span>nanos &lt;= <span class="int">0</span><span class="delimiter">)</span>
+                                    <span class="keyword">return</span> <span class="keyword">false</span>;
+                            <span class="delimiter">}</span>
+                        <span class="delimiter">}</span>
+                    <span class="delimiter">}</span>
+                    <span class="keyword">catch</span> <span class="delimiter">(</span>InterruptedException ex<span class="delimiter">)</span> <span class="delimiter">{</span>
+                        <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> notify<span class="delimiter">(</span><span class="delimiter">)</span>;
+                        <span class="keyword">throw</span> ex;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public synchronized void unlock<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span> != owner_<span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> IllegalMonitorStateException<span class="delimiter">(</span><span class="string">&quot;Not owner&quot;</span><span class="delimiter">)</span>;
+
+            <span class="keyword">if</span> <span class="delimiter">(</span>--holds_ == <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                owner_ = <span class="keyword">null</span>;
+                notify<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public <span class="keyword">final</span> boolean isFair<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> <span class="keyword">false</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Sync object for fair locks
+     */
+    <span class="keyword">final</span> static <span class="keyword">class</span> <a title="object scala.actors.threadpool.locks.ReentrantLock.FairSync" id="86178">FairSync</a> <span class="keyword">extends</span> Sync implements WaitQueue.QueuedSync <span class="delimiter">{</span>
+        <span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="1608196">serialVersionUID</a> = -<span class="long">3000897897090466540L</span>;
+
+        <span class="keyword">private</span> transient WaitQueue <span title="">wq_</span> = <span class="keyword">new</span> FIFOWaitQueue<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+        FairSync<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span><span class="delimiter">}</span>
+
+        public synchronized boolean recheck<span class="delimiter">(</span>WaitQueue.WaitNode node<span class="delimiter">)</span> <span class="delimiter">{</span>
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                owner_ = caller;
+                holds_ = <span class="int">1</span>;
+                <span class="keyword">return</span> <span class="keyword">true</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">return</span> <span class="keyword">true</span>;
+            <span class="delimiter">}</span>
+            wq_.insert<span class="delimiter">(</span>node<span class="delimiter">)</span>;
+            <span class="keyword">return</span> <span class="keyword">false</span>;
+        <span class="delimiter">}</span>
+
+        public synchronized void takeOver<span class="delimiter">(</span>WaitQueue.WaitNode node<span class="delimiter">)</span> <span class="delimiter">{</span>
+            // assert (holds_ == 1 &amp;&amp; owner_ == Thread.currentThread()
+            owner_ = node.getOwner<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public void lock<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    owner_ = caller;
+                    holds_ = <span class="int">1</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            WaitQueue.WaitNode n = <span class="keyword">new</span> WaitQueue.WaitNode<span class="delimiter">(</span><span class="delimiter">)</span>;
+            n.doWaitUninterruptibly<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public void lockInterruptibly<span class="delimiter">(</span><span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>Thread.interrupted<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">throw</span> <span class="keyword">new</span> InterruptedException<span class="delimiter">(</span><span class="delimiter">)</span>;
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    owner_ = caller;
+                    holds_ = <span class="int">1</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">return</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            WaitQueue.WaitNode n = <span class="keyword">new</span> WaitQueue.WaitNode<span class="delimiter">(</span><span class="delimiter">)</span>;
+            n.doWait<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public boolean tryLock<span class="delimiter">(</span>long nanos<span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>Thread.interrupted<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">throw</span> <span class="keyword">new</span> InterruptedException<span class="delimiter">(</span><span class="delimiter">)</span>;
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>owner_ == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    owner_ = caller;
+                    holds_ = <span class="int">1</span>;
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>caller == owner_<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    incHolds<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            WaitQueue.WaitNode n = <span class="keyword">new</span> WaitQueue.WaitNode<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">return</span> n.doTimedWait<span class="delimiter">(</span><span class="keyword">this</span>, nanos<span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">protected</span> synchronized WaitQueue.WaitNode getSignallee<span class="delimiter">(</span>Thread caller<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>caller != owner_<span class="delimiter">)</span>
+                <span class="keyword">throw</span> <span class="keyword">new</span> IllegalMonitorStateException<span class="delimiter">(</span><span class="string">&quot;Not owner&quot;</span><span class="delimiter">)</span>;
+            // assert (holds_ &gt; 0)
+            <span class="keyword">if</span> <span class="delimiter">(</span>holds_ &gt;= <span class="int">2</span><span class="delimiter">)</span> <span class="delimiter">{</span> // current thread will keep the lock
+                --holds_;
+                <span class="keyword">return</span> <span class="keyword">null</span>;
+            <span class="delimiter">}</span>
+            // assert (holds_ == 1)
+            WaitQueue.WaitNode w = wq_.extract<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>w == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span> // if none, clear for new arrivals
+                owner_ = <span class="keyword">null</span>;
+                holds_ = <span class="int">0</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> w;
+        <span class="delimiter">}</span>
+
+        public void unlock<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            Thread caller = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span> <span class="delimiter">{</span>
+                WaitQueue.WaitNode w = getSignallee<span class="delimiter">(</span>caller<span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>w == <span class="keyword">null</span><span class="delimiter">)</span> <span class="keyword">return</span>;  // no one to signal
+                <span class="keyword">if</span> <span class="delimiter">(</span>w.signal<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">return</span>; // notify if still waiting, else skip
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public <span class="keyword">final</span> boolean isFair<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> <span class="keyword">true</span>;
+        <span class="delimiter">}</span>
+
+        public synchronized boolean hasQueuedThreads<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> wq_.hasNodes<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public synchronized int getQueueLength<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> wq_.getLength<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public synchronized Collection getQueuedThreads<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> wq_.getWaitingThreads<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public synchronized boolean isQueued<span class="delimiter">(</span>Thread thread<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> wq_.isWaiting<span class="delimiter">(</span>thread<span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">private</span> void readObject<span class="delimiter">(</span>java.io.ObjectInputStream in<span class="delimiter">)</span>
+                throws java.io.IOException, ClassNotFoundException <span class="delimiter">{</span>
+            in.defaultReadObject<span class="delimiter">(</span><span class="delimiter">)</span>;
+            synchronized <span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                wq_ = <span class="keyword">new</span> FIFOWaitQueue<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Creates an instance of {@code ReentrantLock}.
+     * This is equivalent to using {@code ReentrantLock(false)}.
+     */
+    public ReentrantLock<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        sync = <span class="keyword">new</span> NonfairSync<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Creates an instance of {@code ReentrantLock} with the
+     * given fairness policy.
+     *
+     * @param fair {@code true} if this lock should use a fair ordering policy
+     */
+    public ReentrantLock<a title="(fair: Boolean)scala.actors.threadpool.locks.ReentrantLock" id="86029" class="delimiter">(</a>boolean <a title="Boolean" id="1608199">fair</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        sync = <span class="delimiter">(</span>fair<span class="delimiter">)</span>? <span class="delimiter">(</span>Sync<span class="delimiter">)</span><span class="keyword">new</span> FairSync<span class="delimiter">(</span><span class="delimiter">)</span> : <span class="keyword">new</span> NonfairSync<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+
+    /**
+     * Acquires the lock.
+     *
+     * &lt;p&gt;Acquires the lock if it is not held by another thread and returns
+     * immediately, setting the lock hold count to one.
+     *
+     * &lt;p&gt;If the current thread already holds the lock then the hold
+     * count is incremented by one and the method returns immediately.
+     *
+     * &lt;p&gt;If the lock is held by another thread then the
+     * current thread becomes disabled for thread scheduling
+     * purposes and lies dormant until the lock has been acquired,
+     * at which time the lock hold count is set to one.
+     */
+    public void <a title="()Unit" id="86030">lock</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        sync.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Acquires the lock unless the current thread is
+     * {@linkplain Thread#interrupt interrupted}.
+     *
+     * &lt;p&gt;Acquires the lock if it is not held by another thread and returns
+     * immediately, setting the lock hold count to one.
+     *
+     * &lt;p&gt;If the current thread already holds this lock then the hold count
+     * is incremented by one and the method returns immediately.
+     *
+     * &lt;p&gt;If the lock is held by another thread then the
+     * current thread becomes disabled for thread scheduling
+     * purposes and lies dormant until one of two things happens:
+     *
+     * &lt;ul&gt;
+     *
+     * &lt;li&gt;The lock is acquired by the current thread; or
+     *
+     * &lt;li&gt;Some other thread {@linkplain Thread#interrupt interrupts} the
+     * current thread.
+     *
+     * &lt;/ul&gt;
+     *
+     * &lt;p&gt;If the lock is acquired by the current thread then the lock hold
+     * count is set to one.
+     *
+     * &lt;p&gt;If the current thread:
+     *
+     * &lt;ul&gt;
+     *
+     * &lt;li&gt;has its interrupted status set on entry to this method; or
+     *
+     * &lt;li&gt;is {@linkplain Thread#interrupt interrupted} while acquiring
+     * the lock,
+     *
+     * &lt;/ul&gt;
+     *
+     * then {@link InterruptedException} is thrown and the current thread's
+     * interrupted status is cleared.
+     *
+     * &lt;p&gt;In this implementation, as this method is an explicit
+     * interruption point, preference is given to responding to the
+     * interrupt over normal or reentrant acquisition of the lock.
+     *
+     * @throws InterruptedException if the current thread is interrupted
+     */
+    public void <a title="()Unit" id="86031">lockInterruptibly</a><span class="delimiter">(</span><span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+        sync.lockInterruptibly<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Acquires the lock only if it is not held by another thread at the time
+     * of invocation.
+     *
+     * &lt;p&gt;Acquires the lock if it is not held by another thread and
+     * returns immediately with the value {@code true}, setting the
+     * lock hold count to one. Even when this lock has been set to use a
+     * fair ordering policy, a call to {@code tryLock()} &lt;em&gt;will&lt;/em&gt;
+     * immediately acquire the lock if it is available, whether or not
+     * other threads are currently waiting for the lock.
+     * This &amp;quot;barging&amp;quot; behavior can be useful in certain
+     * circumstances, even though it breaks fairness. If you want to honor
+     * the fairness setting for this lock, then use
+     * {@link #tryLock(long, TimeUnit) tryLock(0, TimeUnit.SECONDS) }
+     * which is almost equivalent (it also detects interruption).
+     *
+     * &lt;p&gt; If the current thread already holds this lock then the hold
+     * count is incremented by one and the method returns {@code true}.
+     *
+     * &lt;p&gt;If the lock is held by another thread then this method will return
+     * immediately with the value {@code false}.
+     *
+     * @return {@code true} if the lock was free and was acquired by the
+     *         current thread, or the lock was already held by the current
+     *         thread; and {@code false} otherwise
+     */
+    public boolean <a title="()Boolean" id="86032">tryLock</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.tryLock<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Acquires the lock if it is not held by another thread within the given
+     * waiting time and the current thread has not been
+     * {@linkplain Thread#interrupt interrupted}.
+     *
+     * &lt;p&gt;Acquires the lock if it is not held by another thread and returns
+     * immediately with the value {@code true}, setting the lock hold count
+     * to one. If this lock has been set to use a fair ordering policy then
+     * an available lock &lt;em&gt;will not&lt;/em&gt; be acquired if any other threads
+     * are waiting for the lock. This is in contrast to the {@link #tryLock()}
+     * method. If you want a timed {@code tryLock} that does permit barging on
+     * a fair lock then combine the timed and un-timed forms together:
+     *
+     * &lt;pre&gt;if (lock.tryLock() || lock.tryLock(timeout, unit) ) { ... }
+     * &lt;/pre&gt;
+     *
+     * &lt;p&gt;If the current thread
+     * already holds this lock then the hold count is incremented by one and
+     * the method returns {@code true}.
+     *
+     * &lt;p&gt;If the lock is held by another thread then the
+     * current thread becomes disabled for thread scheduling
+     * purposes and lies dormant until one of three things happens:
+     *
+     * &lt;ul&gt;
+     *
+     * &lt;li&gt;The lock is acquired by the current thread; or
+     *
+     * &lt;li&gt;Some other thread {@linkplain Thread#interrupt interrupts}
+     * the current thread; or
+     *
+     * &lt;li&gt;The specified waiting time elapses
+     *
+     * &lt;/ul&gt;
+     *
+     * &lt;p&gt;If the lock is acquired then the value {@code true} is returned and
+     * the lock hold count is set to one.
+     *
+     * &lt;p&gt;If the current thread:
+     *
+     * &lt;ul&gt;
+     *
+     * &lt;li&gt;has its interrupted status set on entry to this method; or
+     *
+     * &lt;li&gt;is {@linkplain Thread#interrupt interrupted} while
+     * acquiring the lock,
+     *
+     * &lt;/ul&gt;
+     * then {@link InterruptedException} is thrown and the current thread's
+     * interrupted status is cleared.
+     *
+     * &lt;p&gt;If the specified waiting time elapses then the value {@code false}
+     * is returned.  If the time is less than or equal to zero, the method
+     * will not wait at all.
+     *
+     * &lt;p&gt;In this implementation, as this method is an explicit
+     * interruption point, preference is given to responding to the
+     * interrupt over normal or reentrant acquisition of the lock, and
+     * over reporting the elapse of the waiting time.
+     *
+     * @param timeout the time to wait for the lock
+     * @param unit the time unit of the timeout argument
+     * @return {@code true} if the lock was free and was acquired by the
+     *         current thread, or the lock was already held by the current
+     *         thread; and {@code false} if the waiting time elapsed before
+     *         the lock could be acquired
+     * @throws InterruptedException if the current thread is interrupted
+     * @throws NullPointerException if the time unit is null
+     *
+     */
+    public boolean <a title="(timeout: Long, unit: scala.actors.threadpool.TimeUnit)Boolean" id="86033">tryLock</a><span class="delimiter">(</span>long <a title="Long" id="86164">timeout</a>, TimeUnit <a title="scala.actors.threadpool.TimeUnit" id="86165">unit</a><span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.tryLock<span class="delimiter">(</span>unit.toNanos<span class="delimiter">(</span>timeout<span class="delimiter">)</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Attempts to release this lock.
+     *
+     * &lt;p&gt;If the current thread is the holder of this lock then the hold
+     * count is decremented.  If the hold count is now zero then the lock
+     * is released.  If the current thread is not the holder of this
+     * lock then {@link IllegalMonitorStateException} is thrown.
+     *
+     * @throws IllegalMonitorStateException if the current thread does not
+     *         hold this lock
+     */
+    public void <a title="()Unit" id="86034">unlock</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        sync.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns a {@link Condition} instance for use with this
+     * {@link Lock} instance.
+     *
+     * &lt;p&gt;The returned {@link Condition} instance supports the same
+     * usages as do the {@link Object} monitor methods ({@link
+     * Object#wait() wait}, {@link Object#notify notify}, and {@link
+     * Object#notifyAll notifyAll}) when used with the built-in
+     * monitor lock.
+     *
+     * &lt;ul&gt;
+     *
+     * &lt;li&gt;If this lock is not held when any of the {@link Condition}
+     * {@linkplain Condition#await() waiting} or {@linkplain
+     * Condition#signal signalling} methods are called, then an {@link
+     * IllegalMonitorStateException} is thrown.
+     *
+     * &lt;li&gt;When the condition {@linkplain Condition#await() waiting}
+     * methods are called the lock is released and, before they
+     * return, the lock is reacquired and the lock hold count restored
+     * to what it was when the method was called.
+     *
+     * &lt;li&gt;If a thread is {@linkplain Thread#interrupt interrupted}
+     * while waiting then the wait will terminate, an {@link
+     * InterruptedException} will be thrown, and the thread's
+     * interrupted status will be cleared.
+     *
+     * &lt;li&gt; Waiting threads are signalled in FIFO order.
+     *
+     * &lt;li&gt;The ordering of lock reacquisition for threads returning
+     * from waiting methods is the same as for threads initially
+     * acquiring the lock, which is in the default case not specified,
+     * but for &lt;em&gt;fair&lt;/em&gt; locks favors those threads that have been
+     * waiting the longest.
+     *
+     * &lt;/ul&gt;
+     *
+     * @return the Condition object
+     */
+    public <a href="Condition.java.html#9992" title="scala.actors.threadpool.locks.Condition">Condition</a> <a title="()scala.actors.threadpool.locks.Condition" id="86035">newCondition</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> isFair<span class="delimiter">(</span><span class="delimiter">)</span> ? <span class="delimiter">(</span>Condition<span class="delimiter">)</span><span class="keyword">new</span> FIFOCondVar<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> : <span class="keyword">new</span> CondVar<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Queries the number of holds on this lock by the current thread.
+     *
+     * &lt;p&gt;A thread has a hold on a lock for each lock action that is not
+     * matched by an unlock action.
+     *
+     * &lt;p&gt;The hold count information is typically only used for testing and
+     * debugging purposes. For example, if a certain section of code should
+     * not be entered with the lock already held then we can assert that
+     * fact:
+     *
+     * &lt;pre&gt;
+     * class X {
+     *   ReentrantLock lock = new ReentrantLock();
+     *   // ...
+     *   public void m() {
+     *     assert lock.getHoldCount() == 0;
+     *     lock.lock();
+     *     try {
+     *       // ... method body
+     *     } finally {
+     *       lock.unlock();
+     *     }
+     *   }
+     * }
+     * &lt;/pre&gt;
+     *
+     * @return the number of holds on this lock by the current thread,
+     *         or zero if this lock is not held by the current thread
+     */
+    public int <a title="()Int" id="86036">getHoldCount</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.getHoldCount<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Queries if this lock is held by the current thread.
+     *
+     * &lt;p&gt;Analogous to the {@link Thread#holdsLock} method for built-in
+     * monitor locks, this method is typically used for debugging and
+     * testing. For example, a method that should only be called while
+     * a lock is held can assert that this is the case:
+     *
+     * &lt;pre&gt;
+     * class X {
+     *   ReentrantLock lock = new ReentrantLock();
+     *   // ...
+     *
+     *   public void m() {
+     *       assert lock.isHeldByCurrentThread();
+     *       // ... method body
+     *   }
+     * }
+     * &lt;/pre&gt;
+     *
+     * &lt;p&gt;It can also be used to ensure that a reentrant lock is used
+     * in a non-reentrant manner, for example:
+     *
+     * &lt;pre&gt;
+     * class X {
+     *   ReentrantLock lock = new ReentrantLock();
+     *   // ...
+     *
+     *   public void m() {
+     *       assert !lock.isHeldByCurrentThread();
+     *       lock.lock();
+     *       try {
+     *           // ... method body
+     *       } finally {
+     *           lock.unlock();
+     *       }
+     *   }
+     * }
+     * &lt;/pre&gt;
+     *
+     * @return {@code true} if current thread holds this lock and
+     *         {@code false} otherwise
+     */
+    public boolean <a title="()Boolean" id="86037">isHeldByCurrentThread</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.isHeldByCurrentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Queries if this lock is held by any thread. This method is
+     * designed for use in monitoring of the system state,
+     * not for synchronization control.
+     *
+     * @return {@code true} if any thread holds this lock and
+     *         {@code false} otherwise
+     */
+    public boolean <a title="()Boolean" id="86038">isLocked</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.isLocked<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns {@code true} if this lock has fairness set true.
+     *
+     * @return {@code true} if this lock has fairness set true
+     */
+    public <span class="keyword">final</span> boolean <a title="()Boolean" id="86039">isFair</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.isFair<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the thread that currently owns this lock, or
+     * {@code null} if not owned. When this method is called by a
+     * thread that is not the owner, the return value reflects a
+     * best-effort approximation of current lock status. For example,
+     * the owner may be momentarily {@code null} even if there are
+     * threads trying to acquire the lock but have not yet done so.
+     * This method is designed to facilitate construction of
+     * subclasses that provide more extensive lock monitoring
+     * facilities.
+     *
+     * @return the owner, or {@code null} if not owned
+     */
+    <span class="keyword">protected</span> Thread <a title="()Thread" id="86040">getOwner</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.getOwner<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Queries whether any threads are waiting to acquire this lock. Note that
+     * because cancellations may occur at any time, a {@code true}
+     * return does not guarantee that any other thread will ever
+     * acquire this lock.  This method is designed primarily for use in
+     * monitoring of the system state.
+     *
+     * @return {@code true} if there may be other threads waiting to
+     *         acquire the lock
+     */
+    public <span class="keyword">final</span> boolean <a title="()Boolean" id="86041">hasQueuedThreads</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.hasQueuedThreads<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+
+    /**
+     * Queries whether the given thread is waiting to acquire this
+     * lock. Note that because cancellations may occur at any time, a
+     * {@code true} return does not guarantee that this thread
+     * will ever acquire this lock.  This method is designed primarily for use
+     * in monitoring of the system state.
+     *
+     * @param thread the thread
+     * @return {@code true} if the given thread is queued waiting for this lock
+     * @throws NullPointerException if the thread is null
+     */
+    public <span class="keyword">final</span> boolean <a title="(thread: Thread)Boolean" id="86042">hasQueuedThread</a><span class="delimiter">(</span>Thread <a title="Thread" id="1608208">thread</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.isQueued<span class="delimiter">(</span>thread<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+
+    /**
+     * Returns an estimate of the number of threads waiting to
+     * acquire this lock.  The value is only an estimate because the number of
+     * threads may change dynamically while this method traverses
+     * internal data structures.  This method is designed for use in
+     * monitoring of the system state, not for synchronization
+     * control.
+     *
+     * @return the estimated number of threads waiting for this lock
+     */
+    public <span class="keyword">final</span> int <a title="()Int" id="86043">getQueueLength</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.getQueueLength<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns a collection containing threads that may be waiting to
+     * acquire this lock.  Because the actual set of threads may change
+     * dynamically while constructing this result, the returned
+     * collection is only a best-effort estimate.  The elements of the
+     * returned collection are in no particular order.  This method is
+     * designed to facilitate construction of subclasses that provide
+     * more extensive monitoring facilities.
+     *
+     * @return the collection of threads
+     */
+    <span class="keyword">protected</span> Collection <a title="()java.util.Collection" id="86044">getQueuedThreads</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> sync.getQueuedThreads<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Queries whether any threads are waiting on the given condition
+     * associated with this lock. Note that because timeouts and
+     * interrupts may occur at any time, a {@code true} return does
+     * not guarantee that a future {@code signal} will awaken any
+     * threads.  This method is designed primarily for use in
+     * monitoring of the system state.
+     *
+     * @param condition the condition
+     * @return {@code true} if there are any waiting threads
+     * @throws IllegalMonitorStateException if this lock is not held
+     * @throws IllegalArgumentException if the given condition is
+     *         not associated with this lock
+     * @throws NullPointerException if the condition is null
+     */
+    public boolean <a title="(condition: scala.actors.threadpool.locks.Condition)Boolean" id="86045">hasWaiters</a><span class="delimiter">(</span><a href="Condition.java.html#9992" title="scala.actors.threadpool.locks.Condition">Condition</a> <a title="scala.actors.threadpool.locks.Condition" id="1608212">condition</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> asCondVar<span class="delimiter">(</span>condition<span class="delimiter">)</span>.hasWaiters<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns an estimate of the number of threads waiting on the
+     * given condition associated with this lock. Note that because
+     * timeouts and interrupts may occur at any time, the estimate
+     * serves only as an upper bound on the actual number of waiters.
+     * This method is designed for use in monitoring of the system
+     * state, not for synchronization control.
+     *
+     * @param condition the condition
+     * @return the estimated number of waiting threads
+     * @throws IllegalMonitorStateException if this lock is not held
+     * @throws IllegalArgumentException if the given condition is
+     *         not associated with this lock
+     * @throws NullPointerException if the condition is null
+     */
+    public int <a title="(condition: scala.actors.threadpool.locks.Condition)Int" id="86046">getWaitQueueLength</a><span class="delimiter">(</span><a href="Condition.java.html#9992" title="scala.actors.threadpool.locks.Condition">Condition</a> <a title="scala.actors.threadpool.locks.Condition" id="1608214">condition</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> asCondVar<span class="delimiter">(</span>condition<span class="delimiter">)</span>.getWaitQueueLength<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns a collection containing those threads that may be
+     * waiting on the given condition associated with this lock.
+     * Because the actual set of threads may change dynamically while
+     * constructing this result, the returned collection is only a
+     * best-effort estimate. The elements of the returned collection
+     * are in no particular order.  This method is designed to
+     * facilitate construction of subclasses that provide more
+     * extensive condition monitoring facilities.
+     *
+     * @param condition the condition
+     * @return the collection of threads
+     * @throws IllegalMonitorStateException if this lock is not held
+     * @throws IllegalArgumentException if the given condition is
+     *         not associated with this lock
+     * @throws NullPointerException if the condition is null
+     */
+    <span class="keyword">protected</span> Collection <a title="(condition: scala.actors.threadpool.locks.Condition)java.util.Collection" id="86047">getWaitingThreads</a><span class="delimiter">(</span><a href="Condition.java.html#9992" title="scala.actors.threadpool.locks.Condition">Condition</a> <a title="scala.actors.threadpool.locks.Condition" id="1608216">condition</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> asCondVar<span class="delimiter">(</span>condition<span class="delimiter">)</span>.getWaitingThreads<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns a string identifying this lock, as well as its lock state.
+     * The state, in brackets, includes either the String {@code &quot;Unlocked&quot;}
+     * or the String {@code &quot;Locked by&quot;} followed by the
+     * {@linkplain Thread#getName name} of the owning thread.
+     *
+     * @return a string identifying this lock, as well as its lock state
+     */
+    public String <a title="()String" id="86048">toString</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        Thread o = getOwner<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> <span class="keyword">super</span>.toString<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="delimiter">(</span><span class="delimiter">(</span>o == <span class="keyword">null</span><span class="delimiter">)</span> ?
+                                   <span class="string">&quot;[Unlocked]&quot;</span> :
+                                   <span class="string">&quot;[Locked by thread &quot;</span> + o.getName<span class="delimiter">(</span><span class="delimiter">)</span> + <span class="string">&quot;]&quot;</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> <a href="CondVar.java.html#9983" title="scala.actors.threadpool.locks.CondVar">CondVar</a> <a title="(condition: scala.actors.threadpool.locks.Condition)scala.actors.threadpool.locks.CondVar" id="86049">asCondVar</a><span class="delimiter">(</span><a href="Condition.java.html#9992" title="scala.actors.threadpool.locks.Condition">Condition</a> <a title="scala.actors.threadpool.locks.Condition" id="1608219">condition</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>condition == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>!<span class="delimiter">(</span>condition instanceof CondVar<span class="delimiter">)</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="string">&quot;not owner&quot;</span><span class="delimiter">)</span>;
+        CondVar condVar = <span class="delimiter">(</span>CondVar<span class="delimiter">)</span>condition;
+        <span class="keyword">if</span> <span class="delimiter">(</span>condVar.lock != <span class="keyword">this</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="string">&quot;not owner&quot;</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> condVar;
+    <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
