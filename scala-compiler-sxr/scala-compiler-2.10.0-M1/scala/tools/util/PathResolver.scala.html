@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/tools/util/PathResolver.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/* NSC -- new Scala compiler
+ * Copyright 2006-2011 LAMP/EPFL
+ * @author  Paul Phillips
+ */
+
+<span class="keyword">package</span> scala.tools
+<span class="keyword">package</span> util
+
+<span class="keyword">import</span> java.net.<span class="delimiter">{</span> URL, MalformedURLException <span class="delimiter">}</span>
+<span class="keyword">import</span> scala.tools.reflect.<a href="../reflect/WrappedProperties.scala.html#35648" title="object scala.tools.reflect.WrappedProperties">WrappedProperties</a>.AccessControl
+<span class="keyword">import</span> nsc.<span class="delimiter">{</span> Settings, GenericRunnerSettings <span class="delimiter">}</span>
+<span class="keyword">import</span> nsc.util.<span class="delimiter">{</span> ClassPath, JavaClassPath, ScalaClassLoader <span class="delimiter">}</span>
+<span class="keyword">import</span> nsc.io.<span class="delimiter">{</span> File, Directory, Path, AbstractFile <span class="delimiter">}</span>
+<span class="keyword">import</span> <a href="../nsc/util/ClassPath.scala.html#34911" title="object scala.tools.nsc.util.ClassPath">ClassPath</a>.<span class="delimiter">{</span> JavaContext, DefaultJavaContext, join, split <span class="delimiter">}</span>
+<span class="keyword">import</span> <span title="object PartialFunction">PartialFunction</span>.condOpt
+
+// Loosely based on the draft specification at:
+// https://wiki.scala-lang.org/display/SW/Classpath
+
+<span class="keyword">object</span> <a title="object scala.tools.util.PathResolver" id="36010">PathResolver</a> <span title="ScalaObject" class="delimiter">{</span>
+  // Imports property/environment functions which suppress
+  // security exceptions.
+  <span class="keyword">import</span> <a href="../reflect/WrappedProperties.scala.html#193365" title="object tools.reflect.WrappedProperties.AccessControl">AccessControl</a>._
+
+  <span class="keyword">def</span> <a title="(xs: String*)String" id="193249">firstNonEmpty</a><span class="delimiter">(</span><a title="String*" id="711475">xs</a>: <span title="String*">String</span>*<span class="delimiter">)</span>            = <a href="#711475" title="String*">xs</a> <span title="(p: String =&gt; Boolean)Option[String]">find</span> <span class="delimiter">(</span><a href="#711483" title="String">_</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span> <span title="(default: =&gt; String)String">getOrElse</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+
+  /** Map all classpath elements to absolute paths and reconstruct the classpath.
+    */
+  <span class="keyword">def</span> <a title="(cp: String)String" id="193250">makeAbsolute</a><span class="delimiter">(</span><a title="String" id="711493">cp</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="../nsc/util/ClassPath.scala.html#34911" title="object scala.tools.nsc.util.ClassPath">ClassPath</a>.<a href="../nsc/util/ClassPath.scala.html#206764" title="(cp: String, f: String =&gt; String)String">map</a><span class="delimiter">(</span><a href="#711493" title="String">cp</a>, <a title="String" id="711497">x</a> =&gt; <a href="../nsc/io/Path.scala.html#187351" title="(path: String)scala.tools.nsc.io.Path">Path</a><span class="delimiter">(</span><a href="#711497" title="String">x</a><span class="delimiter">)</span>.<a href="../nsc/io/Path.scala.html#187211" title="=&gt; scala.tools.nsc.io.Path">toAbsolute</a>.<a href="../nsc/io/Path.scala.html#187222" title="=&gt; String">path</a><span class="delimiter">)</span>
+
+  /** pretty print class path */
+  <span class="keyword">def</span> <a title="(s: String)String" id="193251">ppcp</a><span class="delimiter">(</span><a title="String" id="711506">s</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="../nsc/util/ClassPath.scala.html#206762" title="(path: String)List[String]">split</a><span class="delimiter">(</span><a href="#711506" title="String">s</a><span class="delimiter">)</span> <span title="String" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> <span title="String(&quot;&quot;)">Nil</span>      =&gt; <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+    <span class="keyword">case</span> <a href="#711510" title="String">Seq</a><span class="delimiter">(</span><a title="String" id="711521">x</a><span class="delimiter">)</span>   =&gt; <a href="#711521" title="String">x</a>
+    <span class="keyword">case</span> <a title="String" id="711522">xs</a>       =&gt; <a href="#711522" title="List[String]">xs</a> <span title="(f: String =&gt; String)(implicit bf: scala.collection.generic.CanBuildFrom[List[String],String,List[String]])List[String]">map</span> <span class="delimiter">(</span><span title="String(&quot;\n&quot;)" class="string">&quot;\n&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#711539" title="String">_</a><span class="delimiter">)</span> <span title="=&gt; String">mkString</span>
+  <span class="delimiter">}</span>
+
+  /** Values found solely by inspecting environment or property variables.
+   */
+  <span class="keyword">object</span> <a title="object scala.tools.util.PathResolver.Environment" id="193252">Environment</a> <span title="ScalaObject" class="delimiter">{</span>
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; String" id="193351">searchForBootClasspath</a> = <span class="delimiter">(</span>
+      <a href="../reflect/WrappedProperties.scala.html#193460" title="=&gt; Iterator[(String, String)]">systemProperties</a> <span title="(p: ((String, String)) =&gt; Boolean)Option[(String, String)]">find</span> <span class="delimiter">(</span><a href="#234811" title="(String, String)">_</a>.<span title="=&gt; String">_1</span> <span title="(x$1: String)Boolean">endsWith</span> <span title="String(&quot;.boot.class.path&quot;)" class="string">&quot;.boot.class.path&quot;</span><span class="delimiter">)</span> <span title="(f: ((String, String)) =&gt; String)Option[String]">map</span> <span class="delimiter">(</span><a href="#234816" title="(String, String)">_</a>.<span title="=&gt; String">_2</span><span class="delimiter">)</span> <span title="(default: =&gt; String)String">getOrElse</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+    <span class="delimiter">)</span>
+
+    /** Environment variables which java pays attention to so it
+     *  seems we do as well.
+     */
+    <span class="keyword">def</span> <a title="=&gt; String" id="193352">classPathEnv</a>        =  <a href="../reflect/WrappedProperties.scala.html#193458" title="(name: String, alt: String)String">envOrElse</a><span class="delimiter">(</span><span title="String(&quot;CLASSPATH&quot;)" class="string">&quot;CLASSPATH&quot;</span>, <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193353">sourcePathEnv</a>       =  <a href="../reflect/WrappedProperties.scala.html#193458" title="(name: String, alt: String)String">envOrElse</a><span class="delimiter">(</span><span title="String(&quot;SOURCEPATH&quot;)" class="string">&quot;SOURCEPATH&quot;</span>, <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="=&gt; String" id="193354">javaBootClassPath</a>   = <a href="../reflect/WrappedProperties.scala.html#193455" title="(name: String, alt: String)String">propOrElse</a><span class="delimiter">(</span><span title="String(&quot;sun.boot.class.path&quot;)" class="string">&quot;sun.boot.class.path&quot;</span>, <a href="#193351" title="=&gt; String">searchForBootClasspath</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193355">javaExtDirs</a>         = <a href="../reflect/WrappedProperties.scala.html#193365" title="(name: String)String">propOrEmpty</a><span class="delimiter">(</span><span title="String(&quot;java.ext.dirs&quot;)" class="string">&quot;java.ext.dirs&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193356">scalaHome</a>           = <a href="../reflect/WrappedProperties.scala.html#193365" title="(name: String)String">propOrEmpty</a><span class="delimiter">(</span><span title="String(&quot;scala.home&quot;)" class="string">&quot;scala.home&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193357">scalaExtDirs</a>        = <a href="../reflect/WrappedProperties.scala.html#193365" title="(name: String)String">propOrEmpty</a><span class="delimiter">(</span><span title="String(&quot;scala.ext.dirs&quot;)" class="string">&quot;scala.ext.dirs&quot;</span><span class="delimiter">)</span>
+
+    /** The java classpath and whether to use it. */
+    <span class="keyword">def</span> <a title="=&gt; String" id="193358">javaUserClassPath</a>   = <a href="../reflect/WrappedProperties.scala.html#193455" title="(name: String, alt: String)String">propOrElse</a><span class="delimiter">(</span><span title="String(&quot;java.class.path&quot;)" class="string">&quot;java.class.path&quot;</span>, <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="193359">useJavaClassPath</a>    = <a href="../reflect/WrappedProperties.scala.html#193365" title="(name: String)Boolean">propOrFalse</a><span class="delimiter">(</span><span title="String(&quot;scala.usejavacp&quot;)" class="string">&quot;scala.usejavacp&quot;</span><span class="delimiter">)</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="193360">toString</a> = <span title="String(&quot;\n      |object Environment {\n      |  scalaHome          = %s (useJavaClassPath = %s)\n      |  javaBootClassPath  = &lt;%d chars&gt;\n      |  javaExtDirs        = %s\n      |  javaUserClassPath  = %s\n      |  scalaExtDirs       = %s\n      |}&quot;)" class="string">&quot;&quot;&quot;
+      |object Environment {
+      |  scalaHome          = %s (useJavaClassPath = %s)
+      |  javaBootClassPath  = &lt;%d chars&gt;
+      |  javaExtDirs        = %s
+      |  javaUserClassPath  = %s
+      |  scalaExtDirs       = %s
+      |}&quot;&quot;&quot;</span>.<span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">trim</span>.<span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">stripMargin</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span>
+        <a href="#193356" title="=&gt; String">scalaHome</a>, <a href="#193359" title="=&gt; Boolean">useJavaClassPath</a>,
+        <a href="#193354" title="=&gt; String">javaBootClassPath</a>.<span title="()Int">length</span>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#193355" title="=&gt; String">javaExtDirs</a><span class="delimiter">)</span>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#193358" title="=&gt; String">javaUserClassPath</a><span class="delimiter">)</span>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#193357" title="=&gt; String">scalaExtDirs</a><span class="delimiter">)</span>
+      <span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Default values based on those in Environment as interpreted according
+   *  to the path resolution specification.
+   */
+  <span class="keyword">object</span> <a title="object scala.tools.util.PathResolver.Defaults" id="193254">Defaults</a> <span title="ScalaObject" class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193259">scalaSourcePath</a>   = <a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a>.<a href="#193353" title="=&gt; String">sourcePathEnv</a>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193260">javaBootClassPath</a> = <a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a>.<a href="#193354" title="=&gt; String">javaBootClassPath</a>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193261">javaUserClassPath</a> = <a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a>.<a href="#193358" title="=&gt; String">javaUserClassPath</a>
+    <span class="keyword">def</span> <a title="=&gt; String" id="193262">javaExtDirs</a>       = <a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a>.<a href="#193355" title="=&gt; String">javaExtDirs</a>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="193263">useJavaClassPath</a>  = <a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a>.<a href="#193359" title="=&gt; Boolean">useJavaClassPath</a>
+
+    <span class="keyword">def</span> <a title="=&gt; String" id="193264">scalaHome</a>         = <a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a>.<a href="#193356" title="=&gt; String">scalaHome</a>
+    <span class="keyword">def</span> <a title="=&gt; scala.tools.nsc.io.Directory" id="193265">scalaHomeDir</a>      = <a href="../nsc/io/Directory.scala.html#225219" title="(path: scala.tools.nsc.io.Path)scala.tools.nsc.io.Directory">Directory</a><span class="delimiter">(</span><a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path">scalaHome</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="193266">scalaHomeExists</a>   = <a href="#193265" title="=&gt; scala.tools.nsc.io.Directory">scalaHomeDir</a>.<a href="../nsc/io/Path.scala.html#187247" title="=&gt; Boolean">isDirectory</a>
+    <span class="keyword">def</span> <a title="=&gt; scala.tools.nsc.io.Directory" id="193267">scalaLibDir</a>       = <a href="../nsc/io/Directory.scala.html#225219" title="(path: scala.tools.nsc.io.Path)scala.tools.nsc.io.Directory">Directory</a><span class="delimiter">(</span><a href="#193265" title="=&gt; scala.tools.nsc.io.Directory">scalaHomeDir</a> <a href="../nsc/io/Path.scala.html#187216" title="(child: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">/</a> <a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path" class="string">&quot;lib&quot;</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; scala.tools.nsc.io.Directory" id="193268">scalaClassesDir</a>   = <a href="../nsc/io/Directory.scala.html#225219" title="(path: scala.tools.nsc.io.Path)scala.tools.nsc.io.Directory">Directory</a><span class="delimiter">(</span><a href="#193265" title="=&gt; scala.tools.nsc.io.Directory">scalaHomeDir</a> <a href="../nsc/io/Path.scala.html#187216" title="(child: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">/</a> <a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path" class="string">&quot;classes&quot;</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="=&gt; scala.tools.nsc.io.File" id="193269">scalaLibAsJar</a>     = <a href="../nsc/io/File.scala.html#187333" title="(path: scala.tools.nsc.io.Path)(implicit codec: scala.io.Codec)scala.tools.nsc.io.File">File</a><span title="=&gt; scala.io.Codec" class="delimiter">(</span><a href="#193267" title="=&gt; scala.tools.nsc.io.Directory">scalaLibDir</a> <a href="../nsc/io/Path.scala.html#187216" title="(child: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">/</a> <a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path" class="string">&quot;scala-library.jar&quot;</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; scala.tools.nsc.io.Directory" id="193270">scalaLibAsDir</a>     = <a href="../nsc/io/Directory.scala.html#225219" title="(path: scala.tools.nsc.io.Path)scala.tools.nsc.io.Directory">Directory</a><span class="delimiter">(</span><a href="#193268" title="=&gt; scala.tools.nsc.io.Directory">scalaClassesDir</a> <a href="../nsc/io/Path.scala.html#187216" title="(child: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">/</a> <a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path" class="string">&quot;library&quot;</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="=&gt; Option[scala.tools.nsc.io.Directory]" id="193271">scalaLibDirFound</a>: <span title="Option[scala.tools.nsc.io.Directory]">Option</span><span class="delimiter">[</span>Directory<span class="delimiter">]</span> =
+      <span title="Option[scala.tools.nsc.io.Directory]" class="keyword">if</span> <span class="delimiter">(</span><a href="#193269" title="=&gt; scala.tools.nsc.io.File">scalaLibAsJar</a>.<a href="../nsc/io/Path.scala.html#187246" title="=&gt; Boolean">isFile</a><span class="delimiter">)</span> <span title="(x: scala.tools.nsc.io.Directory)Some[scala.tools.nsc.io.Directory]">Some</span><span class="delimiter">(</span><a href="#193267" title="=&gt; scala.tools.nsc.io.Directory">scalaLibDir</a><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Option[scala.tools.nsc.io.Directory]" class="keyword">if</span> <span class="delimiter">(</span><a href="#193270" title="=&gt; scala.tools.nsc.io.Directory">scalaLibAsDir</a>.<a href="../nsc/io/Path.scala.html#187247" title="=&gt; Boolean">isDirectory</a><span class="delimiter">)</span> <span title="(x: scala.tools.nsc.io.Directory)Some[scala.tools.nsc.io.Directory]">Some</span><span class="delimiter">(</span><a href="#193268" title="=&gt; scala.tools.nsc.io.Directory">scalaClassesDir</a><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="object None">None</span>
+
+    <span class="keyword">def</span> <a title="=&gt; String" id="193272">scalaLibFound</a> =
+      <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#193269" title="=&gt; scala.tools.nsc.io.File">scalaLibAsJar</a>.<a href="../nsc/io/Path.scala.html#187246" title="=&gt; Boolean">isFile</a><span class="delimiter">)</span> <a href="#193269" title="=&gt; scala.tools.nsc.io.File">scalaLibAsJar</a>.<a href="../nsc/io/Path.scala.html#187222" title="=&gt; String">path</a>
+      <span class="keyword">else</span> <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#193270" title="=&gt; scala.tools.nsc.io.Directory">scalaLibAsDir</a>.<a href="../nsc/io/Path.scala.html#187247" title="=&gt; Boolean">isDirectory</a><span class="delimiter">)</span> <a href="#193270" title="=&gt; scala.tools.nsc.io.Directory">scalaLibAsDir</a>.<a href="../nsc/io/Path.scala.html#187222" title="=&gt; String">path</a>
+      <span class="keyword">else</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+
+    // XXX It must be time for someone to figure out what all these things
+    // are intended to do.  This is disabled here because it was causing all
+    // the scala jars to end up on the classpath twice: one on the boot
+    // classpath as set up by the runner (or regular classpath under -nobootcp)
+    // and then again here.
+    <span class="keyword">def</span> <a title="=&gt; String" id="193273">scalaBootClassPath</a>  = <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+    // scalaLibDirFound match {
+    //   case Some(dir) if scalaHomeExists =&gt;
+    //     val paths = ClassPath expandDir dir.path
+    //     join(paths: _*)
+    //   case _                            =&gt; &quot;&quot;
+    // }
+
+    <span class="keyword">def</span> <a title="=&gt; String" id="193274">scalaExtDirs</a> = <a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a>.<a href="#193357" title="=&gt; String">scalaExtDirs</a>
+
+    <span class="keyword">def</span> <a title="=&gt; String" id="193275">scalaPluginPath</a> = <span class="delimiter">(</span><a href="#193265" title="=&gt; scala.tools.nsc.io.Directory">scalaHomeDir</a> <a href="../nsc/io/Path.scala.html#187216" title="(child: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">/</a> <a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path" class="string">&quot;misc&quot;</a> <a href="../nsc/io/Path.scala.html#187216" title="(child: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">/</a> <a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path" class="string">&quot;scala-devel&quot;</a> <a href="../nsc/io/Path.scala.html#187216" title="(child: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">/</a> <a href="../nsc/io/Path.scala.html#187343" title="implicit scala.tools.nsc.io.Path.string2path : (s: String)scala.tools.nsc.io.Path" class="string">&quot;plugins&quot;</a><span class="delimiter">)</span>.<a href="../nsc/io/Path.scala.html#187222" title="=&gt; String">path</a>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="193276">toString</a> = <span title="String(&quot;\n      |object Defaults {\n      |  scalaHome            = %s\n      |  javaBootClassPath    = %s\n      |  scalaLibDirFound     = %s\n      |  scalaLibFound        = %s\n      |  scalaBootClassPath   = %s\n      |  scalaPluginPath      = %s\n      |}&quot;)" class="string">&quot;&quot;&quot;
+      |object Defaults {
+      |  scalaHome            = %s
+      |  javaBootClassPath    = %s
+      |  scalaLibDirFound     = %s
+      |  scalaLibFound        = %s
+      |  scalaBootClassPath   = %s
+      |  scalaPluginPath      = %s
+      |}&quot;&quot;&quot;</span>.<span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">trim</span>.<span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">stripMargin</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span>
+        <a href="#193264" title="=&gt; String">scalaHome</a>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#193260" title="=&gt; String">javaBootClassPath</a><span class="delimiter">)</span>,
+        <a href="#193271" title="=&gt; Option[scala.tools.nsc.io.Directory]">scalaLibDirFound</a>, <a href="#193272" title="=&gt; String">scalaLibFound</a>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#193273" title="=&gt; String">scalaBootClassPath</a><span class="delimiter">)</span>, <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#193275" title="=&gt; String">scalaPluginPath</a><span class="delimiter">)</span>
+      <span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="(path: String, context: scala.tools.nsc.util.ClassPath.JavaContext)scala.tools.nsc.util.JavaClassPath" id="193256">fromPathString</a><span class="delimiter">(</span><a title="String" id="711643">path</a>: <span title="String">String</span>, <a title="scala.tools.nsc.util.ClassPath.JavaContext" id="711646">context</a>: <a href="../nsc/util/ClassPath.scala.html#206778" title="scala.tools.nsc.util.ClassPath.JavaContext">JavaContext</a> = <a href="../nsc/util/ClassPath.scala.html#206779" title="object scala.tools.nsc.util.ClassPath.DefaultJavaContext">DefaultJavaContext</a><span class="delimiter">)</span>: <a href="../nsc/util/ClassPath.scala.html#34397" title="scala.tools.nsc.util.JavaClassPath">JavaClassPath</a> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.tools.nsc.Settings" id="711647">s</a> = <a href="../nsc/Settings.scala.html#183287" title="()scala.tools.nsc.Settings" class="keyword">new</a> <a href="../nsc/Settings.scala.html#12926" title="scala.tools.nsc.Settings">Settings</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#711647" title="scala.tools.nsc.Settings">s</a>.<a href="../nsc/settings/ScalaSettings.scala.html#183346" title="=&gt; s.PathSetting">classpath</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#75566" title="(arg: s.classpath.T)Unit">value</a> = <a href="#711643" title="String">path</a>
+    <span title="scala.tools.util.PathResolver" class="keyword">new</span> <a href="#36009" title="scala.tools.util.PathResolver">PathResolver</a><span class="delimiter">(</span><a href="#711647" title="scala.tools.nsc.Settings">s</a>, <a href="#711646" title="scala.tools.nsc.util.ClassPath.JavaContext">context</a><span class="delimiter">)</span> <a href="#234547" title="=&gt; scala.tools.nsc.util.JavaClassPath">result</a>
+  <span class="delimiter">}</span>
+
+  /** With no arguments, show the interesting values in Environment and Defaults.
+   *  If there are arguments, show those in Calculated as if those options had been
+   *  given to a scala runner.
+   */
+  <span class="keyword">def</span> <a title="(args: Array[String])Unit" id="193257">main</a><span class="delimiter">(</span><a title="Array[String]" id="711654">args</a>: <span title="Array[String]">Array</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#711654" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">args</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span title="(x: Any)Unit">println</span><span class="delimiter">(</span><a href="#193252" title="object scala.tools.util.PathResolver.Environment">Environment</a><span class="delimiter">)</span>
+      <span title="(x: Any)Unit">println</span><span class="delimiter">(</span><a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">else</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="scala.tools.nsc.Settings" id="711767">settings</a> = <a href="../nsc/Settings.scala.html#183287" title="()scala.tools.nsc.Settings" class="keyword">new</a> <a href="../nsc/Settings.scala.html#12926" title="scala.tools.nsc.Settings">Settings</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">val</span> <a title="List[String]" id="711768">rest</a> = <a href="#711767" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/MutableSettings.scala.html#183243" title="(arguments: List[String], processAll: Boolean)(Boolean, List[String])">processArguments</a><span class="delimiter">(</span><a href="#711654" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">args</a>.<span title="=&gt; List[String]">toList</span>, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>.<span title="=&gt; List[String]">_2</span>
+      <span class="keyword">val</span> <a title="scala.tools.util.PathResolver" id="711769">pr</a> = <a href="#234541" title="(settings: scala.tools.nsc.Settings)scala.tools.util.PathResolver" class="keyword">new</a> <a href="#36009" title="scala.tools.util.PathResolver">PathResolver</a><span class="delimiter">(</span><a href="#711767" title="scala.tools.nsc.Settings">settings</a><span class="delimiter">)</span>
+      <span title="(x: Any)Unit">println</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot; COMMAND: 'scala %s'&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#711654" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">args</a>.<span title="(sep: String)String">mkString</span><span class="delimiter">(</span><span title="String(&quot; &quot;)" class="string">&quot; &quot;</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span title="(x: Any)Unit">println</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;RESIDUAL: 'scala %s'\n&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#711768" title="List[String]">rest</a>.<span title="(sep: String)String">mkString</span><span class="delimiter">(</span><span title="String(&quot; &quot;)" class="string">&quot; &quot;</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#711769" title="scala.tools.util.PathResolver">pr</a>.<a href="#234547" title="=&gt; scala.tools.nsc.util.JavaClassPath">result</a>.<a href="../nsc/util/ClassPath.scala.html#234599" title="()Unit">show</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+<span class="keyword">import</span> <a href="#36010" title="object scala.tools.util.PathResolver">PathResolver</a>.<span class="delimiter">{</span> Defaults, Environment, firstNonEmpty, ppcp <span class="delimiter">}</span>
+
+<span class="keyword">class</span> <a title="class PathResolver extends Object with ScalaObject" id="36009">PathResolver</a><a href="#36009" title="ScalaObject" class="delimiter">(</a><a title="scala.tools.nsc.Settings" id="234553">settings</a>: <a href="../nsc/Settings.scala.html#12926" title="scala.tools.nsc.Settings">Settings</a>, <a title="scala.tools.nsc.util.ClassPath.JavaContext" id="234554">context</a>: <a href="../nsc/util/ClassPath.scala.html#206778" title="scala.tools.nsc.util.ClassPath.JavaContext">JavaContext</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+  <span class="keyword">def</span> <a title="(settings: scala.tools.nsc.Settings)scala.tools.util.PathResolver" id="234541" class="keyword">this</a><span class="delimiter">(</span><a title="scala.tools.nsc.Settings" id="234552">settings</a>: <a href="../nsc/Settings.scala.html#12926" title="scala.tools.nsc.Settings">Settings</a><span class="delimiter">)</span> = <a href="#36009" title="PathResolver.this.type" class="keyword">this</a><span class="delimiter">(</span><a href="#234552" title="scala.tools.nsc.Settings">settings</a>, <span title="scala.tools.nsc.util.ClassPath.JavaContext" class="keyword">if</span> <span class="delimiter">(</span><a href="#234552" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#183456" title="=&gt; settings.BooleanSetting">inline</a>.<a href="../nsc/settings/MutableSettings.scala.html#183734" title="=&gt; Boolean">value</a><span class="delimiter">)</span> <span title="scala.tools.nsc.util.ClassPath.JavaContext" class="keyword">new</span> <a href="../nsc/util/ClassPath.scala.html#206778" title="scala.tools.nsc.util.ClassPath.JavaContext">JavaContext</a> <span class="keyword">else</span> <a href="../nsc/util/ClassPath.scala.html#206779" title="object scala.tools.nsc.util.ClassPath.DefaultJavaContext">DefaultJavaContext</a><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(name: String, alt: String)String" id="234542">cmdLineOrElse</a><span class="delimiter">(</span><a title="String" id="234765">name</a>: <span title="String">String</span>, <a title="String" id="234766">alt</a>: <span title="String">String</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <span class="delimiter">(</span><a href="#234543" title="(s: String)Option[String]">commandLineFor</a><span class="delimiter">(</span><a href="#234765" title="String">name</a><span class="delimiter">)</span> <span title="Option[String]" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <span title="None.type">Some</span><span class="delimiter">(</span><span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span> =&gt; <span title="object None">None</span>
+      <span class="keyword">case</span> <a title="Option[String]" id="234772">x</a>        =&gt; <a href="#234772" title="Option[String]">x</a>
+    <span class="delimiter">}</span><span class="delimiter">)</span> <span title="(default: =&gt; String)String">getOrElse</span> <a href="#234766" title="String">alt</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(s: String)Option[String]" id="234543">commandLineFor</a><span class="delimiter">(</span><a title="String" id="234769">s</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="(x: String)(pf: PartialFunction[String,String])Option[String]">condOpt</span><span class="delimiter">(</span><a href="#234769" title="String">s</a><span class="delimiter">)</span> <a href="#712074" title="String" class="delimiter">{</a>
+    <span class="keyword">case</span> <span title="String" class="string">&quot;javabootclasspath&quot;</span>  =&gt; <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#183575" title="=&gt; PathResolver.this.settings.PathSetting">javabootclasspath</a>.<a href="../nsc/settings/MutableSettings.scala.html#193338" title="=&gt; String">value</a>
+    <span class="keyword">case</span> <span title="String" class="string">&quot;javaextdirs&quot;</span>        =&gt; <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#183577" title="=&gt; PathResolver.this.settings.PathSetting">javaextdirs</a>.<a href="../nsc/settings/MutableSettings.scala.html#193338" title="=&gt; String">value</a>
+    <span class="keyword">case</span> <span title="String" class="string">&quot;bootclasspath&quot;</span>      =&gt; <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#183569" title="=&gt; PathResolver.this.settings.PathSetting">bootclasspath</a>.<a href="../nsc/settings/MutableSettings.scala.html#193338" title="=&gt; String">value</a>
+    <span class="keyword">case</span> <span title="String" class="string">&quot;extdirs&quot;</span>            =&gt; <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#183573" title="=&gt; PathResolver.this.settings.PathSetting">extdirs</a>.<a href="../nsc/settings/MutableSettings.scala.html#193338" title="=&gt; String">value</a>
+    <span class="keyword">case</span> <span title="String" class="string">&quot;classpath&quot;</span> | <span title="String(&quot;cp&quot;)" class="string">&quot;cp&quot;</span>   =&gt; <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#183346" title="=&gt; PathResolver.this.settings.PathSetting">classpath</a>.<a href="../nsc/settings/MutableSettings.scala.html#193338" title="=&gt; String">value</a>
+    <span class="keyword">case</span> <span title="String" class="string">&quot;sourcepath&quot;</span>         =&gt; <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#183579" title="=&gt; PathResolver.this.settings.PathSetting">sourcepath</a>.<a href="../nsc/settings/MutableSettings.scala.html#193338" title="=&gt; String">value</a>
+  <span class="delimiter">}</span>
+
+  /** Calculated values based on any given command line options, falling back on
+   *  those in Defaults.
+   */
+  <span class="keyword">object</span> <a title="object PathResolver.this.Calculated" id="234544">Calculated</a> <span title="ScalaObject" class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="234612">scalaHome</a>           = <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193264" title="=&gt; String">scalaHome</a>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="234613">useJavaClassPath</a>    = <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#183606" title="=&gt; PathResolver.this.settings.BooleanSetting">usejavacp</a>.<a href="../nsc/settings/MutableSettings.scala.html#183734" title="=&gt; Boolean">value</a> <span title="(x: Boolean)Boolean">||</span> <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193263" title="=&gt; Boolean">useJavaClassPath</a>
+    <span class="keyword">def</span> <a title="=&gt; String" id="234614">javaBootClassPath</a>   = <a href="#234542" title="(name: String, alt: String)String">cmdLineOrElse</a><span class="delimiter">(</span><span title="String(&quot;javabootclasspath&quot;)" class="string">&quot;javabootclasspath&quot;</span>, <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193260" title="=&gt; String">javaBootClassPath</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="234615">javaExtDirs</a>         = <a href="#234542" title="(name: String, alt: String)String">cmdLineOrElse</a><span class="delimiter">(</span><span title="String(&quot;javaextdirs&quot;)" class="string">&quot;javaextdirs&quot;</span>, <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193262" title="=&gt; String">javaExtDirs</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="234616">javaUserClassPath</a>   = <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#234613" title="=&gt; Boolean">useJavaClassPath</a><span class="delimiter">)</span> <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193261" title="=&gt; String">javaUserClassPath</a> <span class="keyword">else</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="234617">scalaBootClassPath</a>  = <a href="#234542" title="(name: String, alt: String)String">cmdLineOrElse</a><span class="delimiter">(</span><span title="String(&quot;bootclasspath&quot;)" class="string">&quot;bootclasspath&quot;</span>, <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193273" title="=&gt; String">scalaBootClassPath</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="234618">scalaExtDirs</a>        = <a href="#234542" title="(name: String, alt: String)String">cmdLineOrElse</a><span class="delimiter">(</span><span title="String(&quot;extdirs&quot;)" class="string">&quot;extdirs&quot;</span>, <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193274" title="=&gt; String">scalaExtDirs</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="234619">sourcePath</a>          = <a href="#234542" title="(name: String, alt: String)String">cmdLineOrElse</a><span class="delimiter">(</span><span title="String(&quot;sourcepath&quot;)" class="string">&quot;sourcepath&quot;</span>, <a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a>.<a href="#193259" title="=&gt; String">scalaSourcePath</a><span class="delimiter">)</span>
+
+    /** Against my better judgment, giving in to martin here and allowing
+     *  CLASSPATH to be used automatically.  So for the user-specified part
+     *  of the classpath:
+     *
+     *  - If -classpath or -cp is given, it is that
+     *  - Otherwise, if CLASSPATH is set, it is that
+     *  - If neither of those, then &quot;.&quot; is used.
+     */
+    <span class="keyword">def</span> <a title="=&gt; String" id="234620">userClassPath</a> = <span class="delimiter">(</span>
+      <span title="String" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#183346" title="=&gt; PathResolver.this.settings.PathSetting">classpath</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#75563" title="=&gt; Boolean">isDefault</a><span class="delimiter">)</span>
+        <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#183346" title="=&gt; PathResolver.this.settings.PathSetting">classpath</a>.<a href="../nsc/settings/MutableSettings.scala.html#193338" title="=&gt; String">value</a>
+      <span class="keyword">else</span> sys.<span title="=&gt; scala.collection.immutable.Map[String,String]">env</span>.<span title="(key: String, default: =&gt; String)String">getOrElse</span><span class="delimiter">(</span><span title="String(&quot;CLASSPATH&quot;)" class="string">&quot;CLASSPATH&quot;</span>, <span title="String(&quot;.&quot;)" class="string">&quot;.&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">)</span>
+
+    <span class="keyword">import</span> <a href="#234554" title="scala.tools.nsc.util.ClassPath.JavaContext">context</a>._
+
+    // Assemble the elements!
+    <span class="keyword">def</span> <a title="=&gt; List[Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]]" id="234622">basis</a> = <span title="[A](xs: A*)List[A]">List</span><span title="(xs: Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]*)List[Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]]" class="delimiter">[</span><span title="Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">Traversable</span><span class="delimiter">[</span>ClassPath<span class="delimiter">[</span>AbstractFile<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span>
+      <a href="../nsc/util/ClassPath.scala.html#234638" title="(path: String)List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">classesInPath</a><span class="delimiter">(</span><a href="#234614" title="=&gt; String">javaBootClassPath</a><span class="delimiter">)</span>,             // 1. The Java bootstrap class path.
+      <a href="../nsc/util/ClassPath.scala.html#234634" title="(path: String)List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">contentsOfDirsInPath</a><span class="delimiter">(</span><a href="#234615" title="=&gt; String">javaExtDirs</a><span class="delimiter">)</span>,            // 2. The Java extension class path.
+      <a href="../nsc/util/ClassPath.scala.html#234637" title="(path: String)IndexedSeq[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">classesInExpandedPath</a><span class="delimiter">(</span><a href="#234616" title="=&gt; String">javaUserClassPath</a><span class="delimiter">)</span>,     // 3. The Java application class path.
+      <a href="../nsc/util/ClassPath.scala.html#234638" title="(path: String)List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">classesInPath</a><span class="delimiter">(</span><a href="#234617" title="=&gt; String">scalaBootClassPath</a><span class="delimiter">)</span>,            // 4. The Scala boot class path.
+      <a href="../nsc/util/ClassPath.scala.html#234634" title="(path: String)List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">contentsOfDirsInPath</a><span class="delimiter">(</span><a href="#234618" title="=&gt; String">scalaExtDirs</a><span class="delimiter">)</span>,           // 5. The Scala extension class path.
+      <a href="../nsc/util/ClassPath.scala.html#234637" title="(path: String)IndexedSeq[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">classesInExpandedPath</a><span class="delimiter">(</span><a href="#234620" title="=&gt; String">userClassPath</a><span class="delimiter">)</span>,         // 6. The Scala application class path.
+      <a href="../nsc/util/ClassPath.scala.html#234633" title="(path: String)List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">sourcesInPath</a><span class="delimiter">(</span><a href="#234619" title="=&gt; String">sourcePath</a><span class="delimiter">)</span>                     // 7. The Scala source path.
+    <span class="delimiter">)</span>
+
+    <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]" id="234624">containers</a> = <a href="#234622" title="=&gt; List[Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]]">basis</a>.<span title="(implicit asTraversable: Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]] =&gt; scala.collection.GenTraversableOnce[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]])List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">flatten</span>.<span title="=&gt; List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">distinct</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="234625">toString</a> = <span title="String(&quot;\n      |object Calculated {\n      |  scalaHome            = %s\n      |  javaBootClassPath    = %s\n      |  javaExtDirs          = %s\n      |  javaUserClassPath    = %s\n      |    useJavaClassPath   = %s\n      |  scalaBootClassPath   = %s\n      |  scalaExtDirs         = %s\n      |  userClassPath        = %s\n      |  sourcePath           = %s\n      |}&quot;)" class="string">&quot;&quot;&quot;
+      |object Calculated {
+      |  scalaHome            = %s
+      |  javaBootClassPath    = %s
+      |  javaExtDirs          = %s
+      |  javaUserClassPath    = %s
+      |    useJavaClassPath   = %s
+      |  scalaBootClassPath   = %s
+      |  scalaExtDirs         = %s
+      |  userClassPath        = %s
+      |  sourcePath           = %s
+      |}&quot;&quot;&quot;</span>.<span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">trim</span>.<span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">stripMargin</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span>
+        <a href="#234612" title="=&gt; String">scalaHome</a>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#234614" title="=&gt; String">javaBootClassPath</a><span class="delimiter">)</span>, <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#234615" title="=&gt; String">javaExtDirs</a><span class="delimiter">)</span>, <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#234616" title="=&gt; String">javaUserClassPath</a><span class="delimiter">)</span>,
+        <a href="#234613" title="=&gt; Boolean">useJavaClassPath</a>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#234617" title="=&gt; String">scalaBootClassPath</a><span class="delimiter">)</span>, <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#234618" title="=&gt; String">scalaExtDirs</a><span class="delimiter">)</span>, <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#234620" title="=&gt; String">userClassPath</a><span class="delimiter">)</span>,
+        <a href="#193251" title="(s: String)String">ppcp</a><span class="delimiter">(</span><a href="#234619" title="=&gt; String">sourcePath</a><span class="delimiter">)</span>
+      <span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]" id="234546">containers</a> = <a href="#234544" title="object PathResolver.this.Calculated">Calculated</a>.<a href="#234623" title="=&gt; List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">containers</a>
+
+  <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="scala.tools.nsc.util.JavaClassPath" id="234548">result</a> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.tools.nsc.util.JavaClassPath" id="234558">cp</a> = <span title="scala.tools.nsc.util.JavaClassPath" class="keyword">new</span> <a href="../nsc/util/ClassPath.scala.html#34397" title="scala.tools.nsc.util.JavaClassPath">JavaClassPath</a><span class="delimiter">(</span><a href="#234546" title="=&gt; List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">containers</a>.<span title="=&gt; scala.collection.immutable.IndexedSeq[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">toIndexedSeq</span>, <a href="#234554" title="scala.tools.nsc.util.ClassPath.JavaContext">context</a><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#183464" title="=&gt; PathResolver.this.settings.BooleanSetting">Ylogcp</a>.<a href="../nsc/settings/MutableSettings.scala.html#183734" title="=&gt; Boolean">value</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span title="object Console">Console</span>.<span title="(x: Any)Unit">println</span><span class="delimiter">(</span><span title="String(&quot;Classpath built from &quot;)" class="string">&quot;Classpath built from &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#234553" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/AbsSettings.scala.html#183301" title="=&gt; String">toConciseString</a><span class="delimiter">)</span>
+      <span title="object Console">Console</span>.<span title="(x: Any)Unit">println</span><span class="delimiter">(</span><span title="String(&quot;Defaults: &quot;)" class="string">&quot;Defaults: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#36010" title="object scala.tools.util.PathResolver">PathResolver</a>.<a href="#193254" title="object scala.tools.util.PathResolver.Defaults">Defaults</a><span class="delimiter">)</span>
+      <span title="object Console">Console</span>.<span title="(x: Any)Unit">println</span><span class="delimiter">(</span><span title="String(&quot;Calculated: &quot;)" class="string">&quot;Calculated: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#234544" title="object PathResolver.this.Calculated">Calculated</a><span class="delimiter">)</span>
+
+      <span class="keyword">val</span> <a title="List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]" id="234955">xs</a> = <span class="delimiter">(</span><a href="#234544" title="object PathResolver.this.Calculated">Calculated</a>.<a href="#234622" title="=&gt; List[Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]]">basis</a> <span title="(n: Int)List[Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]]">drop</span> <span title="Int(2)" class="int">2</span><span class="delimiter">)</span>.<span title="(implicit asTraversable: Traversable[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]] =&gt; scala.collection.GenTraversableOnce[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]])List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">flatten</span>.<span title="=&gt; List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">distinct</span>
+      <span title="(x: Any)Unit">println</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;After java boot/extdirs classpath has %d entries:&quot;</span> <span title="(args: Any*)String">format</span> <a href="#234955" title="List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">xs</a>.<span title="=&gt; Int">size</span><span class="delimiter">)</span>
+      <a href="#234955" title="List[scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]]">xs</a> <span title="(f: scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile] =&gt; Unit)Unit">foreach</span> <span class="delimiter">(</span><a title="scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]" id="235036">x</a> =&gt; <span title="(x: Any)Unit">println</span><span class="delimiter">(</span><span title="String(&quot;  &quot;)" class="string">&quot;  &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#235036" title="scala.tools.nsc.util.ClassPath[scala.tools.nsc.io.AbstractFile]">x</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <a href="#234558" title="scala.tools.nsc.util.JavaClassPath">cp</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; List[java.net.URL]" id="234549">asURLs</a> = <a href="#234547" title="=&gt; scala.tools.nsc.util.JavaClassPath">result</a>.<a href="../nsc/util/ClassPath.scala.html#234589" title="=&gt; List[java.net.URL]">asURLs</a>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,475 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/tools/nsc/ast/parser/MarkupParsers.scala</title>
+        <script type="text/javascript" src="../../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/* NSC -- new Scala compiler
+ * Copyright 2005-2011 LAMP/EPFL
+ * @author Burak Emir
+ */
+
+<span class="keyword">package</span> scala.tools.nsc
+<span class="keyword">package</span> ast.parser
+
+<span class="keyword">import</span> scala.collection.mutable
+<span class="keyword">import</span> mutable.<span class="delimiter">{</span> Buffer, ArrayBuffer, ListBuffer <span class="delimiter">}</span>
+<span class="keyword">import</span> scala.util.control.ControlThrowable
+<span class="keyword">import</span> scala.tools.nsc.util.<span class="delimiter">{</span>SourceFile,CharArrayReader<span class="delimiter">}</span>
+<span class="keyword">import</span> scala.xml.<span class="delimiter">{</span> Text, TextBuffer <span class="delimiter">}</span>
+<span class="keyword">import</span> scala.xml.parsing.MarkupParserCommon
+<span class="keyword">import</span> scala.xml.<span title="object scala.xml.Utility">Utility</span>.<span class="delimiter">{</span> isNameStart, isNameChar, isSpace <span class="delimiter">}</span>
+<span class="keyword">import</span> scala.reflect.internal.<a href="../../../../reflect/internal/Chars.scala.html#7499" title="object scala.reflect.internal.Chars">Chars</a>.<span class="delimiter">{</span> SU, LF <span class="delimiter">}</span>
+
+// XXX/Note: many/most of the functions in here are almost direct cut and pastes
+// from another file - scala.xml.parsing.MarkupParser, it looks like.
+// (It was like that when I got here.) They used to be commented &quot;[Duplicate]&quot; but
+// since approximately all of them were, I snipped it as noise.  As far as I can
+// tell this wasn't for any particularly good reason, but slightly different
+// compiler and library parser interfaces meant it would take some setup.
+//
+// I rewrote most of these, but not as yet the library versions: so if you are
+// tempted to touch any of these, please be aware of that situation and try not
+// to let it get any worse.  -- paulp
+
+/** This trait ...
+ *
+ *  @author  Burak Emir
+ *  @version 1.0
+ */
+<span class="keyword">trait</span> <a title="trait MarkupParsers extends Object with ScalaObject" id="14696">MarkupParsers</a> <span title="ScalaObject" class="delimiter">{</span>
+  self: Parsers =&gt;
+
+  case <span class="keyword">object</span> <a href="#281655" title="object MarkupParsers.this.MissingEndTagControl" id="281662">MissingEndTagControl</a> <span title="ScalaObject" class="keyword">extends</span> <span title="scala.util.control.ControlThrowable">ControlThrowable</span> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="281642">getMessage</a> = <span title="String(&quot;start tag was here: &quot;)" class="string">&quot;start tag was here: &quot;</span>
+  <span class="delimiter">}</span>
+
+  case <span class="keyword">object</span> <a href="#281675" title="object MarkupParsers.this.ConfusedAboutBracesControl" id="281682">ConfusedAboutBracesControl</a> <span title="ScalaObject" class="keyword">extends</span> <span title="scala.util.control.ControlThrowable">ControlThrowable</span> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="281664">getMessage</a> = <span title="String(&quot; I encountered a \'}\' where I didn\'t expect one, maybe this tag isn\'t closed &lt;&quot;)" class="string">&quot; I encountered a '}' where I didn't expect one, maybe this tag isn't closed &lt;&quot;</span>
+  <span class="delimiter">}</span>
+
+  case <span class="keyword">object</span> <a href="#281695" title="object MarkupParsers.this.TruncatedXMLControl" id="281702">TruncatedXMLControl</a> <span title="ScalaObject" class="keyword">extends</span> <span title="scala.util.control.ControlThrowable">ControlThrowable</span> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="281684">getMessage</a> = <span title="String(&quot;input ended while parsing XML&quot;)" class="string">&quot;input ended while parsing XML&quot;</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">import</span> <a href="Parsers.scala.html#228324" title="=&gt; scala.tools.nsc.Global">global</a>._
+
+  <span class="keyword">class</span> <a title="class MarkupParser extends Object with scala.xml.parsing.MarkupParserCommon with ScalaObject" id="228349">MarkupParser</a><a href="#228349" title="ScalaObject" class="delimiter">(</a><a title="MarkupParsers.this.SourceFileParser" id="282246">parser</a>: <a href="Parsers.scala.html#228329" title="MarkupParsers.this.SourceFileParser">SourceFileParser</a>, <span class="keyword">final</span> <span class="keyword">val</span> <a title="Boolean" id="282247">preserveWS</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> <span class="keyword">extends</span> <span title="scala.xml.parsing.MarkupParserCommon">MarkupParserCommon</span> <span class="delimiter">{</span>
+
+    <span class="keyword">import</span> <a href="Tokens.scala.html#14580" title="object scala.tools.nsc.ast.parser.Tokens">Tokens</a>.<span class="delimiter">{</span> EMPTY, LBRACE, RBRACE <span class="delimiter">}</span>
+
+    <span class="keyword">type</span> <a title="MarkupParsers.this.global.Position" id="281794">PositionType</a> = <a href="../../util/Position.scala.html#34604" title="MarkupParsers.this.global.Position">Position</a>
+    <span class="keyword">type</span> <a title="scala.tools.nsc.util.CharArrayReader" id="281795">InputType</a>    = <a href="../../util/CharArrayReader.scala.html#34703" title="scala.tools.nsc.util.CharArrayReader">CharArrayReader</a>
+    <span class="keyword">type</span> <a title="MarkupParsers.this.global.Tree" id="281796">ElementType</a>  = <span title="MarkupParsers.this.global.Tree">Tree</span>
+    <span class="keyword">type</span> <a title="scala.collection.mutable.Map[String,MarkupParsers.this.global.Tree]" id="281797">AttributesType</a> = mutable.<span title="scala.collection.mutable.Map[String,MarkupParsers.this.global.Tree]">Map</span><span class="delimiter">[</span>String, Tree<span class="delimiter">]</span>
+    <span class="keyword">type</span> <a title="Any" id="281798">NamespaceType</a> = <span title="Any">Any</span>  // namespaces ignored
+
+    <span class="keyword">def</span> <a title="(name: String, other: MarkupParser.this.NamespaceType)MarkupParser.this.AttributesType" id="281799">mkAttributes</a><span class="delimiter">(</span><a title="String" id="282250">name</a>: <span title="String">String</span>, <a title="MarkupParser.this.NamespaceType" id="282251">other</a>: <span title="MarkupParser.this.NamespaceType">NamespaceType</span><span class="delimiter">)</span>: <span title="MarkupParser.this.AttributesType">AttributesType</span> = <a href="#281828" title="=&gt; scala.collection.mutable.LinkedHashMap[String,MarkupParsers.this.global.Tree]">xAttributes</a>
+
+    <span class="keyword">val</span> <a title="Boolean" id="281800">eof</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+    <span class="keyword">def</span> <a title="(msg: String)Nothing" id="281802">truncatedError</a><span class="delimiter">(</span><a title="String" id="282608">msg</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="Nothing">Nothing</span> = <span title="Nothing" class="keyword">throw</span> <a href="#281702" title="object MarkupParsers.this.TruncatedXMLControl">TruncatedXMLControl</a>
+    <span class="keyword">def</span> <a title="(that: Char, msg: String)Unit" id="281803">xHandleError</a><span class="delimiter">(</span><a title="Char" id="282610">that</a>: <span title="Char">Char</span>, <a title="String" id="282611">msg</a>: <span title="String">String</span><span class="delimiter">)</span> =
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('\032')">SU</span><span class="delimiter">)</span> <span title="Nothing" class="keyword">throw</span> <a href="#281702" title="object MarkupParsers.this.TruncatedXMLControl">TruncatedXMLControl</a>
+      <span class="keyword">else</span> <a href="#281849" title="(str: String)Unit">reportSyntaxError</a><span class="delimiter">(</span><a href="#282611" title="String">msg</a><span class="delimiter">)</span>
+
+    <span class="keyword">var</span> <a title="scala.tools.nsc.util.CharArrayReader" id="281805">input</a> : <a href="../../util/CharArrayReader.scala.html#34703" title="scala.tools.nsc.util.CharArrayReader">CharArrayReader</a> = _
+    <span class="keyword">def</span> <a title="()BufferedIterator[Char]" id="281807">lookahead</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="BufferedIterator[Char]">BufferedIterator</span><span class="delimiter">[</span>Char<span class="delimiter">]</span> =
+      <span class="delimiter">(</span><a href="#281805" title="=&gt; scala.tools.nsc.util.CharArrayReader">input</a>.<a href="../../util/CharArrayReader.scala.html#228578" title="implicit scala.Predef.charArrayOps : (xs: Array[Char])scala.collection.mutable.ArrayOps[Char]">buf</a> <span title="implicit scala.Predef.charArrayOps : (xs: Array[Char])scala.collection.mutable.ArrayOps[Char]">drop</span> <a href="#281805" title="=&gt; scala.tools.nsc.util.CharArrayReader">input</a>.<a href="../../util/CharArrayReader.scala.html#228584" title="=&gt; Int">charOffset</a><span class="delimiter">)</span>.<span title="=&gt; Iterator[Char]">iterator</span>.<span title="=&gt; scala.collection.BufferedIterator[Char]">buffered</span>
+
+    <span class="keyword">import</span> <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<span class="delimiter">{</span> symbXMLBuilder =&gt; handle, o2p, r2p <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="=&gt; Int" id="281809">curOffset</a> : <span title="Int">Int</span> = <a href="#281805" title="=&gt; scala.tools.nsc.util.CharArrayReader">input</a>.<a href="../../util/CharArrayReader.scala.html#228584" title="=&gt; Int">charOffset</a> <span title="(x: Int)Int">-</span> <span title="Int(1)" class="int">1</span>
+    <span class="keyword">var</span> <a title="MarkupParsers.this.global.Position" id="281811">tmppos</a> : <a href="../../util/Position.scala.html#34604" title="MarkupParsers.this.global.Position">Position</a> = <a href="../../symtab/Positions.scala.html#183210" title="=&gt; tools.nsc.util.NoPosition.type">NoPosition</a>
+    <span class="keyword">def</span> <a title="=&gt; Char" id="281813">ch</a> = <a href="#281805" title="=&gt; scala.tools.nsc.util.CharArrayReader">input</a>.<a href="../../util/CharArrayReader.scala.html#228581" title="=&gt; Char">ch</a>
+    /** this method assign the next character to ch and advances in input */
+    <span class="keyword">def</span> <a title="()Unit" id="281814">nextch</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#281805" title="=&gt; scala.tools.nsc.util.CharArrayReader">input</a>.<a href="../../util/CharArrayReader.scala.html#228597" title="()Unit">nextChar</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+    <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; Char" id="281815">ch_returning_nextch</a>: <span title="Char">Char</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Char" id="282838">result</a> = <a href="#281813" title="=&gt; Char">ch</a>; <a href="#281805" title="=&gt; scala.tools.nsc.util.CharArrayReader">input</a>.<a href="../../util/CharArrayReader.scala.html#228597" title="()Unit">nextChar</a><span class="delimiter">(</span><span class="delimiter">)</span>; <a href="#282838" title="Char">result</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(position: MarkupParsers.this.global.Position, name: String, text: String)MarkupParser.this.ElementType" id="281816">mkProcInstr</a><span class="delimiter">(</span><a title="MarkupParsers.this.global.Position" id="282839">position</a>: <a href="../../util/Position.scala.html#34604" title="MarkupParsers.this.global.Position">Position</a>, <a title="String" id="282840">name</a>: <span title="String">String</span>, <a title="String" id="282841">text</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="MarkupParser.this.ElementType">ElementType</span> =
+      <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">symbXMLBuilder</a>.<a href="SymbolicXMLBuilder.scala.html#282384" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, target: String, txt: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">procInstr</a><span class="delimiter">(</span><a href="#282839" title="MarkupParsers.this.global.Position">position</a>, <a href="#282840" title="String">name</a>, <a href="#282841" title="String">text</a><span class="delimiter">)</span>
+
+    <span class="keyword">var</span> <a title="Boolean" id="281818">xEmbeddedBlock</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="scala.collection.mutable.Stack[(Int, String)]" id="281821">debugLastStartElement</a> = <span title="()scala.collection.mutable.Stack[(Int, String)]" class="keyword">new</span> mutable.<span title="scala.collection.mutable.Stack[(Int, String)]">Stack</span><span class="delimiter">[</span><span class="delimiter">(</span>Int, String<span class="delimiter">)</span><span class="delimiter">]</span>
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; Int" id="281823">debugLastPos</a> = <a href="#281821" title="=&gt; scala.collection.mutable.Stack[(Int, String)]">debugLastStartElement</a>.<span title="=&gt; (Int, String)">top</span>.<span title="=&gt; Int">_1</span>
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; String" id="281824">debugLastElem</a> = <a href="#281821" title="=&gt; scala.collection.mutable.Stack[(Int, String)]">debugLastStartElement</a>.<span title="=&gt; (Int, String)">top</span>.<span title="=&gt; String">_2</span>
+
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Nothing" id="281825">errorBraces</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <a href="#281849" title="(str: String)Unit">reportSyntaxError</a><span class="delimiter">(</span><span title="String(&quot;in XML content, please use \'}}\' to express \'}\'&quot;)" class="string">&quot;in XML content, please use '}}' to express '}'&quot;</span><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <a href="#281682" title="object MarkupParsers.this.ConfusedAboutBracesControl">ConfusedAboutBracesControl</a>
+    <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="(tag: String)Nothing" id="281826">errorNoEnd</a><span class="delimiter">(</span><a title="String" id="283114">tag</a>: <span title="String">String</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <a href="#281849" title="(str: String)Unit">reportSyntaxError</a><span class="delimiter">(</span><span title="String(&quot;expected closing tag of &quot;)" class="string">&quot;expected closing tag of &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#283114" title="String">tag</a><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">throw</span> <a href="#281662" title="object MarkupParsers.this.MissingEndTagControl">MissingEndTagControl</a>
+    <span class="delimiter">}</span>
+
+    /** checks whether next character starts a Scala block, if yes, skip it.
+     * @return true if next character starts a scala block
+     */
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="281827">xCheckEmbeddedBlock</a>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+      // attentions, side-effect, used in xText
+      <a href="#281818" title="(x$1: Boolean)Unit">xEmbeddedBlock</a> = <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('{')" class="char">'{'</span><span class="delimiter">)</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <span class="delimiter">{</span> <a href="#281814" title="()Unit">nextch</a>; <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">!=</span> <span title="Char('{')" class="char">'{'</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+      <a href="#281818" title="=&gt; Boolean">xEmbeddedBlock</a>
+    <span class="delimiter">}</span>
+
+    /** parse attribute and add it to listmap
+     *  [41] Attributes   ::= { S Name Eq AttValue }
+     *       AttValue     ::= `'` { _  } `'`
+     *                      | `&quot;` { _ } `&quot;`
+     *                      | `{` scalablock `}`
+     */
+    <span class="keyword">def</span> <a title="=&gt; scala.collection.mutable.LinkedHashMap[String,MarkupParsers.this.global.Tree]" id="281828">xAttributes</a> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="scala.collection.mutable.LinkedHashMap[String,MarkupParsers.this.global.Tree]" id="282258">aMap</a> = mutable.<span title="[A, B](elems: (A, B)*)scala.collection.mutable.LinkedHashMap[A,B]">LinkedHashMap</span><span title="(elems: (String, MarkupParsers.this.global.Tree)*)scala.collection.mutable.LinkedHashMap[String,MarkupParsers.this.global.Tree]" class="delimiter">[</span><span title="String">String</span>, <span title="MarkupParsers.this.global.Tree">Tree</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#228349" title="(ch: Char)Boolean">isNameStart</a><span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#282259" title="()Unit" class="delimiter">{</a>
+        <span class="keyword">val</span> <a title="Int" id="282310">start</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+        <span class="keyword">val</span> <a title="String" id="282311">key</a> = <a href="#228349" title="=&gt; String">xName</a>
+        <a href="#228349" title="()Unit">xEQ</a>
+        <span class="keyword">val</span> <a title="Char" id="282312">delim</a> = <a href="#281813" title="=&gt; Char">ch</a>
+        <span class="keyword">val</span> <a title="Int" id="282313">mid</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+        <span class="keyword">val</span> <a title="MarkupParsers.this.global.Tree" id="282314">value</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <a href="#281813" title="=&gt; Char">ch</a> <span title="MarkupParsers.this.global.Tree" class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <span title="MarkupParsers.this.global.Tree" class="char">'&quot;'</span> | <span title="Char('\'')" class="char">'\''</span> =&gt;
+            <span class="keyword">val</span> <a title="String" id="282317">tmp</a> = <a href="#228349" title="(endCh: Char)String">xAttributeValue</a><span class="delimiter">(</span><a href="#281815" title="=&gt; Char">ch_returning_nextch</a><span class="delimiter">)</span>
+
+            <span class="keyword">try</span> <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282390" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, s: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">parseAttribute</a><span class="delimiter">(</span><a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#282310" title="Int">start</a>, <a href="#282313" title="Int">mid</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <a href="#282317" title="String">tmp</a><span class="delimiter">)</span>
+            <span class="keyword">catch</span> <span class="delimiter">{</span>
+              <span class="keyword">case</span> <a title="MarkupParsers.this.global.Literal" id="282406">e</a>: <span title="RuntimeException">RuntimeException</span> =&gt;
+                <a href="#228349" title="(msg: String, x: MarkupParsers.this.global.Literal)MarkupParsers.this.global.Literal">errorAndResult</a><span class="delimiter">(</span><span title="String(&quot;error parsing attribute value&quot;)" class="string">&quot;error parsing attribute value&quot;</span>, <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282045" title="=&gt; MarkupParsers.this.global.Literal">errorTermTree</a><span class="delimiter">)</span>
+            <span class="delimiter">}</span>
+
+          <span class="keyword">case</span> <span title="MarkupParsers.this.global.Tree" class="char">'{'</span>  =&gt;
+            <a href="#281814" title="()Unit">nextch</a>
+            <a href="#281846" title="=&gt; MarkupParsers.this.global.Tree">xEmbeddedExpr</a>
+          <span class="keyword">case</span> <span title="Nothing">SU</span> =&gt;
+            <span title="Nothing" class="keyword">throw</span> <a href="#281702" title="object MarkupParsers.this.TruncatedXMLControl">TruncatedXMLControl</a>
+          <span class="keyword">case</span> <span title="MarkupParsers.this.global.Literal">_</span> =&gt;
+            <a href="#228349" title="(msg: String, x: MarkupParsers.this.global.Literal)MarkupParsers.this.global.Literal">errorAndResult</a><span class="delimiter">(</span><span title="String(&quot;\' or \&quot; delimited attribute value or \'{\' scala-expr \'}\' expected&quot;)" class="string">&quot;' or \&quot; delimited attribute value or '{' scala-expr '}' expected&quot;</span>, <a href="Parsers.scala.html#228324" title="(value: MarkupParsers.this.global.Constant)MarkupParsers.this.global.Literal">Literal</a><span class="delimiter">(</span><a href="../../../../reflect/internal/Constants.scala.html#47562" title="(value: Any)MarkupParsers.this.global.Constant">Constant</a><span class="delimiter">(</span><span title="String(&quot;&lt;syntax-error&gt;&quot;)" class="string">&quot;&lt;syntax-error&gt;&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        // well-formedness constraint: unique attribute names
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#282258" title="scala.collection.mutable.LinkedHashMap[String,MarkupParsers.this.global.Tree]">aMap</a> <span title="(key: String)Boolean">contains</span> <a href="#282311" title="String">key</a><span class="delimiter">)</span>
+          <a href="#281849" title="(str: String)Unit">reportSyntaxError</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;attribute %s may only be defined once&quot;</span> <span title="(args: Any*)String">format</span> <a href="#282311" title="String">key</a><span class="delimiter">)</span>
+
+        <a href="#282258" title="(key: String, value: MarkupParsers.this.global.Tree)Unit">aMap</a><span class="delimiter">(</span><a href="#282311" title="String">key</a><span class="delimiter">)</span> = <a href="#282314" title="MarkupParsers.this.global.Tree">value</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">!=</span> <span title="Char('/')" class="char">'/'</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">!=</span> <span title="Char('&gt;')" class="char">'&gt;'</span><span class="delimiter">)</span>
+          <a href="#228349" title="()Unit">xSpace</a>
+      <span class="delimiter">}</span>
+      <a href="#282258" title="scala.collection.mutable.LinkedHashMap[String,MarkupParsers.this.global.Tree]">aMap</a>
+    <span class="delimiter">}</span>
+
+    /** '&lt;! CharData ::= [CDATA[ ( {char} - {char}&quot;]]&gt;&quot;{char} ) ']]&gt;'
+     *
+     * see [15]
+     */
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281829">xCharData</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Int" id="283135">start</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+      <a href="#228349" title="(that: Seq[Char])Unit">xToken</a><span class="delimiter">(</span><span title="implicit scala.LowPriorityImplicits.wrapString : (s: String)scala.collection.immutable.WrappedString" class="string">&quot;[CDATA[&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">val</span> <a title="Int" id="283136">mid</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+      <a href="#228349" title="(handler: (MarkupParser.this.PositionType, String) =&gt; MarkupParser.this.parser.symbXMLBuilder.global.Tree, positioner: () =&gt; MarkupParser.this.PositionType, until: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">xTakeUntil</a><span class="delimiter">(</span><a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282383" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, txt: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">charData</a>, <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#283135" title="Int">start</a>, <a href="#283136" title="Int">mid</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <span title="String(&quot;]]&gt;&quot;)" class="string">&quot;]]&gt;&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281830">xUnparsed</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Int" id="283187">start</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+      <a href="#228349" title="(handler: (MarkupParser.this.PositionType, String) =&gt; MarkupParser.this.parser.symbXMLBuilder.global.Tree, positioner: () =&gt; MarkupParser.this.PositionType, until: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">xTakeUntil</a><span class="delimiter">(</span><a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282395" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, str: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">unparsed</a>, <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#283187" title="Int">start</a>, <a href="#283187" title="Int">start</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <span title="String(&quot;&lt;/xml:unparsed&gt;&quot;)" class="string">&quot;&lt;/xml:unparsed&gt;&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    /** Comment ::= '&lt;!--' ((Char - '-') | ('-' (Char - '-')))* '--&gt;'
+     *
+     * see [15]
+     */
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281831">xComment</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Int" id="283206">start</a> = <a href="#281809" title="=&gt; Int">curOffset</a> <span title="(x: Int)Int">-</span> <span title="Int(2)" class="int">2</span>   // Rewinding to include &quot;&lt;!&quot;
+      <a href="#228349" title="(that: Seq[Char])Unit">xToken</a><span class="delimiter">(</span><span title="implicit scala.LowPriorityImplicits.wrapString : (s: String)scala.collection.immutable.WrappedString" class="string">&quot;--&quot;</span><span class="delimiter">)</span>
+      <a href="#228349" title="(handler: (MarkupParser.this.PositionType, String) =&gt; MarkupParser.this.parser.symbXMLBuilder.global.Tree, positioner: () =&gt; MarkupParser.this.PositionType, until: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">xTakeUntil</a><span class="delimiter">(</span><a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282382" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, text: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">comment</a>, <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#283206" title="Int">start</a>, <a href="#283206" title="Int">start</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <span title="String(&quot;--&gt;&quot;)" class="string">&quot;--&gt;&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(pos: MarkupParsers.this.global.Position, ts: scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree], txt: String)Unit" id="281832">appendText</a><span class="delimiter">(</span><a title="MarkupParsers.this.global.Position" id="283255">pos</a>: <a href="../../util/Position.scala.html#34604" title="MarkupParsers.this.global.Position">Position</a>, <a title="scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]" id="283256">ts</a>: <span title="scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]">Buffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span>, <a title="String" id="283257">txt</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Seq[String]" id="283259">toAppend</a> =
+        <span title="Seq[String]" class="keyword">if</span> <span class="delimiter">(</span><a href="#282247" title="=&gt; Boolean">preserveWS</a><span class="delimiter">)</span> <span title="(elems: String*)Seq[String]">Seq</span><span class="delimiter">(</span><a href="#283257" title="String">txt</a><span class="delimiter">)</span>
+        <span class="keyword">else</span> <span title="object scala.xml.TextBuffer">TextBuffer</span>.<span title="(str: String)scala.xml.TextBuffer">fromString</span><span class="delimiter">(</span><a href="#283257" title="String">txt</a><span class="delimiter">)</span>.<span title="=&gt; Seq[scala.xml.Text]">toText</span> <span title="(f: scala.xml.Text =&gt; String)(implicit bf: scala.collection.generic.CanBuildFrom[Seq[scala.xml.Text],String,Seq[String]])Seq[String]">map</span> <span class="delimiter">(</span><a href="#283299" title="scala.xml.Text">_</a>.<span title="=&gt; String">text</span><span class="delimiter">)</span>
+
+      <a href="#283259" title="Seq[String]">toAppend</a> <span title="(f: String =&gt; Unit)Unit">foreach</span> <span class="delimiter">(</span><a title="String" id="283379">t</a> =&gt; <a href="#283256" title="scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(elems: MarkupParsers.this.global.Tree*)Unit">append</span> <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282379" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, txt: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">text</a><span class="delimiter">(</span><a href="#283255" title="MarkupParsers.this.global.Position">pos</a>, <a href="#283379" title="String">t</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    /** adds entity/character to ts as side-effect
+     *  @precond ch == '&amp;'
+     */
+    <span class="keyword">def</span> <a title="(ts: scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree])Unit" id="281833">content_AMP</a><span class="delimiter">(</span><a title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" id="283387">ts</a>: <span title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ArrayBuffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#281814" title="()Unit">nextch</a>
+      <span class="keyword">val</span> <a title="MarkupParser.this.parser.symbXMLBuilder.global.Tree" id="283389">toAppend</a> = <a href="#281813" title="=&gt; Char">ch</a> <span title="MarkupParser.this.parser.symbXMLBuilder.global.Tree" class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <span title="MarkupParser.this.parser.symbXMLBuilder.global.Tree" class="char">'#'</span> =&gt; // CharacterRef
+          <a href="#281814" title="()Unit">nextch</a>
+          <span class="keyword">val</span> <a title="MarkupParser.this.parser.symbXMLBuilder.global.Tree" id="283390">theChar</a> = <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282379" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, txt: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">text</a><span class="delimiter">(</span><a href="#281811" title="=&gt; MarkupParsers.this.global.Position">tmppos</a>, <a href="#228349" title="=&gt; String">xCharRef</a><span class="delimiter">)</span>
+          <a href="#228349" title="(that: Char)Unit">xToken</a><span class="delimiter">(</span><span title="Char(';')" class="char">';'</span><span class="delimiter">)</span>
+          <a href="#283390" title="MarkupParser.this.parser.symbXMLBuilder.global.Tree">theChar</a>
+        <span class="keyword">case</span> <span title="MarkupParser.this.parser.symbXMLBuilder.global.Tree">_</span> =&gt;   // EntityRef
+          <span class="keyword">val</span> <a title="String" id="283401">n</a> = <a href="#228349" title="=&gt; String">xName</a>
+          <a href="#228349" title="(that: Char)Unit">xToken</a><span class="delimiter">(</span><span title="Char(';')" class="char">';'</span><span class="delimiter">)</span>
+          <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282378" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, n: String)MarkupParser.this.parser.symbXMLBuilder.global.Tree">entityRef</a><span class="delimiter">(</span><a href="#281811" title="=&gt; MarkupParsers.this.global.Position">tmppos</a>, <a href="#283401" title="String">n</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      <a href="#283387" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(elems: MarkupParsers.this.global.Tree*)Unit">append</span> <a href="#283389" title="MarkupParser.this.parser.symbXMLBuilder.global.Tree">toAppend</a>
+    <span class="delimiter">}</span>
+
+    /**
+     *  @precond ch == '{'
+     *  @postcond: xEmbeddedBlock == false!
+     */
+    <span class="keyword">def</span> <a title="(p: MarkupParsers.this.global.Position, ts: scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree])Unit" id="281834">content_BRACE</a><span class="delimiter">(</span><a title="MarkupParsers.this.global.Position" id="283433">p</a>: <a href="../../util/Position.scala.html#34604" title="MarkupParsers.this.global.Position">Position</a>, <a title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" id="283434">ts</a>: <span title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ArrayBuffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281827" title="=&gt; Boolean">xCheckEmbeddedBlock</a><span class="delimiter">)</span> <a href="#283434" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(elems: MarkupParsers.this.global.Tree*)Unit">append</span> <a href="#281846" title="=&gt; MarkupParsers.this.global.Tree">xEmbeddedExpr</a>
+      <span class="keyword">else</span> <a href="#281832" title="(pos: MarkupParsers.this.global.Position, ts: scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree], txt: String)Unit">appendText</a><span class="delimiter">(</span><a href="#283433" title="MarkupParsers.this.global.Position">p</a>, <a href="#283434" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a>, <a href="#281838" title="=&gt; String">xText</a><span class="delimiter">)</span>
+
+    /** Returns true if it encounters an end tag (without consuming it),
+     *  appends trees to ts as side-effect.
+     *
+     *  @param ts ...
+     *  @return   ...
+     */
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="(ts: scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree])Boolean" id="281835">content_LT</a><span class="delimiter">(</span><a title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" id="283439">ts</a>: <span title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ArrayBuffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('/')" class="char">'/'</span><span class="delimiter">)</span>
+        <span title="Nothing" class="keyword">return</span> <span title="Boolean(true)" class="keyword">true</span>   // end tag
+
+      <span class="keyword">val</span> <a title="MarkupParsers.this.global.Tree" id="283441">toAppend</a> = <a href="#281813" title="=&gt; Char">ch</a> <span title="MarkupParsers.this.global.Tree" class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <span title="MarkupParsers.this.global.Tree" class="char">'!'</span>    =&gt; <a href="#281814" title="()Unit">nextch</a> ; <span title="MarkupParsers.this.global.Tree" class="keyword">if</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span><span title="Char('[')" class="char">'['</span><span class="delimiter">)</span> <a href="#281829" title="=&gt; MarkupParsers.this.global.Tree">xCharData</a> <span class="keyword">else</span> <a href="#281831" title="=&gt; MarkupParsers.this.global.Tree">xComment</a> // CDATA or Comment
+        <span class="keyword">case</span> <span title="MarkupParser.this.ElementType" class="char">'?'</span>    =&gt; <a href="#281814" title="()Unit">nextch</a> ; <a href="#228349" title="=&gt; MarkupParser.this.ElementType">xProcInstr</a>                            // PI
+        <span class="keyword">case</span> <span title="MarkupParsers.this.global.Tree">_</span>      =&gt; <a href="#281837" title="=&gt; MarkupParsers.this.global.Tree">element</a>                                        // child node
+      <span class="delimiter">}</span>
+
+      <a href="#283439" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(elems: MarkupParsers.this.global.Tree*)Unit">append</span> <a href="#283441" title="MarkupParsers.this.global.Tree">toAppend</a>
+      <span title="Boolean(false)" class="keyword">false</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="=&gt; scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]" id="281836">content</a>: <span title="scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]">Buffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" id="283457">ts</a> = <span title="()scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" class="keyword">new</span> <span title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ArrayBuffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span>
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#283458" title="Unit" class="keyword">if</a> <span class="delimiter">(</span><a href="#281818" title="=&gt; Boolean">xEmbeddedBlock</a><span class="delimiter">)</span>
+          <a href="#283457" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(elems: MarkupParsers.this.global.Tree*)Unit">append</span> <a href="#281846" title="=&gt; MarkupParsers.this.global.Tree">xEmbeddedExpr</a>
+        <span class="keyword">else</span> <span class="delimiter">{</span>
+          <a href="#281811" title="(x$1: MarkupParsers.this.global.Position)Unit">tmppos</a> = <a href="Parsers.scala.html#282234" title="(offset: Int)MarkupParsers.this.global.Position">o2p</a><span class="delimiter">(</span><a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>
+          <a href="#281813" title="=&gt; Char">ch</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+            // end tag, cdata, comment, pi or child node
+            <span class="keyword">case</span> <span title="Unit" class="char">'&lt;'</span>  =&gt; <a href="#281814" title="()Unit">nextch</a> ; <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281835" title="(ts: scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree])Boolean">content_LT</a><span class="delimiter">(</span><a href="#283457" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span><span class="delimiter">)</span> <span title="Nothing" class="keyword">return</span> <a href="#283457" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a>
+            // either the character '{' or an embedded scala block }
+            <span class="keyword">case</span> <span title="Unit" class="char">'{'</span>  =&gt; <a href="#281834" title="(p: MarkupParsers.this.global.Position, ts: scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree])Unit">content_BRACE</a><span class="delimiter">(</span><a href="#281811" title="=&gt; MarkupParsers.this.global.Position">tmppos</a>, <a href="#283457" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span>  // }
+            // EntityRef or CharRef
+            <span class="keyword">case</span> <span title="Unit" class="char">'&amp;'</span>  =&gt; <a href="#281833" title="(ts: scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree])Unit">content_AMP</a><span class="delimiter">(</span><a href="#283457" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span>
+            <span class="keyword">case</span> <span title="Nothing">SU</span>   =&gt; <span title="Nothing" class="keyword">return</span> <a href="#283457" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a>
+            // text content - here xEmbeddedBlock might be true
+            <span class="keyword">case</span> <span title="Unit">_</span>    =&gt; <a href="#281832" title="(pos: MarkupParsers.this.global.Position, ts: scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree], txt: String)Unit">appendText</a><span class="delimiter">(</span><a href="#281811" title="=&gt; MarkupParsers.this.global.Position">tmppos</a>, <a href="#283457" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a>, <a href="#281838" title="=&gt; String">xText</a><span class="delimiter">)</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      <a href="#228349" title="=&gt; Nothing">unreachable</a>
+    <span class="delimiter">}</span>
+
+    /** '&lt;' element ::= xmlTag1 '&gt;'  { xmlExpr | '{' simpleExpr '}' } ETag
+     *                | xmlTag1 '/' '&gt;'
+     */
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281837">element</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Int" id="283463">start</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+      <span class="keyword">val</span> <a href="#283465" title="(String, MarkupParser.this.AttributesType)" class="delimiter">(</a><a href="#283464" title="String" id="283465">qname</a>, <a href="#283464" title="MarkupParser.this.AttributesType" id="283466">attrMap</a><span class="delimiter">)</span> = <a href="#228349" title="(pscope: MarkupParser.this.NamespaceType)(String, MarkupParser.this.AttributesType)">xTag</a><span title="(String, MarkupParser.this.AttributesType) @unchecked" class="delimiter">(</span><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span title="MarkupParsers.this.global.Tree" class="keyword">if</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('/')" class="char">'/'</span><span class="delimiter">)</span> <span class="delimiter">{</span> // empty element
+        <a href="#228349" title="(that: Seq[Char])Unit">xToken</a><span class="delimiter">(</span><span title="implicit scala.LowPriorityImplicits.wrapString : (s: String)scala.collection.immutable.WrappedString" class="string">&quot;/&gt;&quot;</span><span class="delimiter">)</span>
+        <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282396" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, qname: String, attrMap: scala.collection.mutable.Map[String,MarkupParser.this.parser.symbXMLBuilder.global.Tree], args: Seq[MarkupParser.this.parser.symbXMLBuilder.global.Tree])MarkupParser.this.parser.symbXMLBuilder.global.Tree">element</a><span class="delimiter">(</span><a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#283463" title="Int">start</a>, <a href="#283463" title="Int">start</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <a href="#283465" title="String">qname</a>, <a href="#283466" title="MarkupParser.this.AttributesType">attrMap</a>, <span title="scala.collection.mutable.ListBuffer[MarkupParsers.this.global.Tree]" class="keyword">new</span> <span title="scala.collection.mutable.ListBuffer[MarkupParsers.this.global.Tree]">ListBuffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <span class="keyword">else</span> <span class="delimiter">{</span> // handle content
+        <a href="#228349" title="(that: Char)Unit">xToken</a><span class="delimiter">(</span><span title="Char('&gt;')" class="char">'&gt;'</span><span class="delimiter">)</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#283465" title="String">qname</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;xml:unparsed&quot;)" class="string">&quot;xml:unparsed&quot;</span><span class="delimiter">)</span>
+          <span title="Nothing" class="keyword">return</span> <a href="#281830" title="=&gt; MarkupParsers.this.global.Tree">xUnparsed</a>
+
+        <a href="#281821" title="=&gt; scala.collection.mutable.Stack[(Int, String)]">debugLastStartElement</a>.<span title="(elem: (Int, String))scala.collection.mutable.Stack[(Int, String)]">push</span><span class="delimiter">(</span><span title="(_1: Int, _2: String)(Int, String)" class="delimiter">(</span><a href="#283463" title="Int">start</a>, <a href="#283465" title="String">qname</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]" id="283502">ts</a> = <a href="#281836" title="=&gt; scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]">content</a>
+        <a href="#228349" title="(startName: String)Unit">xEndTag</a><span class="delimiter">(</span><a href="#283465" title="String">qname</a><span class="delimiter">)</span>
+        <a href="#281821" title="=&gt; scala.collection.mutable.Stack[(Int, String)]">debugLastStartElement</a>.<span title="()(Int, String)">pop</span>
+        <span class="keyword">val</span> <a title="MarkupParsers.this.global.Position" id="283503">pos</a> = <a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#283463" title="Int">start</a>, <a href="#283463" title="Int">start</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>
+        <a href="#283465" title="String">qname</a> <span title="MarkupParsers.this.global.Tree" class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <span title="MarkupParser.this.parser.symbXMLBuilder.global.Tree" class="string">&quot;xml:group&quot;</span> =&gt; <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282394" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, args: Seq[MarkupParser.this.parser.symbXMLBuilder.global.Tree])MarkupParser.this.parser.symbXMLBuilder.global.Tree">group</a><span class="delimiter">(</span><a href="#283503" title="MarkupParsers.this.global.Position">pos</a>, <a href="#283502" title="scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span>
+          <span class="keyword">case</span> <span title="MarkupParser.this.parser.symbXMLBuilder.global.Tree">_</span> =&gt; <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282396" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, qname: String, attrMap: scala.collection.mutable.Map[String,MarkupParser.this.parser.symbXMLBuilder.global.Tree], args: Seq[MarkupParser.this.parser.symbXMLBuilder.global.Tree])MarkupParser.this.parser.symbXMLBuilder.global.Tree">element</a><span class="delimiter">(</span><a href="#283503" title="MarkupParsers.this.global.Position">pos</a>, <a href="#283465" title="String">qname</a>, <a href="#283466" title="MarkupParser.this.AttributesType">attrMap</a>, <a href="#283502" title="scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /** parse character data.
+     *  precondition: xEmbeddedBlock == false (we are not in a scala block)
+     */
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; String" id="281838">xText</a>: <span title="String">String</span> = <span class="delimiter">{</span>
+      <span title="(assertion: Boolean, message: =&gt; Any)Unit">assert</span><span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#281818" title="=&gt; Boolean">xEmbeddedBlock</a>, <span title="String(&quot;internal error: encountered embedded block&quot;)" class="string">&quot;internal error: encountered embedded block&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">val</span> <a title="StringBuilder" id="283539">buf</a> = <span title="()StringBuilder" class="keyword">new</span> <span title="StringBuilder">StringBuilder</span>
+      <span class="keyword">def</span> <a title="=&gt; String" id="283540">done</a> = <a href="#283539" title="StringBuilder">buf</a>.<span title="()String">toString</span>
+
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">!=</span> <span title="Char('\032')">SU</span><span class="delimiter">)</span> <a href="#283541" title="()Unit" class="delimiter">{</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('}')" class="char">'}'</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281840" title="(body: =&gt; Unit)Char">charComingAfter</a><span class="delimiter">(</span><a href="#281814" title="()Unit">nextch</a><span class="delimiter">)</span> <span title="(x: Char)Boolean">==</span> <span title="Char('}')" class="char">'}'</span><span class="delimiter">)</span> <a href="#281814" title="()Unit">nextch</a>
+          <span class="keyword">else</span> <a href="#281825" title="()Nothing">errorBraces</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+
+        <a href="#283539" title="StringBuilder">buf</a> <span title="(x: Char)StringBuilder">append</span> <a href="#281813" title="=&gt; Char">ch</a>
+        <a href="#281814" title="()Unit">nextch</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281827" title="=&gt; Boolean">xCheckEmbeddedBlock</a> <span title="(x: Boolean)Boolean">||</span> <a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('&lt;')" class="char">'&lt;'</span> <span title="(x: Boolean)Boolean">||</span>  <a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('&amp;')" class="char">'&amp;'</span><span class="delimiter">)</span>
+          <span title="Nothing" class="keyword">return</span> <a href="#283540" title="=&gt; String">done</a>
+      <span class="delimiter">}</span>
+      <a href="#283540" title="=&gt; String">done</a>
+    <span class="delimiter">}</span>
+
+    /** Some try/catch/finally logic used by xLiteral and xLiteralPattern.  */
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="(f: () =&gt; MarkupParsers.this.global.Tree, ifTruncated: String =&gt; Unit)MarkupParsers.this.global.Tree" id="281839">xLiteralCommon</a><span class="delimiter">(</span><a title="() =&gt; MarkupParsers.this.global.Tree" id="283577">f</a>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Tree, <a title="String =&gt; Unit" id="283578">ifTruncated</a>: String =&gt; Unit<span class="delimiter">)</span>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <span class="delimiter">{</span>
+      <span class="keyword">try</span> <span title="Nothing" class="keyword">return</span> <a href="#283577" title="()MarkupParsers.this.global.Tree">f</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">catch</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a title="Unit" id="283580">c</a> @ <a href="#281702" title="object MarkupParsers.this.TruncatedXMLControl">TruncatedXMLControl</a>  =&gt;
+          <a href="#283578" title="(v1: String)Unit">ifTruncated</a><span class="delimiter">(</span><a href="#283580" title="object MarkupParsers.this.TruncatedXMLControl">c</a>.<a href="#281684" title="()String">getMessage</a><span class="delimiter">)</span>
+        <span class="keyword">case</span> <a title="Unit" id="283582">c</a> @ <span class="delimiter">(</span><a href="#281662" title="object MarkupParsers.this.MissingEndTagControl">MissingEndTagControl</a> | <a href="#281682" title="object MarkupParsers.this.ConfusedAboutBracesControl">ConfusedAboutBracesControl</a><span class="delimiter">)</span> =&gt;
+          <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282238" title="(offset: Int, msg: String)Unit">syntaxError</a><span class="delimiter">(</span><a href="#281823" title="=&gt; Int">debugLastPos</a>, <a href="#283582" title="Throwable">c</a>.<span title="()String">getMessage</span> <span title="(x$1: Any)String">+</span> <a href="#281824" title="=&gt; String">debugLastElem</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;&gt;&quot;)" class="string">&quot;&gt;&quot;</span><span class="delimiter">)</span>
+        <span class="keyword">case</span> <span title="Unit">_</span>: <span title="ArrayIndexOutOfBoundsException">ArrayIndexOutOfBoundsException</span> =&gt;
+          <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282238" title="(offset: Int, msg: String)Unit">syntaxError</a><span class="delimiter">(</span><a href="#281823" title="=&gt; Int">debugLastPos</a>, <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;missing end tag in XML literal for &lt;%s&gt;&quot;</span> <span title="(args: Any*)String">format</span> <a href="#281824" title="=&gt; String">debugLastElem</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <span class="keyword">finally</span> <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a> <a href="Scanners.scala.html#228607" title="(lastCode: Int)Unit">resume</a> Tokens.<span title="Int(96)">XMLSTART</span>
+
+      <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282045" title="=&gt; MarkupParsers.this.global.Literal">errorTermTree</a>
+    <span class="delimiter">}</span>
+
+    /** Use a lookahead parser to run speculative body, and return the first char afterward. */
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="(body: =&gt; Unit)Char" id="281840">charComingAfter</a><span class="delimiter">(</span><a title="=&gt; Unit" id="283556">body</a>: =&gt; Unit<span class="delimiter">)</span>: <span title="Char">Char</span> = <span class="delimiter">{</span>
+      <span class="keyword">try</span> <span class="delimiter">{</span>
+        <a href="#281805" title="(x$1: scala.tools.nsc.util.CharArrayReader)Unit">input</a> = <a href="#281805" title="=&gt; scala.tools.nsc.util.CharArrayReader">input</a>.<a href="../../util/CharArrayReader.scala.html#228602" title="=&gt; scala.tools.nsc.util.CharArrayReader#CharArrayLookaheadReader">lookaheadReader</a>
+        <a href="#283556" title="=&gt; Unit">body</a>
+        <a href="#281813" title="=&gt; Char">ch</a>
+      <span class="delimiter">}</span>
+      <span class="keyword">finally</span> <a href="#281805" title="(x$1: scala.tools.nsc.util.CharArrayReader)Unit">input</a> = <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a>
+    <span class="delimiter">}</span>
+
+    /** xLiteral = element { element }
+     *  @return Scala representation of this xml literal
+     */
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281841">xLiteral</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <a href="#281839" title="(f: () =&gt; MarkupParsers.this.global.Tree, ifTruncated: String =&gt; Unit)MarkupParsers.this.global.Tree">xLiteralCommon</a><span class="delimiter">(</span>
+      <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <span class="delimiter">{</span>
+        <a href="#281805" title="(x$1: scala.tools.nsc.util.CharArrayReader)Unit">input</a> = <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a>
+        <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282344" title="(x$1: Boolean)Unit">isPattern</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+        <span class="keyword">val</span> <a title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" id="283636">ts</a> = <span title="()scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" class="keyword">new</span> <span title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ArrayBuffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span>
+        <span class="keyword">val</span> <a title="Int" id="283637">start</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+        <a href="#281811" title="(x$1: MarkupParsers.this.global.Position)Unit">tmppos</a> = <a href="Parsers.scala.html#282234" title="(offset: Int)MarkupParsers.this.global.Position">o2p</a><span class="delimiter">(</span><a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>    // Iuli: added this line, as it seems content_LT uses tmppos when creating trees
+        <a href="#281835" title="(ts: scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree])Boolean">content_LT</a><span class="delimiter">(</span><a href="#283636" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span>
+
+        // parse more XML ?
+        <span title="MarkupParsers.this.global.Tree" class="keyword">if</span> <span class="delimiter">(</span><a href="#281840" title="(body: =&gt; Unit)Char">charComingAfter</a><span class="delimiter">(</span><a href="#228349" title="()Unit">xSpaceOpt</a><span class="delimiter">)</span> <span title="(x: Char)Boolean">==</span> <span title="Char('&lt;')" class="char">'&lt;'</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#228349" title="()Unit">xSpaceOpt</a>
+          <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('&lt;')" class="char">'&lt;'</span><span class="delimiter">)</span> <a href="#283646" title="()Unit" class="delimiter">{</a>
+            <a href="#281814" title="()Unit">nextch</a>
+            <a href="#283636" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(elems: MarkupParsers.this.global.Tree*)Unit">append</span> <a href="#281837" title="=&gt; MarkupParsers.this.global.Tree">element</a>
+            <a href="#228349" title="()Unit">xSpaceOpt</a>
+          <span class="delimiter">}</span>
+          <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282392" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, args: Seq[MarkupParser.this.parser.symbXMLBuilder.global.Tree])MarkupParser.this.parser.symbXMLBuilder.global.Block">makeXMLseq</a><span class="delimiter">(</span><a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#283637" title="Int">start</a>, <a href="#283637" title="Int">start</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <a href="#283636" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="delimiter">{</span>
+          <span title="(assertion: Boolean)Unit">assert</span><span class="delimiter">(</span><a href="#283636" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a>.<span title="=&gt; Int">length</span> <span title="(x: Int)Boolean">==</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+          <a href="#283636" title="(idx: Int)MarkupParsers.this.global.Tree">ts</a><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>,
+      <a title="String" id="283915">msg</a> =&gt; <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282239" title="(msg: String)Unit">incompleteInputError</a><span class="delimiter">(</span><a href="#283915" title="String">msg</a><span class="delimiter">)</span>
+    <span class="delimiter">)</span>
+
+    /** @see xmlPattern. resynchronizes after successful parse
+     *  @return this xml pattern
+     */
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281842">xLiteralPattern</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <a href="#281839" title="(f: () =&gt; MarkupParsers.this.global.Tree, ifTruncated: String =&gt; Unit)MarkupParsers.this.global.Tree">xLiteralCommon</a><span class="delimiter">(</span>
+      <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <span class="delimiter">{</span>
+        <a href="#281805" title="(x$1: scala.tools.nsc.util.CharArrayReader)Unit">input</a> = <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a>
+        <a href="#228349" title="[A, B](getter: A, setter: A =&gt; Unit)(body: =&gt; B)B">saving</a><span title="(getter: Boolean, setter: Boolean =&gt; Unit)(body: =&gt; MarkupParsers.this.global.Tree)MarkupParsers.this.global.Tree" class="delimiter">[</span><span title="Boolean">Boolean</span>, <span title="MarkupParsers.this.global.Tree">Tree</span><span class="delimiter">]</span><span class="delimiter">(</span><a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282343" title="=&gt; Boolean">isPattern</a>, <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282344" title="(x$1: Boolean)Unit">isPattern</a> = <a href="#283927" title="Boolean">_</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282344" title="(x$1: Boolean)Unit">isPattern</a> = <span title="Boolean(true)" class="keyword">true</span>
+          <span class="keyword">val</span> <a title="MarkupParsers.this.global.Tree" id="283928">tree</a> = <a href="#281850" title="=&gt; MarkupParsers.this.global.Tree">xPattern</a>
+          <a href="#228349" title="()Unit">xSpaceOpt</a>
+          <a href="#283928" title="MarkupParsers.this.global.Tree">tree</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>,
+      <a title="String" id="283932">msg</a> =&gt; <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282238" title="(offset: Int, msg: String)Unit">syntaxError</a><span class="delimiter">(</span><a href="#281809" title="=&gt; Int">curOffset</a>, <a href="#283932" title="String">msg</a><span class="delimiter">)</span>
+    <span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="[A](op: =&gt; A, kind: String)A" id="281843">escapeToScala</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="281845">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; A" id="283937">op</a>: =&gt; A, <a title="String" id="283938">kind</a>: <span title="String">String</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <a href="#281818" title="(x$1: Boolean)Unit">xEmbeddedBlock</a> = <span title="Boolean(false)" class="keyword">false</span>
+      <span class="keyword">val</span> <a title="A" id="283941">res</a> = <a href="#228349" title="[A, B](getter: A, setter: A =&gt; Unit)(body: =&gt; B)B">saving</a><span title="(getter: List[Int], setter: List[Int] =&gt; Unit)(body: =&gt; A)A" class="delimiter">[</span><span title="List[Int]">List</span><span class="delimiter">[</span>Int<span class="delimiter">]</span>, <a href="#281845" title="A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a>.<a href="Scanners.scala.html#228632" title="=&gt; List[Int]">sepRegions</a>, <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a>.<a href="Scanners.scala.html#228633" title="(x$1: List[Int])Unit">sepRegions</a> = <a href="#283946" title="List[Int]">_</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a> <a href="Scanners.scala.html#228607" title="(lastCode: Int)Unit">resume</a> <span title="Int(94)">LBRACE</span>
+        <a href="#283937" title="=&gt; A">op</a>
+      <span class="delimiter">}</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282227" title="=&gt; MarkupParsers.this.SourceFileScanner">in</a>.<a href="Scanners.scala.html#228710" title="=&gt; Int">token</a> <span title="(x: Int)Boolean">!=</span> <span title="Int(95)">RBRACE</span><span class="delimiter">)</span>
+        <a href="#281849" title="(str: String)Unit">reportSyntaxError</a><span class="delimiter">(</span><span title="String(&quot; expected end of Scala &quot;)" class="string">&quot; expected end of Scala &quot;</span><span title="(x$1: Any)String">+</span><a href="#283938" title="String">kind</a><span class="delimiter">)</span>
+
+      <a href="#283941" title="A">res</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281846">xEmbeddedExpr</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <a href="#281843" title="(op: =&gt; MarkupParsers.this.global.Tree, kind: String)MarkupParsers.this.global.Tree">escapeToScala</a><span class="delimiter">(</span><a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282144" title="()MarkupParsers.this.global.Tree">block</a><span class="delimiter">(</span><span class="delimiter">)</span>, <span title="String(&quot;block&quot;)" class="string">&quot;block&quot;</span><span class="delimiter">)</span>
+
+    /** xScalaPatterns  ::= patterns
+     */
+    <span class="keyword">def</span> <a title="=&gt; List[MarkupParsers.this.global.Tree]" id="281847">xScalaPatterns</a>: <span title="List[MarkupParsers.this.global.Tree]">List</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span> = <a href="#281843" title="(op: =&gt; List[MarkupParsers.this.global.Tree], kind: String)List[MarkupParsers.this.global.Tree]">escapeToScala</a><span class="delimiter">(</span><a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282165" title="()List[MarkupParsers.this.global.Tree]">seqPatterns</a><span class="delimiter">(</span><span class="delimiter">)</span>, <span title="String(&quot;pattern&quot;)" class="string">&quot;pattern&quot;</span><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="(pos: Int, str: String)Unit" id="281848">reportSyntaxError</a><span class="delimiter">(</span><a title="Int" id="282548">pos</a>: <span title="Int">Int</span>, <a title="String" id="282549">str</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="#282246" title="MarkupParsers.this.SourceFileParser">parser</a>.<a href="Parsers.scala.html#282238" title="(offset: Int, msg: String)Unit">syntaxError</a><span class="delimiter">(</span><a href="#282548" title="Int">pos</a>, <a href="#282549" title="String">str</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(str: String)Unit" id="281849">reportSyntaxError</a><span class="delimiter">(</span><a title="String" id="282579">str</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#281848" title="(pos: Int, str: String)Unit">reportSyntaxError</a><span class="delimiter">(</span><a href="#281809" title="=&gt; Int">curOffset</a>, <span title="String(&quot;in XML literal: &quot;)" class="string">&quot;in XML literal: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#282579" title="String">str</a><span class="delimiter">)</span>
+      <a href="#281814" title="()Unit">nextch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    /** '&lt;' xPattern  ::= Name [S] { xmlPattern | '{' pattern3 '}' } ETag
+     *                  | Name [S] '/' '&gt;'
+     */
+    <span class="keyword">def</span> <a title="=&gt; MarkupParsers.this.global.Tree" id="281850">xPattern</a>: <span title="MarkupParsers.this.global.Tree">Tree</span> = <span class="delimiter">{</span>
+      <span class="keyword">var</span> <a title="Int" id="283988">start</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+      <span class="keyword">val</span> <a title="String" id="283989">qname</a> = <a href="#228349" title="=&gt; String">xName</a>
+      <a href="#281821" title="=&gt; scala.collection.mutable.Stack[(Int, String)]">debugLastStartElement</a>.<span title="(elem: (Int, String))scala.collection.mutable.Stack[(Int, String)]">push</span><span class="delimiter">(</span><span title="(_1: Int, _2: String)(Int, String)" class="delimiter">(</span><a href="#283988" title="Int">start</a>, <a href="#283989" title="String">qname</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#228349" title="()Unit">xSpaceOpt</a>
+
+      <span class="keyword">val</span> <a title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" id="283990">ts</a> = <span title="()scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]" class="keyword">new</span> <span title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ArrayBuffer</span><span class="delimiter">[</span>Tree<span class="delimiter">]</span>
+      <span class="keyword">val</span> <a title="Boolean" id="283991">isEmptyTag</a> = <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('/')" class="char">'/'</span><span class="delimiter">)</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <span class="delimiter">{</span> <a href="#281814" title="()Unit">nextch</a> ; <span title="Boolean(true)" class="keyword">true</span> <span class="delimiter">}</span>
+      <a href="#228349" title="(that: Char)Unit">xToken</a><span class="delimiter">(</span><span title="Char('&gt;')" class="char">'&gt;'</span><span class="delimiter">)</span>
+
+      <span title="Any" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#283991" title="Boolean">isEmptyTag</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        // recurses until it hits a termination condition, then returns
+        <span class="keyword">def</span> <a title="=&gt; Boolean" id="284013">doPattern</a>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+          <span class="keyword">val</span> <a title="Int" id="284015">start1</a> = <a href="#281809" title="=&gt; Int">curOffset</a>
+          <span title="Any" class="keyword">if</span> <span class="delimiter">(</span><a href="#281818" title="=&gt; Boolean">xEmbeddedBlock</a><span class="delimiter">)</span> <a href="#283990" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(xs: scala.collection.TraversableOnce[MarkupParsers.this.global.Tree])ts.type">++=</span> <a href="#281847" title="=&gt; List[MarkupParsers.this.global.Tree]">xScalaPatterns</a>
+          <span class="keyword">else</span> <a href="#281813" title="=&gt; Char">ch</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+            <span class="keyword">case</span> <span title="Unit" class="char">'&lt;'</span>  =&gt; // tag
+              <a href="#281814" title="()Unit">nextch</a>
+              <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">!=</span> <span title="Char('/')" class="char">'/'</span><span class="delimiter">)</span> <a href="#283990" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(elems: MarkupParsers.this.global.Tree*)Unit">append</span> <a href="#281850" title="=&gt; MarkupParsers.this.global.Tree">xPattern</a>   // child
+              <span class="keyword">else</span> <span title="Nothing" class="keyword">return</span> <span title="Boolean(false)" class="keyword">false</span>                   // terminate
+
+            <span class="keyword">case</span> <span title="Unit" class="char">'{'</span>  =&gt; // embedded Scala patterns
+              <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#281813" title="=&gt; Char">ch</a> <span title="(x: Char)Boolean">==</span> <span title="Char('{')" class="char">'{'</span><span class="delimiter">)</span> <a href="#284024" title="()Unit" class="delimiter">{</a>
+                <a href="#281814" title="()Unit">nextch</a>
+                <a href="#283990" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a> <span title="(xs: scala.collection.TraversableOnce[MarkupParsers.this.global.Tree])ts.type">++=</span> <a href="#281847" title="=&gt; List[MarkupParsers.this.global.Tree]">xScalaPatterns</a>
+              <span class="delimiter">}</span>
+              <span title="(assertion: Boolean, message: =&gt; Any)Unit">assert</span><span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#281818" title="=&gt; Boolean">xEmbeddedBlock</a>, <span title="String(&quot;problem with embedded block&quot;)" class="string">&quot;problem with embedded block&quot;</span><span class="delimiter">)</span>
+
+            <span class="keyword">case</span> <span title="Nothing">SU</span>   =&gt;
+              <span title="Nothing" class="keyword">throw</span> <a href="#281702" title="object MarkupParsers.this.TruncatedXMLControl">TruncatedXMLControl</a>
+
+            <span class="keyword">case</span> <span title="Unit">_</span>    =&gt; // text
+              <a href="#281832" title="(pos: MarkupParsers.this.global.Position, ts: scala.collection.mutable.Buffer[MarkupParsers.this.global.Tree], txt: String)Unit">appendText</a><span class="delimiter">(</span><a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#284015" title="Int">start1</a>, <a href="#284015" title="Int">start1</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <a href="#283990" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a>, <a href="#281838" title="=&gt; String">xText</a><span class="delimiter">)</span>
+              // here xEmbeddedBlock might be true:
+              // if (xEmbeddedBlock) throw new ApplicationError(&quot;after:&quot;+text); // assert
+          <span class="delimiter">}</span>
+          <span title="Boolean(true)" class="keyword">true</span>
+        <span class="delimiter">}</span>
+
+        <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#284013" title="=&gt; Boolean">doPattern</a><span class="delimiter">)</span> <a href="#284014" title="Unit" class="delimiter">{</a> <span class="delimiter">}</span>  // call until false
+        <a href="#228349" title="(startName: String)Unit">xEndTag</a><span class="delimiter">(</span><a href="#283989" title="String">qname</a><span class="delimiter">)</span>
+        <a href="#281821" title="=&gt; scala.collection.mutable.Stack[(Int, String)]">debugLastStartElement</a>.<span title="()(Int, String)">pop</span>
+      <span class="delimiter">}</span>
+
+      <a href="Parsers.scala.html#282242" title="object MarkupParser.this.parser.symbXMLBuilder">handle</a>.<a href="SymbolicXMLBuilder.scala.html#282387" title="(pos: MarkupParser.this.parser.symbXMLBuilder.global.Position, n: String, args: Seq[MarkupParser.this.parser.symbXMLBuilder.global.Tree])MarkupParser.this.parser.symbXMLBuilder.global.Tree">makeXMLpat</a><span class="delimiter">(</span><a href="Parsers.scala.html#282235" title="(start: Int, mid: Int, end: Int)MarkupParsers.this.global.Position">r2p</a><span class="delimiter">(</span><a href="#283988" title="Int">start</a>, <a href="#283988" title="Int">start</a>, <a href="#281809" title="=&gt; Int">curOffset</a><span class="delimiter">)</span>, <a href="#283989" title="String">qname</a>, <a href="#283990" title="scala.collection.mutable.ArrayBuffer[MarkupParsers.this.global.Tree]">ts</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span> /* class MarkupParser */
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
