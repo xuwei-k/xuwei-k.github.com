@@ -1,0 +1,360 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/actors/threadpool/helpers/Utils.java</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Written by Dawid Kurzyniec, based on code written by Doug Lea with assistance
+ * from members of JCP JSR-166 Expert Group. Released to the public domain,
+ * as explained at http://creativecommons.org/licenses/publicdomain.
+ *
+ * Thanks to Craig Mattocks for suggesting to use &lt;code&gt;sun.misc.Perf&lt;/code&gt;.
+ */
+
+<span class="keyword">package</span> scala.actors.threadpool.helpers;
+
+//import edu.emory.mathcs.backport.java.util.*;
+<span class="keyword">import</span> scala.actors.threadpool.*;
+<span class="keyword">import</span> scala.actors.threadpool.locks.*;
+<span class="keyword">import</span> java.security.AccessController;
+<span class="keyword">import</span> java.security.PrivilegedAction;
+<span class="keyword">import</span> java.lang.reflect.Array;
+<span class="keyword">import</span> java.util.Iterator;
+<span class="keyword">import</span> java.util.Collection;
+
+/**
+ * &lt;p&gt;
+ * This class groups together the functionality of java.util.concurrent that
+ * cannot be fully and reliably implemented in backport, but for which some
+ * form of emulation is possible.
+ * &lt;p&gt;
+ * Currently, this class contains methods related to nanosecond-precision
+ * timing, particularly via the {@link #nanoTime} method. To measure time
+ * accurately, this method by default uses &lt;code&gt;java.sun.Perf&lt;/code&gt; on
+ * JDK1.4.2 and it falls back to &lt;code&gt;System.currentTimeMillis&lt;/code&gt;
+ * on earlier JDKs.
+ *
+ * @author Dawid Kurzyniec
+ * @version 1.0
+ */
+public <span class="keyword">final</span> <span class="keyword">class</span> <a title="object scala.actors.threadpool.helpers.Utils" id="10174">Utils</a> <span class="delimiter">{</span>
+
+    <span class="keyword">private</span> <span class="keyword">final</span> static <a href="NanoTimer.java.html#10168" title="scala.actors.threadpool.helpers.NanoTimer">NanoTimer</a> <a title="scala.actors.threadpool.helpers.NanoTimer" id="1558867">nanoTimer</a>;
+    <span class="keyword">private</span> <span class="keyword">final</span> static String <a title="String" id="1558868">providerProp</a> =
+        <span class="string">&quot;edu.emory.mathcs.backport.java.util.concurrent.NanoTimerProvider&quot;</span>;
+
+    static <span class="delimiter">{</span>
+        NanoTimer timer = <span class="keyword">null</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            String nanoTimerClassName =
+                AccessController.doPrivileged<span class="delimiter">(</span><span class="keyword">new</span> PrivilegedAction&lt;String&gt;<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    public String run<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                        <span class="keyword">return</span> System.getProperty<span class="delimiter">(</span>providerProp<span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>nanoTimerClassName != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                Class cls = Class.forName<span class="delimiter">(</span>nanoTimerClassName<span class="delimiter">)</span>;
+                timer = <span class="delimiter">(</span>NanoTimer<span class="delimiter">)</span> cls.newInstance<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">catch</span> <span class="delimiter">(</span>Exception e<span class="delimiter">)</span> <span class="delimiter">{</span>
+            System.err.println<span class="delimiter">(</span><span class="string">&quot;WARNING: unable to load the system-property-defined &quot;</span> +
+                               <span class="string">&quot;nanotime provider; switching to the default&quot;</span><span class="delimiter">)</span>;
+            e.printStackTrace<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span>timer == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">try</span> <span class="delimiter">{</span>
+                timer = <span class="keyword">new</span> SunPerfProvider<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">catch</span> <span class="delimiter">(</span>Throwable e<span class="delimiter">)</span> <span class="delimiter">{</span><span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        <span class="keyword">if</span> <span class="delimiter">(</span>timer == <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            timer = <span class="keyword">new</span> MillisProvider<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        nanoTimer = timer;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> Utils<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span><span class="delimiter">}</span>
+
+    /**
+     * Returns the current value of the most precise available system timer,
+     * in nanoseconds. This method can only be used to measure elapsed time and
+     * is not related to any other notion of system or wall-clock time. The
+     * value returned represents nanoseconds since some fixed but arbitrary
+     * time (perhaps in the future, so values may be negative). This method
+     * provides nanosecond precision, but not necessarily nanosecond accuracy.
+     * No guarantees are made about how frequently values change. Differences
+     * in successive calls that span greater than approximately 292 years
+     * (2^63 nanoseconds) will not accurately compute elapsed time due to
+     * numerical overflow.
+     * &lt;p&gt;
+     * &lt;em&gt;Implementation note:&lt;/em&gt;By default, this method uses
+     * &lt;code&gt;sun.misc.Perf&lt;/code&gt; on Java 1.4.2, and falls back to
+     * System.currentTimeMillis() emulation on earlier JDKs. Custom
+     * timer can be provided via the system property
+     * &lt;code&gt;edu.emory.mathcs.backport.java.util.concurrent.NanoTimerProvider&lt;/code&gt;.
+     * The value of the property should name a class implementing
+     * {@link NanoTimer} interface.
+     * &lt;p&gt;
+     * Note: on JDK 1.4.2, &lt;code&gt;sun.misc.Perf&lt;/code&gt; timer seems to have
+     * resolution of the order of 1 microsecond, measured on Linux.
+     *
+     * @return The current value of the system timer, in nanoseconds.
+     */
+    public static long <a title="()Long" id="1558869">nanoTime</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> nanoTimer.nanoTime<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Causes the current thread to wait until it is signalled or interrupted,
+     * or the specified waiting time elapses. This method originally appears
+     * in the {@link Condition} interface, but it was moved to here since it
+     * can only be emulated, with very little accuracy guarantees: the
+     * efficient implementation requires accurate nanosecond timer and native
+     * support for nanosecond-precision wait queues, which are not usually
+     * present in JVMs prior to 1.5. Loss of precision may cause total waiting
+     * times to be systematically shorter than specified when re-waits occur.
+     *
+     * &lt;p&gt;The lock associated with this condition is atomically
+     * released and the current thread becomes disabled for thread scheduling
+     * purposes and lies dormant until &lt;em&gt;one&lt;/em&gt; of five things happens:
+     * &lt;ul&gt;
+     * &lt;li&gt;Some other thread invokes the {@link
+     * edu.emory.mathcs.backport.java.util.concurrent.locks.Condition#signal}
+     * method for this
+     * &lt;tt&gt;Condition&lt;/tt&gt; and the current thread happens to be chosen as the
+     * thread to be awakened; or
+     * &lt;li&gt;Some other thread invokes the {@link
+     * edu.emory.mathcs.backport.java.util.concurrent.locks.Condition#signalAll}
+     * method for this
+     * &lt;tt&gt;Condition&lt;/tt&gt;; or
+     * &lt;li&gt;Some other thread {@link Thread#interrupt interrupts} the current
+     * thread, and interruption of thread suspension is supported; or
+     * &lt;li&gt;The specified waiting time elapses; or
+     * &lt;li&gt;A &amp;quot;&lt;em&gt;spurious wakeup&lt;/em&gt;&amp;quot; occurs.
+     * &lt;/ul&gt;
+     *
+     * &lt;p&gt;In all cases, before this method can return the current thread must
+     * re-acquire the lock associated with this condition. When the
+     * thread returns it is &lt;em&gt;guaranteed&lt;/em&gt; to hold this lock.
+     *
+     * &lt;p&gt;If the current thread:
+     * &lt;ul&gt;
+     * &lt;li&gt;has its interrupted status set on entry to this method; or
+     * &lt;li&gt;is {@link Thread#interrupt interrupted} while waiting
+     * and interruption of thread suspension is supported,
+     * &lt;/ul&gt;
+     * then {@link InterruptedException} is thrown and the current thread's
+     * interrupted status is cleared. It is not specified, in the first
+     * case, whether or not the test for interruption occurs before the lock
+     * is released.
+     *
+     * &lt;p&gt;The method returns an estimate of the number of nanoseconds
+     * remaining to wait given the supplied &lt;tt&gt;nanosTimeout&lt;/tt&gt;
+     * value upon return, or a value less than or equal to zero if it
+     * timed out. Accuracy of this estimate is directly dependent on the
+     * accuracy of {@link #nanoTime}. This value can be used to determine
+     * whether and how long to re-wait in cases where the wait returns but an
+     * awaited condition still does not hold. Typical uses of this method take
+     * the following form:
+     *
+     * &lt;pre&gt;
+     * synchronized boolean aMethod(long timeout, TimeUnit unit) {
+     *   long nanosTimeout = unit.toNanos(timeout);
+     *   while (!conditionBeingWaitedFor) {
+     *     if (nanosTimeout &amp;gt; 0)
+     *         nanosTimeout = theCondition.awaitNanos(nanosTimeout);
+     *      else
+     *        return false;
+     *   }
+     *   // ...
+     * }
+     * &lt;/pre&gt;
+     *
+     * &lt;p&gt;&lt;b&gt;Implementation Considerations&lt;/b&gt;
+     * &lt;p&gt;The current thread is assumed to hold the lock associated with this
+     * &lt;tt&gt;Condition&lt;/tt&gt; when this method is called.
+     * It is up to the implementation to determine if this is
+     * the case and if not, how to respond. Typically, an exception will be
+     * thrown (such as {@link IllegalMonitorStateException}) and the
+     * implementation must document that fact.
+     *
+     * &lt;p&gt;A condition implementation can favor responding to an interrupt over
+     * normal method return in response to a signal, or over indicating the
+     * elapse of the specified waiting time. In either case the implementation
+     * must ensure that the signal is redirected to another waiting thread, if
+     * there is one.
+     *
+     * @param cond the condition to wait for
+     * @param nanosTimeout the maximum time to wait, in nanoseconds
+     * @return A value less than or equal to zero if the wait has
+     * timed out; otherwise an estimate, that
+     * is strictly less than the &lt;tt&gt;nanosTimeout&lt;/tt&gt; argument,
+     * of the time still remaining when this method returned.
+     *
+     * @throws InterruptedException if the current thread is interrupted (and
+     * interruption of thread suspension is supported).
+     */
+    public static long <a title="(cond: scala.actors.threadpool.locks.Condition, nanosTimeout: Long)Long" id="1558870">awaitNanos</a><span class="delimiter">(</span>Condition <a title="scala.actors.threadpool.locks.Condition" id="1558881">cond</a>, long <a title="Long" id="1558882">nanosTimeout</a><span class="delimiter">)</span>
+        throws InterruptedException
+    <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>nanosTimeout &lt;= <span class="int">0</span><span class="delimiter">)</span> <span class="keyword">return</span> nanosTimeout;
+        long now = nanoTime<span class="delimiter">(</span><span class="delimiter">)</span>;
+        cond.await<span class="delimiter">(</span>nanosTimeout, TimeUnit.NANOSECONDS<span class="delimiter">)</span>;
+        <span class="keyword">return</span> nanosTimeout - <span class="delimiter">(</span>nanoTime<span class="delimiter">(</span><span class="delimiter">)</span> - now<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static <span class="keyword">final</span> <span class="keyword">class</span> <a title="object scala.actors.threadpool.helpers.Utils.SunPerfProvider" id="1558873">SunPerfProvider</a> implements NanoTimer <span class="delimiter">{</span>
+        <span class="keyword">final</span> Perf perf;
+        <span class="keyword">final</span> long multiplier, divisor;
+        SunPerfProvider<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            perf =
+                AccessController.doPrivileged<span class="delimiter">(</span><span class="keyword">new</span> PrivilegedAction&lt;Perf&gt;<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    public Perf run<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                        <span class="keyword">return</span> Perf.getPerf<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span><span class="delimiter">)</span>;
+            // trying to avoid BOTH overflow and rounding errors
+            long numerator = <span class="int">1000000000</span>;
+            long denominator = perf.highResFrequency<span class="delimiter">(</span><span class="delimiter">)</span>;
+            long gcd = gcd<span class="delimiter">(</span>numerator, denominator<span class="delimiter">)</span>;
+            <span class="keyword">this</span>.multiplier = numerator / gcd;
+            <span class="keyword">this</span>.divisor = denominator / gcd;
+        <span class="delimiter">}</span>
+        public long nanoTime<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            long ctr = perf.highResCounter<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+            // anything less sophisticated suffers either from rounding errors
+            // (FP arithmetics, backport v1.0) or overflow, when gcd is small
+            // (a bug in backport v1.0_01 reported by Ramesh Nethi)
+
+            <span class="keyword">return</span> <span class="delimiter">(</span><span class="delimiter">(</span>ctr / divisor<span class="delimiter">)</span> * multiplier<span class="delimiter">)</span> +
+                    <span class="delimiter">(</span>ctr % divisor<span class="delimiter">)</span> * multiplier / divisor;
+
+            // even the above can theoretically cause problems if your JVM is
+            // running for sufficiently long time, but &quot;sufficiently&quot; means 292
+            // years (worst case), or 30,000 years (common case).
+
+            // Details: when the ticks ctr overflows, there is no way to avoid
+            // discontinuity in computed nanos, even in infinite arithmetics,
+            // unless we count number of overflows that the ctr went through
+            // since the JVM started. This follows from the fact that
+            // (2^64*multiplier/divisor) mod (2^64) &gt; 0 in general case.
+            // Theoretically we could find out the number of overflows by
+            // checking System.currentTimeMillis(), but this is unreliable
+            // since the system time can unpredictably change during the JVM
+            // lifetime.
+            // The time to overflow is 2^63 / ticks frequency. With current
+            // ticks frequencies of several MHz, it gives about 30,000 years
+            // before the problem happens. If ticks frequency reaches 1 GHz, the
+            // time to overflow is 292 years. It is unlikely that the frequency
+            // ever exceeds 1 GHz. We could double the time to overflow
+            // (to 2^64 / frequency) by using unsigned arithmetics, e.g. by
+            // adding the following correction whenever the ticks is negative:
+            //      -2*((Long.MIN_VALUE / divisor) * multiplier +
+            //          (Long.MIN_VALUE % divisor) * multiplier / divisor)
+            // But, with the worst case of as much as 292 years, it does not
+            // seem justified.
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static <span class="keyword">final</span> <span class="keyword">class</span> <a title="object scala.actors.threadpool.helpers.Utils.MillisProvider" id="1558876">MillisProvider</a> implements NanoTimer <span class="delimiter">{</span>
+        MillisProvider<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span><span class="delimiter">}</span>
+        public long nanoTime<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> System.currentTimeMillis<span class="delimiter">(</span><span class="delimiter">)</span> * <span class="int">1000000</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static long <a title="(a: Long, b: Long)Long" id="1558877">gcd</a><span class="delimiter">(</span>long <a title="Long" id="1558886">a</a>, long <a title="Long" id="1558887">b</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        long r;
+        <span class="keyword">while</span> <span class="delimiter">(</span>b&gt;<span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span> r = a % b; a = b; b = r; <span class="delimiter">}</span>
+        <span class="keyword">return</span> a;
+    <span class="delimiter">}</span>
+
+
+    public static Object<span class="delimiter">[</span><a href="../../../Array.scala.html#279" title="Array" class="delimiter">]</a> <a title="(c: java.util.Collection)Array[Object]" id="1558878">collectionToArray</a><span class="delimiter">(</span>Collection <a title="java.util.Collection" id="1558889">c</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        // guess the array size; expect to possibly be different
+        int len = c.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+        Object<span class="delimiter">[</span><span class="delimiter">]</span> arr = <span class="keyword">new</span> Object<span class="delimiter">[</span>len<span class="delimiter">]</span>;
+        Iterator itr = c.iterator<span class="delimiter">(</span><span class="delimiter">)</span>;
+        int idx = <span class="int">0</span>;
+        <span class="keyword">while</span> <span class="delimiter">(</span><span class="keyword">true</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">while</span> <span class="delimiter">(</span>idx &lt; len &amp;&amp; itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                arr<span class="delimiter">[</span>idx++<span class="delimiter">]</span> = itr.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>!itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>idx == len<span class="delimiter">)</span> <span class="keyword">return</span> arr;
+                // otherwise have to trim
+                <span class="keyword">return</span> Arrays.copyOf<span class="delimiter">(</span>arr, idx, Object<span class="delimiter">[</span><span class="delimiter">]</span>.<span class="keyword">class</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            // otherwise, have to grow
+            int newcap = <span class="delimiter">(</span><span class="delimiter">(</span>arr.length/<span class="int">2</span><span class="delimiter">)</span>+<span class="int">1</span><span class="delimiter">)</span>*<span class="int">3</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>newcap &lt; arr.length<span class="delimiter">)</span> <span class="delimiter">{</span>
+                // overflow
+                <span class="keyword">if</span> <span class="delimiter">(</span>arr.length &lt; Integer.MAX_VALUE<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    newcap = Integer.MAX_VALUE;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="delimiter">{</span>
+                    <span class="keyword">throw</span> <span class="keyword">new</span> OutOfMemoryError<span class="delimiter">(</span><span class="string">&quot;required array size too large&quot;</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            arr = Arrays.copyOf<span class="delimiter">(</span>arr, newcap, Object<span class="delimiter">[</span><span class="delimiter">]</span>.<span class="keyword">class</span><span class="delimiter">)</span>;
+            len = newcap;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    public static Object<span class="delimiter">[</span><a href="../../../Array.scala.html#279" title="Array" class="delimiter">]</a> <a title="(c: java.util.Collection, a: Array[Object])Array[Object]" id="1558879">collectionToArray</a><span class="delimiter">(</span>Collection <a title="java.util.Collection" id="1558891">c</a>, Object<span class="delimiter">[</span><a href="../../../Array.scala.html#279" title="Array" class="delimiter">]</a> <a title="Array[Object]" id="1558892">a</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        Class aType = a.getClass<span class="delimiter">(</span><span class="delimiter">)</span>;
+        // guess the array size; expect to possibly be different
+        int len = c.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+        Object<span class="delimiter">[</span><span class="delimiter">]</span> arr = <span class="delimiter">(</span>a.length &gt;= len ? a :
+                        <span class="delimiter">(</span>Object<span class="delimiter">[</span><span class="delimiter">]</span><span class="delimiter">)</span>Array.newInstance<span class="delimiter">(</span>aType.getComponentType<span class="delimiter">(</span><span class="delimiter">)</span>, len<span class="delimiter">)</span><span class="delimiter">)</span>;
+        Iterator itr = c.iterator<span class="delimiter">(</span><span class="delimiter">)</span>;
+        int idx = <span class="int">0</span>;
+        <span class="keyword">while</span> <span class="delimiter">(</span><span class="keyword">true</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">while</span> <span class="delimiter">(</span>idx &lt; len &amp;&amp; itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                arr<span class="delimiter">[</span>idx++<span class="delimiter">]</span> = itr.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>!itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>idx == len<span class="delimiter">)</span> <span class="keyword">return</span> arr;
+                <span class="keyword">if</span> <span class="delimiter">(</span>arr == a<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    // orig array -&gt; null terminate
+                    a<span class="delimiter">[</span>idx<span class="delimiter">]</span> = <span class="keyword">null</span>;
+                    <span class="keyword">return</span> a;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="delimiter">{</span>
+                    // have to trim
+                    <span class="keyword">return</span> Arrays.copyOf<span class="delimiter">(</span>arr, idx, aType<span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            // otherwise, have to grow
+            int newcap = <span class="delimiter">(</span><span class="delimiter">(</span>arr.length/<span class="int">2</span><span class="delimiter">)</span>+<span class="int">1</span><span class="delimiter">)</span>*<span class="int">3</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>newcap &lt; arr.length<span class="delimiter">)</span> <span class="delimiter">{</span>
+                // overflow
+                <span class="keyword">if</span> <span class="delimiter">(</span>arr.length &lt; Integer.MAX_VALUE<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    newcap = Integer.MAX_VALUE;
+                <span class="delimiter">}</span>
+                <span class="keyword">else</span> <span class="delimiter">{</span>
+                    <span class="keyword">throw</span> <span class="keyword">new</span> OutOfMemoryError<span class="delimiter">(</span><span class="string">&quot;required array size too large&quot;</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            arr = Arrays.copyOf<span class="delimiter">(</span>arr, newcap, aType<span class="delimiter">)</span>;
+            len = newcap;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

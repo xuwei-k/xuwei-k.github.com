@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/actors/threadpool/helpers/WaitQueue.java</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+  based on file: QueuedSemaphore.java
+  Originally written by Doug Lea and released into the public domain.
+  This may be used for any purposes whatsoever without acknowledgment.
+  Thanks for the assistance and support of Sun Microsystems Labs,
+  and everyone contributing, testing, and using this code.
+  History:
+  Date       Who                What
+  11Jun1998  dl               Create public version
+   5Aug1998  dl               replaced int counters with longs
+  24Aug1999  dl               release(n): screen arguments
+ */
+
+<span class="keyword">package</span> scala.actors.threadpool.helpers;
+
+<span class="keyword">import</span> java.util.Collection;
+<span class="keyword">import</span> scala.actors.threadpool.*;
+
+/**
+ * Base class for internal queue classes for semaphores, etc.
+ * Relies on subclasses to actually implement queue mechanics.
+ * NOTE: this class is NOT present in java.util.concurrent.
+ **/
+
+public <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="object scala.actors.threadpool.helpers.WaitQueue" id="10141">WaitQueue</a> <span class="delimiter">{</span>
+
+    public <span class="keyword">abstract</span> void insert<span class="delimiter">(</span>WaitNode w<span class="delimiter">)</span>; // assumed not to block
+    public <span class="keyword">abstract</span> WaitNode extract<span class="delimiter">(</span><span class="delimiter">)</span>; // should return null if empty
+    public <span class="keyword">abstract</span> void putBack<span class="delimiter">(</span>WaitNode w<span class="delimiter">)</span>;
+
+    public <span class="keyword">abstract</span> boolean hasNodes<span class="delimiter">(</span><span class="delimiter">)</span>;
+    public <span class="keyword">abstract</span> int getLength<span class="delimiter">(</span><span class="delimiter">)</span>;
+    public <span class="keyword">abstract</span> Collection getWaitingThreads<span class="delimiter">(</span><span class="delimiter">)</span>;
+    public <span class="keyword">abstract</span> boolean isWaiting<span class="delimiter">(</span>Thread thread<span class="delimiter">)</span>;
+
+    public static interface <a title="object scala.actors.threadpool.helpers.WaitQueue.QueuedSync" id="1558897">QueuedSync</a> <span class="delimiter">{</span>
+        // invoked with sync on wait node, (atomically) just before enqueuing
+        boolean recheck<span class="delimiter">(</span>WaitNode node<span class="delimiter">)</span>;
+        // invoked with sync on wait node, (atomically) just before signalling
+        void takeOver<span class="delimiter">(</span>WaitNode node<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public static <span class="keyword">class</span> <a title="object scala.actors.threadpool.helpers.WaitQueue.WaitNode" id="1558900">WaitNode</a> <span class="delimiter">{</span>
+        boolean waiting = <span class="keyword">true</span>;
+        WaitNode next = <span class="keyword">null</span>;
+        <span class="keyword">final</span> Thread owner;
+
+        public WaitNode<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">this</span>.owner = Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        public Thread getOwner<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> owner;
+        <span class="delimiter">}</span>
+
+        public synchronized boolean signal<span class="delimiter">(</span>QueuedSync sync<span class="delimiter">)</span> <span class="delimiter">{</span>
+            boolean signalled = waiting;
+            <span class="keyword">if</span> <span class="delimiter">(</span>signalled<span class="delimiter">)</span> <span class="delimiter">{</span>
+                waiting = <span class="keyword">false</span>;
+                notify<span class="delimiter">(</span><span class="delimiter">)</span>;
+                sync.takeOver<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> signalled;
+        <span class="delimiter">}</span>
+
+        public synchronized boolean doTimedWait<span class="delimiter">(</span>QueuedSync sync, long nanos<span class="delimiter">)</span>
+            throws InterruptedException
+        <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>sync.recheck<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span> || !waiting<span class="delimiter">)</span>
+                <span class="keyword">return</span> <span class="keyword">true</span>;
+            <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>nanos &lt;= <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                waiting = <span class="keyword">false</span>;
+                <span class="keyword">return</span> <span class="keyword">false</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">else</span> <span class="delimiter">{</span>
+                long deadline = Utils.nanoTime<span class="delimiter">(</span><span class="delimiter">)</span> + nanos;
+                <span class="keyword">try</span> <span class="delimiter">{</span>
+                    <span class="keyword">for</span> <span class="delimiter">(</span>; ; <span class="delimiter">)</span> <span class="delimiter">{</span>
+                        TimeUnit.NANOSECONDS.timedWait<span class="delimiter">(</span><span class="keyword">this</span>, nanos<span class="delimiter">)</span>;
+                        <span class="keyword">if</span> <span class="delimiter">(</span>!waiting<span class="delimiter">)</span> // definitely signalled
+                            <span class="keyword">return</span> <span class="keyword">true</span>;
+                        <span class="keyword">else</span> <span class="delimiter">{</span>
+                            nanos = deadline - Utils.nanoTime<span class="delimiter">(</span><span class="delimiter">)</span>;
+                            <span class="keyword">if</span> <span class="delimiter">(</span>nanos &lt;= <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span> //  timed out
+                                waiting = <span class="keyword">false</span>;
+                                <span class="keyword">return</span> <span class="keyword">false</span>;
+                            <span class="delimiter">}</span>
+                        <span class="delimiter">}</span>
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+                <span class="keyword">catch</span> <span class="delimiter">(</span>InterruptedException ex<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    <span class="keyword">if</span> <span class="delimiter">(</span>waiting<span class="delimiter">)</span> <span class="delimiter">{</span> // no notification
+                        waiting = <span class="keyword">false</span>; // invalidate for the signaller
+                        <span class="keyword">throw</span> ex;
+                    <span class="delimiter">}</span>
+                    <span class="keyword">else</span> <span class="delimiter">{</span> // thread was interrupted after it was notified
+                        Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+                        <span class="keyword">return</span> <span class="keyword">true</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public synchronized void doWait<span class="delimiter">(</span>QueuedSync sync<span class="delimiter">)</span>
+            throws InterruptedException
+        <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>!sync.recheck<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">try</span> <span class="delimiter">{</span>
+                    <span class="keyword">while</span> <span class="delimiter">(</span>waiting<span class="delimiter">)</span> wait<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+                <span class="keyword">catch</span> <span class="delimiter">(</span>InterruptedException ex<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    <span class="keyword">if</span> <span class="delimiter">(</span>waiting<span class="delimiter">)</span> <span class="delimiter">{</span> // no notification
+                        waiting = <span class="keyword">false</span>; // invalidate for the signaller
+                        <span class="keyword">throw</span> ex;
+                    <span class="delimiter">}</span>
+                    <span class="keyword">else</span> <span class="delimiter">{</span> // thread was interrupted after it was notified
+                        Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+                        <span class="keyword">return</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        public synchronized void doWaitUninterruptibly<span class="delimiter">(</span>QueuedSync sync<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>!sync.recheck<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                boolean wasInterrupted = Thread.interrupted<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">try</span> <span class="delimiter">{</span>
+                    <span class="keyword">while</span> <span class="delimiter">(</span>waiting<span class="delimiter">)</span> <span class="delimiter">{</span>
+                        <span class="keyword">try</span> <span class="delimiter">{</span>
+                            wait<span class="delimiter">(</span><span class="delimiter">)</span>;
+                        <span class="delimiter">}</span>
+                        <span class="keyword">catch</span> <span class="delimiter">(</span>InterruptedException ex<span class="delimiter">)</span> <span class="delimiter">{</span>
+                            wasInterrupted = <span class="keyword">true</span>;
+                            // no need to notify; if we were signalled, we
+                            // must be not waiting, and we'll act like signalled
+                        <span class="delimiter">}</span>
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+                <span class="keyword">finally</span> <span class="delimiter">{</span>
+                    <span class="keyword">if</span> <span class="delimiter">(</span>wasInterrupted<span class="delimiter">)</span> Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+
+        </pre>
+    </body>
+</html>

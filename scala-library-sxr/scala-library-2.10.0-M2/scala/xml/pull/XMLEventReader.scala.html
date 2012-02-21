@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/xml/pull/XMLEventReader.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.xml
+<span class="keyword">package</span> pull
+
+<span class="keyword">import</span> scala.io.Source
+<span class="keyword">import</span> java.lang.Thread
+<span class="keyword">import</span> java.util.concurrent.LinkedBlockingQueue
+<span class="keyword">import</span> java.nio.channels.ClosedChannelException
+<span class="keyword">import</span> scala.xml.parsing.<span class="delimiter">{</span> ExternalSources, MarkupHandler, MarkupParser <span class="delimiter">}</span>
+
+/**
+ * Main entry point into creating an event-based XML parser.  Treating this
+ * as a [[scala.collection.Iterator]] will provide access to the generated events.
+ * @param src A [[scala.io.Source]] for XML data to parse
+ *
+ *  @author Burak Emir
+ *  @author Paul Phillips
+ */
+<span class="keyword">class</span> <a title="class XMLEventReader extends scala.collection.AbstractIterator[scala.xml.pull.XMLEvent] with scala.xml.pull.ProducerConsumerIterator[scala.xml.pull.XMLEvent] with ScalaObject" id="23372">XMLEventReader</a><a href="../../ScalaObject.scala.html#1452" title="ScalaObject" class="delimiter">(</a><a title="scala.io.Source" id="472392">src</a>: <a href="../../io/Source.scala.html#17420" title="scala.io.Source">Source</a><span class="delimiter">)</span>
+<span class="keyword">extends</span> collection.<a href="../../collection/Iterator.scala.html#4019" title="scala.collection.AbstractIterator[scala.xml.pull.XMLEvent]">AbstractIterator</a><span class="delimiter">[</span>XMLEvent<span class="delimiter">]</span>
+   <span class="keyword">with</span> <a href="#23402" title="scala.xml.pull.ProducerConsumerIterator[scala.xml.pull.XMLEvent]">ProducerConsumerIterator</a><span class="delimiter">[</span>XMLEvent<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+  // We implement a pull parser as an iterator, but since we may be operating on
+  // a stream (e.g. XML over a network) there may be arbitrarily long periods when
+  // the queue is empty.  Fortunately the ProducerConsumerIterator is ideally
+  // suited to this task, possibly because it was written for use by this class.
+
+  // to override as necessary
+  <span class="keyword">val</span> <a title="Boolean" id="472359">preserveWS</a> = <span title="Boolean(true)" class="keyword">true</span>
+
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="Int" id="472361">MaxQueueSize</a> = <span title="Int(1000)" class="int">1000</span>
+  <span class="keyword">protected</span> case <span class="keyword">object</span> <a href="#472397" title="object XMLEventReader.this.POISON" id="472405">POISON</a> <a href="../../ScalaObject.scala.html#1452" title="ScalaObject" class="keyword">extends</a> <a href="XMLEvent.scala.html#23345" title="scala.xml.pull.XMLEvent">XMLEvent</a>
+  <span class="keyword">val</span> <a title="XMLEventReader.this.POISON.type" id="472365">EndOfStream</a> = <a href="#472405" title="object XMLEventReader.this.POISON">POISON</a>
+
+  // thread machinery
+  <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">val</span> <a title="XMLEventReader.this.Parser" id="472367">parser</a> = <span title="XMLEventReader.this.Parser" class="keyword">new</span> <a href="#472370" title="XMLEventReader.this.Parser">Parser</a><span class="delimiter">(</span><a href="#472392" title="scala.io.Source">src</a><span class="delimiter">)</span>
+  <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">val</span> <a title="Thread" id="472368">parserThread</a> = <span title="(x$1: Runnable, x$2: String)Thread" class="keyword">new</span> <span title="Thread">Thread</span><span class="delimiter">(</span><a href="#472367" title="XMLEventReader.this.Parser">parser</a>, <span title="String(&quot;XMLEventReader&quot;)" class="string">&quot;XMLEventReader&quot;</span><span class="delimiter">)</span>
+  <a href="#472368" title="Thread">parserThread</a>.<span title="()Unit">start</span>
+  // enqueueing the poison object is the reliable way to cause the
+  // iterator to terminate; hasNext will return false once it sees it.
+  // Calling interrupt() on the parserThread is the only way we can get
+  // it to stop producing tokens since it's lost deep in document() -
+  // we cross our fingers the interrupt() gets to its target, but if it
+  // fails for whatever reason the iterator correctness is not impacted,
+  // only performance (because it will finish the entire XML document,
+  // or at least as much as it can fit in the queue.)
+  <span class="keyword">def</span> <a title="()Unit" id="472369">stop</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#472384" title="(x: scala.xml.pull.XMLEvent)Unit">produce</a><span class="delimiter">(</span><a href="#472405" title="object XMLEventReader.this.POISON">POISON</a><span class="delimiter">)</span>
+    <a href="#472368" title="Thread">parserThread</a>.<span title="()Unit">interrupt</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">class</span> <a title="class Parser extends scala.xml.parsing.MarkupHandler with scala.xml.parsing.MarkupParser with scala.xml.parsing.ExternalSources with Runnable with ScalaObject" id="472370">Parser</a><a href="../../ScalaObject.scala.html#1452" title="ScalaObject" class="delimiter">(</a><span class="keyword">val</span> <a title="scala.io.Source" id="472427">input</a>: <a href="../../io/Source.scala.html#17420" title="scala.io.Source">Source</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="../parsing/MarkupHandler.scala.html#23160" title="scala.xml.parsing.MarkupHandler">MarkupHandler</a> <span class="keyword">with</span> <a href="../parsing/MarkupParser.scala.html#23076" title="scala.xml.parsing.MarkupParser">MarkupParser</a> <span class="keyword">with</span> <a href="../parsing/ExternalSources.scala.html#23202" title="scala.xml.parsing.ExternalSources">ExternalSources</a> <span class="keyword">with</span> <span title="Runnable">Runnable</span> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="Boolean" id="472410">preserveWS</a> = <a href="#23372" title="XMLEventReader.this.type">XMLEventReader</a>.<span class="keyword">this</span>.<a href="#472359" title="=&gt; Boolean">preserveWS</a>
+    // track level for elem memory usage optimization
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Int" id="472413">level</a> = <span title="Int(0)" class="int">0</span>
+
+    // this is Parser's way to add to the queue - the odd return type
+    // is to conform to MarkupHandler's interface
+    <span class="keyword">def</span> <a title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq" id="472415">setEvent</a><span class="delimiter">(</span><a title="scala.xml.pull.XMLEvent*" id="472445">es</a>: <span title="scala.xml.pull.XMLEvent*">XMLEvent</span>*<span class="delimiter">)</span>: <a href="../NodeSeq.scala.html#22150" title="scala.xml.NodeSeq">NodeSeq</a> = <span class="delimiter">{</span>
+      <a href="#472445" title="scala.xml.pull.XMLEvent*">es</a> <a href="../../collection/IterableLike.scala.html#26025" title="(f: scala.xml.pull.XMLEvent =&gt; Unit)Unit">foreach</a> <a href="#472384" title="(x: scala.xml.pull.XMLEvent)Unit">produce</a>
+      <a href="../NodeSeq.scala.html#22151" title="object scala.xml.NodeSeq">NodeSeq</a>.<a href="../NodeSeq.scala.html#402264" title="=&gt; scala.xml.NodeSeq">Empty</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="(pos: Int, pre: String, label: String, attrs: scala.xml.MetaData, scope: scala.xml.NamespaceBinding)Unit" id="472416">elemStart</a><span class="delimiter">(</span><a title="Int" id="472465">pos</a>: <a href="../../Int.scala.html#495" title="Int">Int</a>, <a title="String" id="472466">pre</a>: <span title="String">String</span>, <a title="String" id="472467">label</a>: <span title="String">String</span>, <a title="scala.xml.MetaData" id="472468">attrs</a>: <a href="../MetaData.scala.html#22132" title="scala.xml.MetaData">MetaData</a>, <a title="scala.xml.NamespaceBinding" id="472469">scope</a>: <a href="../NamespaceBinding.scala.html#22297" title="scala.xml.NamespaceBinding">NamespaceBinding</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#472413" title="(x$1: Int)Unit">level</a> <a href="../../Int.scala.html#24693" title="(x: Int)Int">+=</a> <span title="Int(1)" class="int">1</span>
+      <a href="#472415" title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq">setEvent</a><span title="Unit" class="delimiter">(</span><a href="XMLEvent.scala.html#472153" title="(pre: String, label: String, attrs: scala.xml.MetaData, scope: scala.xml.NamespaceBinding)scala.xml.pull.EvElemStart">EvElemStart</a><span class="delimiter">(</span><a href="#472466" title="String">pre</a>, <a href="#472467" title="String">label</a>, <a href="#472468" title="scala.xml.MetaData">attrs</a>, <a href="#472469" title="scala.xml.NamespaceBinding">scope</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="(pos: Int, pre: String, label: String)Unit" id="472417">elemEnd</a><span class="delimiter">(</span><a title="Int" id="472482">pos</a>: <a href="../../Int.scala.html#495" title="Int">Int</a>, <a title="String" id="472483">pre</a>: <span title="String">String</span>, <a title="String" id="472484">label</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#472415" title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq">setEvent</a><span class="delimiter">(</span><a href="XMLEvent.scala.html#472255" title="(pre: String, label: String)scala.xml.pull.EvElemEnd">EvElemEnd</a><span class="delimiter">(</span><a href="#472483" title="String">pre</a>, <a href="#472484" title="String">label</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#472413" title="(x$1: Int)Unit">level</a> <a href="../../Int.scala.html#24700" title="(x: Int)Int">-=</a> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+
+    // this is a dummy to satisfy MarkupHandler's API
+    // memory usage optimization return one &lt;ignore/&gt; for top level to satisfy
+    // MarkupParser.document() otherwise NodeSeq.Empty
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Boolean" id="472419">ignoreWritten</a> = <span title="Boolean(false)" class="keyword">false</span>
+    <span class="keyword">final</span> <span class="keyword">def</span> <a title="(pos: Int, pre: String, label: String, attrs: scala.xml.MetaData, pscope: scala.xml.NamespaceBinding, nodes: scala.xml.NodeSeq)scala.xml.NodeSeq" id="472421">elem</a><span class="delimiter">(</span><a title="Int" id="472494">pos</a>: <a href="../../Int.scala.html#495" title="Int">Int</a>, <a title="String" id="472495">pre</a>: <span title="String">String</span>, <a title="String" id="472496">label</a>: <span title="String">String</span>, <a title="scala.xml.MetaData" id="472497">attrs</a>: <a href="../MetaData.scala.html#22132" title="scala.xml.MetaData">MetaData</a>, <a title="scala.xml.NamespaceBinding" id="472498">pscope</a>: <a href="../NamespaceBinding.scala.html#22297" title="scala.xml.NamespaceBinding">NamespaceBinding</a>, <a title="scala.xml.NodeSeq" id="472499">nodes</a>: <a href="../NodeSeq.scala.html#22150" title="scala.xml.NodeSeq">NodeSeq</a><span class="delimiter">)</span>: <a href="../NodeSeq.scala.html#22150" title="scala.xml.NodeSeq">NodeSeq</a> =
+      <span title="scala.xml.NodeSeq" class="keyword">if</span> <span class="delimiter">(</span><a href="#472413" title="=&gt; Int">level</a> <a href="../../Int.scala.html#24636" title="(x: Int)Boolean">==</a> <span title="Int(1)" class="int">1</span> <a href="../../Boolean.scala.html#25461" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Boolean.scala.html#25457" title="=&gt; Boolean">!</a><a href="#472419" title="=&gt; Boolean">ignoreWritten</a><span class="delimiter">)</span> <span class="delimiter">{</span><a href="#472419" title="(x$1: Boolean)Unit">ignoreWritten</a> = <span title="Boolean(true)" class="keyword">true</span>; &lt;<a href="../Elem.scala.html#22192" title="scala.xml.Elem">ignore</a>/&gt; <span class="delimiter">}</span> <span class="keyword">else</span> <a href="../NodeSeq.scala.html#22151" title="object scala.xml.NodeSeq">NodeSeq</a>.<a href="../NodeSeq.scala.html#402264" title="=&gt; scala.xml.NodeSeq">Empty</a>
+
+    <span class="keyword">def</span> <a title="(pos: Int, target: String, txt: String)scala.xml.NodeSeq" id="472422">procInstr</a><span class="delimiter">(</span><a title="Int" id="472506">pos</a>: <a href="../../Int.scala.html#495" title="Int">Int</a>, <a title="String" id="472507">target</a>: <span title="String">String</span>, <a title="String" id="472508">txt</a>: <span title="String">String</span><span class="delimiter">)</span>  = <a href="#472415" title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq">setEvent</a><span class="delimiter">(</span><a href="XMLEvent.scala.html#472319" title="(target: String, text: String)scala.xml.pull.EvProcInstr">EvProcInstr</a><span class="delimiter">(</span><a href="#472507" title="String">target</a>, <a href="#472508" title="String">txt</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(pos: Int, txt: String)scala.xml.NodeSeq" id="472423">comment</a><span class="delimiter">(</span><a title="Int" id="472513">pos</a>: <a href="../../Int.scala.html#495" title="Int">Int</a>, <a title="String" id="472514">txt</a>: <span title="String">String</span><span class="delimiter">)</span>                    = <a href="#472415" title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq">setEvent</a><span class="delimiter">(</span><a href="XMLEvent.scala.html#472227" title="(text: String)scala.xml.pull.EvComment">EvComment</a><span class="delimiter">(</span><a href="#472514" title="String">txt</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(pos: Int, n: String)scala.xml.NodeSeq" id="472424">entityRef</a><span class="delimiter">(</span><a title="Int" id="472518">pos</a>: <a href="../../Int.scala.html#495" title="Int">Int</a>, <a title="String" id="472519">n</a>: <span title="String">String</span><span class="delimiter">)</span>                    = <a href="#472415" title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq">setEvent</a><span class="delimiter">(</span><a href="XMLEvent.scala.html#472199" title="(entity: String)scala.xml.pull.EvEntityRef">EvEntityRef</a><span class="delimiter">(</span><a href="#472519" title="String">n</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(pos: Int, txt: String)scala.xml.NodeSeq" id="472425">text</a><span class="delimiter">(</span><a title="Int" id="472523">pos</a>: <a href="../../Int.scala.html#495" title="Int">Int</a>, <a title="String" id="472524">txt</a>:<span title="String">String</span><span class="delimiter">)</span>                        = <a href="#472415" title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq">setEvent</a><span class="delimiter">(</span><a href="XMLEvent.scala.html#472291" title="(text: String)scala.xml.pull.EvText">EvText</a><span class="delimiter">(</span><a href="#472524" title="String">txt</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="472426">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../parsing/MarkupParser.scala.html#465799" title="(x$1: scala.io.Source)Unit">curInput</a> = <a href="#472427" title="=&gt; scala.io.Source">input</a>
+      <a href="#472375" title="(body: =&gt; scala.xml.Document)Option[scala.xml.Document]">interruptibly</a> <span class="delimiter">{</span> <a href="#472370" title="Parser.this.type" class="keyword">this</a>.<a href="../parsing/MarkupParser.scala.html#465842" title="=&gt; Parser.this.type">initialize</a>.<a href="../parsing/MarkupParser.scala.html#465840" title="()scala.xml.Document">document</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+      <a href="#472415" title="(es: scala.xml.pull.XMLEvent*)scala.xml.NodeSeq">setEvent</a><span title="Unit" class="delimiter">(</span><a href="#472405" title="object XMLEventReader.this.POISON">POISON</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+// An iterator designed for one or more producers to generate
+// elements, and a single consumer to iterate.  Iteration will continue
+// until closeIterator() is called, after which point producers
+// calling produce() will receive interruptions.
+//
+// Since hasNext may block indefinitely if nobody is producing,
+// there is also an available() method which will return true if
+// the next call hasNext is guaranteed not to block.
+//
+// This is not thread-safe for multiple consumers!
+<span class="keyword">trait</span> <a title="trait ProducerConsumerIterator[T &gt;: Null] extends Object with Iterator[T] with ScalaObject" id="23402">ProducerConsumerIterator</a><span class="delimiter">[</span><a title="&gt;: Null &lt;: Any" id="23414">T</a> &gt;: Null<span class="delimiter">]</span> <a href="../../ScalaObject.scala.html#1452" title="ScalaObject" class="keyword">extends</a> <a href="../../collection/Iterator.scala.html#4712" title="Iterator[T]">Iterator</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+  // abstract - iterator-specific distinguished object for marking eos
+  <span class="keyword">val</span> <a title="=&gt; T" id="472372">EndOfStream</a>: <a href="#23414" title="T">T</a>
+
+  // defaults to unbounded - override to positive Int if desired
+  <span class="keyword">val</span> <a title="Int" id="472373">MaxQueueSize</a> = -<span title="Int(-1)" class="int">1</span>
+
+  <span class="keyword">def</span> <a title="[T](body: =&gt; T)Option[T]" id="472375">interruptibly</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="472377">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="472529">body</a>: =&gt; T<span class="delimiter">)</span>: <a href="../../Option.scala.html#1467" title="Option[T]">Option</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="keyword">try</span> <a href="../../Option.scala.html#30686" title="(x: T)Some[T]">Some</a><span class="delimiter">(</span><a href="#472529" title="=&gt; T">body</a><span class="delimiter">)</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> <span title="None.type">_</span>: <span title="InterruptedException">InterruptedException</span>    =&gt; <span title="object Thread">Thread</span>.<span title="()Thread">currentThread</span>.<span title="()Unit">interrupt</span><span class="delimiter">(</span><span class="delimiter">)</span>; <a href="../../Option.scala.html#2425" title="object None">None</a>
+    <span class="keyword">case</span> <span title="None.type">_</span>: <span title="java.nio.channels.ClosedChannelException">ClosedChannelException</span>  =&gt; <a href="../../Option.scala.html#2425" title="object None">None</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="java.util.concurrent.LinkedBlockingQueue[T]" id="472379">queue</a> =
+    <span title="java.util.concurrent.LinkedBlockingQueue[T]" class="keyword">if</span> <span class="delimiter">(</span><a href="#472373" title="=&gt; Int">MaxQueueSize</a> <a href="../../Int.scala.html#24650" title="(x: Int)Boolean">&lt;</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span title="java.util.concurrent.LinkedBlockingQueue[T]" class="keyword">new</span> <span title="java.util.concurrent.LinkedBlockingQueue[T]">LinkedBlockingQueue</span><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="keyword">else</span> <span title="(x$1: Int)java.util.concurrent.LinkedBlockingQueue[T]" class="keyword">new</span> <span title="java.util.concurrent.LinkedBlockingQueue[T]">LinkedBlockingQueue</span><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">(</span><a href="#472373" title="=&gt; Int">MaxQueueSize</a><span class="delimiter">)</span>
+  <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">var</span> <a title="T" id="472380">buffer</a>: <a href="#23414" title="T">T</a> = _
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Boolean" id="472381">fillBuffer</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#472380" title="T">buffer</a> = <a href="#472375" title="(body: =&gt; T)Option[T]">interruptibly</a><span class="delimiter">(</span><a href="#472378" title="=&gt; java.util.concurrent.LinkedBlockingQueue[T]">queue</a>.<span title="()T">take</span><span class="delimiter">)</span> <a href="../../Option.scala.html#30303" title="(default: =&gt; T)T">getOrElse</a> <a href="#472372" title="=&gt; T">EndOfStream</a>
+    <a href="#472382" title="(x: T)Boolean">isElement</a><span class="delimiter">(</span><a href="#472380" title="T">buffer</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(x: T)Boolean" id="472382">isElement</a><span class="delimiter">(</span><a title="T" id="472648">x</a>: <a href="#23414" title="T">T</a><span class="delimiter">)</span> = <a href="#472648" title="T">x</a> <span title="(x$1: Any)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#25461" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#472648" title="T">x</a> <span title="(x$1: Any)Boolean">!=</span> <a href="#472372" title="=&gt; T">EndOfStream</a>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Boolean" id="472383">eos</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#472380" title="T">buffer</a> <span title="(x$1: Any)Boolean">==</span> <a href="#472372" title="=&gt; T">EndOfStream</a>
+
+  // public producer interface - this is the only method producers call, so
+  // LinkedBlockingQueue's synchronization is all we need.
+  <span class="keyword">def</span> <a title="(x: T)Unit" id="472384">produce</a><span class="delimiter">(</span><a title="T" id="472438">x</a>: <a href="#23414" title="T">T</a><span class="delimiter">)</span>: <a href="../../Unit.scala.html#2325" title="Unit">Unit</a> = <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#25457" title="=&gt; Boolean">!</a><a href="#472383" title="()Boolean">eos</a><span class="delimiter">)</span> <a href="#472375" title="(body: =&gt; Unit)Option[Unit]">interruptibly</a><span title="Unit" class="delimiter">(</span><a href="#472378" title="=&gt; java.util.concurrent.LinkedBlockingQueue[T]">queue</a> <span title="(x$1: T)Unit">put</span> <a href="#472438" title="T">x</a><span class="delimiter">)</span>
+
+  // consumer/iterator interface - we need not synchronize access to buffer
+  // because we required there to be only one consumer.
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="472385">hasNext</a> = <a href="../../Boolean.scala.html#25457" title="=&gt; Boolean">!</a><a href="#472383" title="()Boolean">eos</a> <a href="../../Boolean.scala.html#25461" title="(x: Boolean)Boolean">&amp;&amp;</a> <span class="delimiter">(</span><a href="#472380" title="T">buffer</a> <span title="(x$1: Any)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#25460" title="(x: Boolean)Boolean">||</a> <a href="#472381" title="()Boolean">fillBuffer</a><span class="delimiter">)</span>
+
+  <span class="keyword">def</span> <a title="()T" id="472386">next</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#472383" title="()Boolean">eos</a><span class="delimiter">)</span> <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)java.util.NoSuchElementException" class="keyword">new</span> <a href="../../package.scala.html#23607" title="java.util.NoSuchElementException">NoSuchElementException</a><span class="delimiter">(</span><span title="String(&quot;ProducerConsumerIterator&quot;)" class="string">&quot;ProducerConsumerIterator&quot;</span><span class="delimiter">)</span>
+    <span title="AnyVal" class="keyword">if</span> <span class="delimiter">(</span><a href="#472380" title="T">buffer</a> <span title="(x$1: Any)Boolean">==</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <a href="#472381" title="()Boolean">fillBuffer</a>
+
+    <a href="#472388" title="()T">drainBuffer</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="()Boolean" id="472387">available</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#472382" title="(x: T)Boolean">isElement</a><span class="delimiter">(</span><a href="#472380" title="T">buffer</a><span class="delimiter">)</span> <a href="../../Boolean.scala.html#25460" title="(x: Boolean)Boolean">||</a> <a href="#472382" title="(x: T)Boolean">isElement</a><span class="delimiter">(</span><a href="#472378" title="=&gt; java.util.concurrent.LinkedBlockingQueue[T]">queue</a>.<span title="()T">peek</span><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()T" id="472388">drainBuffer</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="../../Predef.scala.html#7755" title="(assertion: Boolean)Unit">assert</a><span class="delimiter">(</span><a href="../../Boolean.scala.html#25457" title="=&gt; Boolean">!</a><a href="#472383" title="()Boolean">eos</a><span class="delimiter">)</span>
+    <span class="keyword">val</span> <a title="T" id="472673">res</a> = <a href="#472380" title="T">buffer</a>
+    <a href="#472380" title="T">buffer</a> = <span title="Null(null)" class="keyword">null</span>
+    <a href="#472673" title="T">res</a>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
