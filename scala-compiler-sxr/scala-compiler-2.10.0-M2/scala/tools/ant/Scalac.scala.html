@@ -1,0 +1,734 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/tools/ant/Scalac.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala Ant Tasks                      **
+**    / __/ __// _ | / /  / _ |    (c) 2005-2011, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.tools.ant
+
+<span class="keyword">import</span> java.io.<span class="delimiter">{</span>File, PrintWriter, BufferedWriter, FileWriter<span class="delimiter">}</span>
+
+<span class="keyword">import</span> org.apache.tools.ant.<span class="delimiter">{</span> BuildException, Project, AntClassLoader <span class="delimiter">}</span>
+<span class="keyword">import</span> org.apache.tools.ant.taskdefs.Java
+<span class="keyword">import</span> org.apache.tools.ant.types.<span class="delimiter">{</span>Path, Reference<span class="delimiter">}</span>
+<span class="keyword">import</span> org.apache.tools.ant.util.<span class="delimiter">{</span>FileUtils, GlobPatternMapper,
+                                  SourceFileScanner, facade<span class="delimiter">}</span>
+<span class="keyword">import</span> org.apache.tools.ant.util.facade.<span class="delimiter">{</span>FacadeTaskHelper,
+                                  ImplementationSpecificArgument<span class="delimiter">}</span>
+
+<span class="keyword">import</span> scala.tools.nsc.<span class="delimiter">{</span>Global, Settings, CompilerCommand<span class="delimiter">}</span>
+<span class="keyword">import</span> scala.tools.nsc.io.<span class="delimiter">{</span>Path =&gt; SPath<span class="delimiter">}</span>
+<span class="keyword">import</span> scala.tools.nsc.reporters.<span class="delimiter">{</span>Reporter, ConsoleReporter<span class="delimiter">}</span>
+
+/** An Ant task to compile with the new Scala compiler (NSC).
+ *
+ *  This task can take the following parameters as attributes:
+ *  - `srcdir` (mandatory),
+ *  - `srcref`,
+ *  - `destdir`,
+ *  - `classpath`,
+ *  - `classpathref`,
+ *  - `sourcepath`,
+ *  - `sourcepathref`,
+ *  - `bootclasspath`,
+ *  - `bootclasspathref`,
+ *  - `extdirs`,
+ *  - `extdirsref`,
+ *  - `argfile`,
+ *  - `dependencyfile`,
+ *  - `encoding`,
+ *  - `target`,
+ *  - `force`,
+ *  - `fork`,
+ *  - `logging`,
+ *  - `logphase`,
+ *  - `debuginfo`,
+ *  - `addparams`,
+ *  - `explaintypes`,
+ *  - `deprecation`,
+ *  - `nobootcp`,
+ *  - `nowarn`,
+ *  - `optimise`,
+ *  - `unchecked`,
+ *  - `usejavacp`,
+ *  - `failonerror`,
+ *  - `scalacdebugging`,
+ *  - `assemname`,
+ *  - `assemrefs`.
+ *
+ *  It also takes the following parameters as nested elements:
+ *  - `src` (for `srcdir`),
+ *  - `classpath`,
+ *  - `sourcepath`,
+ *  - `bootclasspath`,
+ *  - `extdirs`,
+ *  - `compilerarg`.
+ *
+ *  @author Gilles Dubochet, Stephane Micheloud
+ */
+<span class="keyword">class</span> <a title="class Scalac extends scala.tools.ant.ScalaMatchingTask with scala.tools.ant.ScalacShared with ScalaObject" id="11504">Scalac</a> <a href="#11504" title="ScalaObject" class="keyword">extends</a> <a href="ScalaMatchingTask.scala.html#11651" title="scala.tools.ant.ScalaMatchingTask">ScalaMatchingTask</a> <span class="keyword">with</span> <a href="ScalacShared.scala.html#11462" title="scala.tools.ant.ScalacShared">ScalacShared</a> <span class="delimiter">{</span>
+
+  /** The unique Ant file utilities instance to use in this task. */
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="org.apache.tools.ant.util.FileUtils" id="196592">fileUtils</a> = <span title="object org.apache.tools.ant.util.FileUtils">FileUtils</span>.<span title="()org.apache.tools.ant.util.FileUtils">getFileUtils</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+/*============================================================================*\
+**                             Ant user-properties                            **
+\*============================================================================*/
+
+  <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class PermissibleValue extends Object with ScalaObject" id="196594">PermissibleValue</a> <a href="#196594" title="ScalaObject" class="delimiter">{</a>
+    <span class="keyword">val</span> <a title="=&gt; List[String]" id="208193">values</a>: <span title="List[String]">List</span><span class="delimiter">[</span>String<span class="delimiter">]</span>
+    <span class="keyword">def</span> <a title="(value: String)Boolean" id="208194">isPermissible</a><span class="delimiter">(</span><a title="String" id="208196">value</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> =
+      <span class="delimiter">(</span><a href="#208196" title="String">value</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span> <span title="(x: Boolean)Boolean">||</span> <a href="#208193" title="=&gt; List[String]">values</a>.<span title="(p: String =&gt; Boolean)Boolean">exists</span><span class="delimiter">(</span><a href="#208208" title="String">_</a>.<span title="(x$1: String)Boolean">startsWith</span><span class="delimiter">(</span><a href="#208196" title="String">value</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Defines valid values for the logging property. */
+  <span class="keyword">object</span> <a title="object Scalac.this.LoggingLevel" id="196595">LoggingLevel</a> <span title="ScalaObject" class="keyword">extends</span> <a href="#196594" title="Scalac.this.PermissibleValue">PermissibleValue</a> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="List[String]" id="208212">values</a> = <span title="(xs: String*)List[String]">List</span><span class="delimiter">(</span><span title="String(&quot;none&quot;)" class="string">&quot;none&quot;</span>, <span title="String(&quot;verbose&quot;)" class="string">&quot;verbose&quot;</span>, <span title="String(&quot;debug&quot;)" class="string">&quot;debug&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Defines valid values for properties that refer to compiler phases. */
+  <span class="keyword">object</span> <a title="object Scalac.this.CompilerPhase" id="196597">CompilerPhase</a> <span title="ScalaObject" class="keyword">extends</span> <a href="#196594" title="Scalac.this.PermissibleValue">PermissibleValue</a> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="List[String]" id="208223">values</a> = <span title="(xs: String*)List[String]">List</span><span class="delimiter">(</span><span title="String(&quot;namer&quot;)" class="string">&quot;namer&quot;</span>, <span title="String(&quot;typer&quot;)" class="string">&quot;typer&quot;</span>, <span title="String(&quot;pickler&quot;)" class="string">&quot;pickler&quot;</span>, <span title="String(&quot;refchecks&quot;)" class="string">&quot;refchecks&quot;</span>,
+                      <span title="String(&quot;uncurry&quot;)" class="string">&quot;uncurry&quot;</span>, <span title="String(&quot;tailcalls&quot;)" class="string">&quot;tailcalls&quot;</span>, <span title="String(&quot;specialize&quot;)" class="string">&quot;specialize&quot;</span>, <span title="String(&quot;explicitouter&quot;)" class="string">&quot;explicitouter&quot;</span>,
+                      <span title="String(&quot;erasure&quot;)" class="string">&quot;erasure&quot;</span>, <span title="String(&quot;lazyvals&quot;)" class="string">&quot;lazyvals&quot;</span>, <span title="String(&quot;lambdalift&quot;)" class="string">&quot;lambdalift&quot;</span>, <span title="String(&quot;constructors&quot;)" class="string">&quot;constructors&quot;</span>,
+                      <span title="String(&quot;flatten&quot;)" class="string">&quot;flatten&quot;</span>, <span title="String(&quot;mixin&quot;)" class="string">&quot;mixin&quot;</span>, <span title="String(&quot;cleanup&quot;)" class="string">&quot;cleanup&quot;</span>, <span title="String(&quot;icode&quot;)" class="string">&quot;icode&quot;</span>, <span title="String(&quot;inliner&quot;)" class="string">&quot;inliner&quot;</span>,
+                      <span title="String(&quot;closelim&quot;)" class="string">&quot;closelim&quot;</span>, <span title="String(&quot;dce&quot;)" class="string">&quot;dce&quot;</span>, <span title="String(&quot;jvm&quot;)" class="string">&quot;jvm&quot;</span>, <span title="String(&quot;terminal&quot;)" class="string">&quot;terminal&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Defines valid values for the `target` property. */
+  <span class="keyword">object</span> <a title="object Scalac.this.Target" id="196599">Target</a> <span title="ScalaObject" class="keyword">extends</span> <a href="#196594" title="Scalac.this.PermissibleValue">PermissibleValue</a> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="List[String]" id="208234">values</a> = <span title="(xs: String*)List[String]">List</span><span class="delimiter">(</span><span title="String(&quot;jvm-1.5&quot;)" class="string">&quot;jvm-1.5&quot;</span>, <span title="String(&quot;msil&quot;)" class="string">&quot;msil&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Defines valid values for the `deprecation` and `unchecked` properties. */
+  <span class="keyword">object</span> <a title="object Scalac.this.Flag" id="196601">Flag</a> <span title="ScalaObject" class="keyword">extends</span> <a href="#196594" title="Scalac.this.PermissibleValue">PermissibleValue</a> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="List[String]" id="208245">values</a> = <span title="(xs: String*)List[String]">List</span><span class="delimiter">(</span><span title="String(&quot;yes&quot;)" class="string">&quot;yes&quot;</span>, <span title="String(&quot;no&quot;)" class="string">&quot;no&quot;</span>, <span title="String(&quot;on&quot;)" class="string">&quot;on&quot;</span>, <span title="String(&quot;off&quot;)" class="string">&quot;off&quot;</span>, <span title="String(&quot;true&quot;)" class="string">&quot;true&quot;</span>, <span title="String(&quot;false&quot;)" class="string">&quot;false&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(flag: String)Option[Boolean]" id="208247">toBoolean</a><span class="delimiter">(</span><a title="String" id="208256">flag</a>: <span title="String">String</span><span class="delimiter">)</span> =
+      <span title="Option[Boolean]" class="keyword">if</span> <span class="delimiter">(</span><a href="#208256" title="String">flag</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;yes&quot;)" class="string">&quot;yes&quot;</span> <span title="(x: Boolean)Boolean">||</span> <a href="#208256" title="String">flag</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;on&quot;)" class="string">&quot;on&quot;</span> <span title="(x: Boolean)Boolean">||</span> <a href="#208256" title="String">flag</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;true&quot;)" class="string">&quot;true&quot;</span><span class="delimiter">)</span> <span title="(x: Boolean)Some[Boolean]">Some</span><span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Option[Boolean]" class="keyword">if</span> <span class="delimiter">(</span><a href="#208256" title="String">flag</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;no&quot;)" class="string">&quot;no&quot;</span> <span title="(x: Boolean)Boolean">||</span> <a href="#208256" title="String">flag</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;off&quot;)" class="string">&quot;off&quot;</span> <span title="(x: Boolean)Boolean">||</span> <a href="#208256" title="String">flag</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;false&quot;)" class="string">&quot;false&quot;</span><span class="delimiter">)</span> <span title="(x: Boolean)Some[Boolean]">Some</span><span class="delimiter">(</span><span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="object None">None</span>
+  <span class="delimiter">}</span>
+
+  /** The directories that contain source files to compile. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[org.apache.tools.ant.types.Path]" id="196604">origin</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** The directory to put the compiled files in. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[java.io.File]" id="196607">destination</a>: <span title="Option[java.io.File]">Option</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <span title="object None">None</span>
+
+  /** The class path to use for this compilation. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[org.apache.tools.ant.types.Path]" id="196610">classpath</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** The source path to use for this compilation. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[org.apache.tools.ant.types.Path]" id="196613">sourcepath</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** The boot class path to use for this compilation. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[org.apache.tools.ant.types.Path]" id="196616">bootclasspath</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** The path to use when finding scalac - *only used for forking!*  */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[org.apache.tools.ant.types.Path]" id="196619">compilerPath</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** The external extensions path to use for this compilation. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[org.apache.tools.ant.types.Path]" id="196622">extdirs</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span> = <span title="object None">None</span>
+
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[java.io.File]" id="196625">argfile</a>: <span title="Option[java.io.File]">Option</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** The dependency tracking file. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[java.io.File]" id="196628">dependencyfile</a>: <span title="Option[java.io.File]">Option</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** The character encoding of the files to compile. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[String]" id="196631">encoding</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object None">None</span>
+
+  // the targetted backend
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[String]" id="196634">backend</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object None">None</span>
+
+  /** Whether to force compilation of all files or not. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Boolean" id="196637">force</a>: <span title="Boolean">Boolean</span> = <span title="Boolean(false)" class="keyword">false</span>
+  /** Whether to fork the execution of scalac */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Boolean" id="196640">fork</a> : <span title="Boolean">Boolean</span> = <span title="Boolean(false)" class="keyword">false</span>
+  /** If forking, these are the arguments to the JVM */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[String]" id="196643">jvmArgs</a> : <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** How much logging output to print. Either none (default),
+    * verbose or debug. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[String]" id="196646">logging</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Which compilation phases should be logged during compilation. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="List[String]" id="196649">logPhase</a>: <span title="List[String]">List</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object Nil">Nil</span>
+
+  /** Instruct the compiler to generate debugging information */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[String]" id="196652">debugInfo</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Instruct the compiler to use additional parameters */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="String" id="196655">addParams</a>: <span title="String">String</span> = <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+  /** Instruct the compiler to explain type errors in more detail. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[Boolean]" id="196658">explaintypes</a>: <span title="Option[Boolean]">Option</span><span class="delimiter">[</span>Boolean<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Instruct the compiler to generate deprecation information. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[Boolean]" id="196661">deprecation</a>: <span title="Option[Boolean]">Option</span><span class="delimiter">[</span>Boolean<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Instruct the compiler to not use the boot classpath for the scala jars. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[Boolean]" id="196664">nobootcp</a>: <span title="Option[Boolean]">Option</span><span class="delimiter">[</span>Boolean<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Instruct the compiler to generate no warnings. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[Boolean]" id="196667">nowarn</a>: <span title="Option[Boolean]">Option</span><span class="delimiter">[</span>Boolean<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Instruct the compiler to run optimizations. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[Boolean]" id="196670">optimise</a>: <span title="Option[Boolean]">Option</span><span class="delimiter">[</span>Boolean<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Instruct the compiler to generate unchecked information. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[Boolean]" id="196673">unchecked</a>: <span title="Option[Boolean]">Option</span><span class="delimiter">[</span>Boolean<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Instruct the compiler to use `java.class.path` in classpath resolution. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[Boolean]" id="196676">usejavacp</a>: <span title="Option[Boolean]">Option</span><span class="delimiter">[</span>Boolean<span class="delimiter">]</span> = <span title="object None">None</span>
+  /** Indicates whether compilation errors will fail the build; defaults to true. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Boolean" id="196679">failonerror</a>: <span title="Boolean">Boolean</span> = <span title="Boolean(true)" class="keyword">true</span>
+
+  // Name of the output assembly (only relevant with -target:msil)
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[String]" id="196682">assemname</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object None">None</span>
+  // List of assemblies referenced by the program (only relevant with -target:msil)
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Option[String]" id="196685">assemrefs</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="object None">None</span>
+
+  /** Prints out the files being compiled by the scalac ant task
+   *  (not only the number of files). */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="Boolean" id="196688">scalacDebugging</a>: <span title="Boolean">Boolean</span> = <span title="Boolean(false)" class="keyword">false</span>
+
+  /** Encapsulates implementation of specific command line arguments. */
+  <span class="keyword">protected</span> <span class="keyword">var</span> <a title="org.apache.tools.ant.util.facade.FacadeTaskHelper" id="196691">scalacCompilerArgs</a> = <span title="org.apache.tools.ant.util.facade.FacadeTaskHelper" class="keyword">new</span> <span title="org.apache.tools.ant.util.facade.FacadeTaskHelper">FacadeTaskHelper</span><span class="delimiter">(</span><span title="String(&quot;compilerarg&quot;)" class="string">&quot;compilerarg&quot;</span><span class="delimiter">)</span>
+
+  /** Helpers */
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(old: Option[org.apache.tools.ant.types.Path], arg: org.apache.tools.ant.types.Path)Option[org.apache.tools.ant.types.Path]" id="196693">setOrAppend</a><span class="delimiter">(</span><a title="Option[org.apache.tools.ant.types.Path]" id="208300">old</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span>, <a title="org.apache.tools.ant.types.Path" id="208301">arg</a>: <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">)</span>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span> = <a href="#208300" title="Option[org.apache.tools.ant.types.Path]">old</a> <span title="Option[org.apache.tools.ant.types.Path]" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> <span title="Some[org.apache.tools.ant.types.Path]">Some</span><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208304">x</a><span class="delimiter">)</span>  =&gt; <a href="#208304" title="org.apache.tools.ant.types.Path">x</a> <span title="(x$1: org.apache.tools.ant.types.Path)Unit">append</span> <a href="#208301" title="org.apache.tools.ant.types.Path">arg</a> ; <span title="(x: org.apache.tools.ant.types.Path)Some[org.apache.tools.ant.types.Path]">Some</span><span class="delimiter">(</span><a href="#208304" title="org.apache.tools.ant.types.Path">x</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <span title="Some[org.apache.tools.ant.types.Path]">None</span>     =&gt; <span title="(x: org.apache.tools.ant.types.Path)Some[org.apache.tools.ant.types.Path]">Some</span><span class="delimiter">(</span><a href="#208301" title="org.apache.tools.ant.types.Path">arg</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(p: Option[org.apache.tools.ant.types.Path], name: String)List[java.io.File]" id="196694">pathAsList</a><span class="delimiter">(</span><a title="Option[org.apache.tools.ant.types.Path]" id="208311">p</a>: <span title="Option[org.apache.tools.ant.types.Path]">Option</span><span class="delimiter">[</span>Path<span class="delimiter">]</span>, <a title="String" id="208312">name</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <a href="#208311" title="Option[org.apache.tools.ant.types.Path]">p</a> <span title="List[java.io.File]" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> <span title="Nothing">None</span>     =&gt; <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Member \'&quot;)" class="string">&quot;Member '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208312" title="String">name</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\' is empty.&quot;)" class="string">&quot;' is empty.&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">case</span> <span title="List[java.io.File]">Some</span><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208315">x</a><span class="delimiter">)</span>  =&gt; <a href="#208315" title="org.apache.tools.ant.types.Path">x</a>.<span title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">list</span>.<span title="=&gt; List[String]">toList</span> <span title="(f: String =&gt; java.io.File)(implicit bf: scala.collection.generic.CanBuildFrom[List[String],java.io.File,List[java.io.File]])List[java.io.File]">map</span> <a href="#196747" title="(name: String)java.io.File">nameToFile</a>
+  <span class="delimiter">}</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(getter: () =&gt; Option[org.apache.tools.ant.types.Path], setter: Option[org.apache.tools.ant.types.Path] =&gt; Unit)org.apache.tools.ant.types.Path" id="196695">createNewPath</a><span class="delimiter">(</span><a title="() =&gt; Option[org.apache.tools.ant.types.Path]" id="208480">getter</a>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Option<span class="delimiter">[</span>Path<span class="delimiter">]</span>, <a title="Option[org.apache.tools.ant.types.Path] =&gt; Unit" id="208481">setter</a>: <span class="delimiter">(</span>Option<span class="delimiter">[</span>Path<span class="delimiter">]</span><span class="delimiter">)</span> =&gt; Unit<span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#208480" title="()Option[org.apache.tools.ant.types.Path]">getter</a><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span>
+      <a href="#208481" title="(v1: Option[org.apache.tools.ant.types.Path])Unit">setter</a><span class="delimiter">(</span><span title="(x: org.apache.tools.ant.types.Path)Some[org.apache.tools.ant.types.Path]">Some</span><span class="delimiter">(</span><span title="(x$1: org.apache.tools.ant.Project)org.apache.tools.ant.types.Path" class="keyword">new</span> <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">(</span><a href="#11504" title="()org.apache.tools.ant.Project">getProject</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <a href="#208480" title="()Option[org.apache.tools.ant.types.Path]">getter</a><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="=&gt; org.apache.tools.ant.types.Path">get</span>.<span title="()org.apache.tools.ant.types.Path">createPath</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(xs: List[Any])String" id="196696">plural</a><span class="delimiter">(</span><a title="List[Any]" id="208490">xs</a>: <span title="List[Any]">List</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span> = <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#208490" title="List[Any]">xs</a>.<span title="=&gt; Int">size</span> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span> <span title="String(&quot;s&quot;)" class="string">&quot;s&quot;</span> <span class="keyword">else</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(x: Int)String" id="196697">plural</a><span class="delimiter">(</span><a title="Int" id="208498">x</a>: <span title="Int">Int</span><span class="delimiter">)</span> = <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#208498" title="Int">x</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span> <span title="String(&quot;s&quot;)" class="string">&quot;s&quot;</span> <span class="keyword">else</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+
+/*============================================================================*\
+**                             Properties setters                             **
+\*============================================================================*/
+
+
+  /** Sets the `srcdir` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `origin`. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Path)Unit" id="196698">setSrcdir</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208506">input</a>: <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196604" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">origin</a> = <a href="#196693" title="(old: Option[org.apache.tools.ant.types.Path], arg: org.apache.tools.ant.types.Path)Option[org.apache.tools.ant.types.Path]">setOrAppend</a><span class="delimiter">(</span><a href="#196604" title="=&gt; Option[org.apache.tools.ant.types.Path]">origin</a>, <a href="#208506" title="org.apache.tools.ant.types.Path">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `origin` as a nested src Ant parameter.
+   *  @return An origin path to be configured. */
+  <span class="keyword">def</span> <a title="()org.apache.tools.ant.types.Path" id="196699">createSrc</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="org.apache.tools.ant.types.Path">Path</span> = <a href="#196695" title="(getter: () =&gt; Option[org.apache.tools.ant.types.Path], setter: Option[org.apache.tools.ant.types.Path] =&gt; Unit)org.apache.tools.ant.types.Path">createNewPath</a><span class="delimiter">(</span><a href="#196604" title="=&gt; Option[org.apache.tools.ant.types.Path]">origin</a> _, <a title="Option[org.apache.tools.ant.types.Path]" id="208511">p</a> =&gt; <a href="#196604" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">origin</a> = <a href="#208511" title="Option[org.apache.tools.ant.types.Path]">p</a><span class="delimiter">)</span>
+
+  /** Sets the `origin` as an external reference Ant parameter.
+   *  @param input A reference to an origin path. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Reference)Unit" id="196700">setSrcref</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Reference" id="208512">input</a>: <span title="org.apache.tools.ant.types.Reference">Reference</span><span class="delimiter">)</span> =
+    <a href="#196699" title="()org.apache.tools.ant.types.Path">createSrc</a><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="(x$1: org.apache.tools.ant.types.Reference)Unit">setRefid</span><span class="delimiter">(</span><a href="#208512" title="org.apache.tools.ant.types.Reference">input</a><span class="delimiter">)</span>
+
+  /** Sets the `destdir` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `destination`. */
+  <span class="keyword">def</span> <a title="(input: java.io.File)Unit" id="196701">setDestdir</a><span class="delimiter">(</span><a title="java.io.File" id="208516">input</a>: <span title="java.io.File">File</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196607" title="(x$1: Option[java.io.File])Unit">destination</a> = <span title="(x: java.io.File)Some[java.io.File]">Some</span><span class="delimiter">(</span><a href="#208516" title="java.io.File">input</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** Sets the `classpath` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `classpath`. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Path)Unit" id="196702">setClasspath</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208521">input</a>: <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196610" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">classpath</a> = <a href="#196693" title="(old: Option[org.apache.tools.ant.types.Path], arg: org.apache.tools.ant.types.Path)Option[org.apache.tools.ant.types.Path]">setOrAppend</a><span class="delimiter">(</span><a href="#196610" title="=&gt; Option[org.apache.tools.ant.types.Path]">classpath</a>, <a href="#208521" title="org.apache.tools.ant.types.Path">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  /** Sets the `compilerPath` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `compilerPath`. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Path)Unit" id="196703">setCompilerPath</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208523">input</a>: <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196619" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">compilerPath</a> = <a href="#196693" title="(old: Option[org.apache.tools.ant.types.Path], arg: org.apache.tools.ant.types.Path)Option[org.apache.tools.ant.types.Path]">setOrAppend</a><span class="delimiter">(</span><a href="#196619" title="=&gt; Option[org.apache.tools.ant.types.Path]">compilerPath</a>, <a href="#208523" title="org.apache.tools.ant.types.Path">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; org.apache.tools.ant.types.Path" id="196704">createCompilerPath</a>: <span title="org.apache.tools.ant.types.Path">Path</span> = <a href="#196695" title="(getter: () =&gt; Option[org.apache.tools.ant.types.Path], setter: Option[org.apache.tools.ant.types.Path] =&gt; Unit)org.apache.tools.ant.types.Path">createNewPath</a><span class="delimiter">(</span><a href="#196619" title="=&gt; Option[org.apache.tools.ant.types.Path]">compilerPath</a> _, <a title="Option[org.apache.tools.ant.types.Path]" id="208529">p</a> =&gt; <a href="#196619" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">compilerPath</a> = <a href="#208529" title="Option[org.apache.tools.ant.types.Path]">p</a><span class="delimiter">)</span>
+
+  /** Sets the `compilerpathref` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `compilerpathref`. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Reference)Unit" id="196705">setCompilerPathRef</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Reference" id="208530">input</a>: <span title="org.apache.tools.ant.types.Reference">Reference</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196704" title="=&gt; org.apache.tools.ant.types.Path">createCompilerPath</a>.<span title="(x$1: org.apache.tools.ant.types.Reference)Unit">setRefid</span><span class="delimiter">(</span><a href="#208530" title="org.apache.tools.ant.types.Reference">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `classpath` as a nested classpath Ant parameter.
+   *  @return A class path to be configured. */
+  <span class="keyword">def</span> <a title="()org.apache.tools.ant.types.Path" id="196706">createClasspath</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="org.apache.tools.ant.types.Path">Path</span> = <a href="#196695" title="(getter: () =&gt; Option[org.apache.tools.ant.types.Path], setter: Option[org.apache.tools.ant.types.Path] =&gt; Unit)org.apache.tools.ant.types.Path">createNewPath</a><span class="delimiter">(</span><a href="#196610" title="=&gt; Option[org.apache.tools.ant.types.Path]">classpath</a> _, <a title="Option[org.apache.tools.ant.types.Path]" id="208536">p</a> =&gt; <a href="#196610" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">classpath</a> = <a href="#208536" title="Option[org.apache.tools.ant.types.Path]">p</a><span class="delimiter">)</span>
+
+  /** Sets the `classpath` as an external reference Ant parameter.
+   *  @param input A reference to a class path. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Reference)Unit" id="196707">setClasspathref</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Reference" id="208537">input</a>: <span title="org.apache.tools.ant.types.Reference">Reference</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196706" title="()org.apache.tools.ant.types.Path">createClasspath</a><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="(x$1: org.apache.tools.ant.types.Reference)Unit">setRefid</span><span class="delimiter">(</span><a href="#208537" title="org.apache.tools.ant.types.Reference">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `sourcepath` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `sourcepath`. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Path)Unit" id="196708">setSourcepath</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208540">input</a>: <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196613" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">sourcepath</a> = <a href="#196693" title="(old: Option[org.apache.tools.ant.types.Path], arg: org.apache.tools.ant.types.Path)Option[org.apache.tools.ant.types.Path]">setOrAppend</a><span class="delimiter">(</span><a href="#196613" title="=&gt; Option[org.apache.tools.ant.types.Path]">sourcepath</a>, <a href="#208540" title="org.apache.tools.ant.types.Path">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `sourcepath` as a nested sourcepath Ant parameter.
+   *  @return A source path to be configured. */
+  <span class="keyword">def</span> <a title="()org.apache.tools.ant.types.Path" id="196709">createSourcepath</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="org.apache.tools.ant.types.Path">Path</span> = <a href="#196695" title="(getter: () =&gt; Option[org.apache.tools.ant.types.Path], setter: Option[org.apache.tools.ant.types.Path] =&gt; Unit)org.apache.tools.ant.types.Path">createNewPath</a><span class="delimiter">(</span><a href="#196613" title="=&gt; Option[org.apache.tools.ant.types.Path]">sourcepath</a> _, <a title="Option[org.apache.tools.ant.types.Path]" id="208545">p</a> =&gt; <a href="#196613" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">sourcepath</a> = <a href="#208545" title="Option[org.apache.tools.ant.types.Path]">p</a><span class="delimiter">)</span>
+
+  /** Sets the `sourcepath` as an external reference Ant parameter.
+   *  @param input A reference to a source path. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Reference)Unit" id="196710">setSourcepathref</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Reference" id="208546">input</a>: <span title="org.apache.tools.ant.types.Reference">Reference</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196709" title="()org.apache.tools.ant.types.Path">createSourcepath</a><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="(x$1: org.apache.tools.ant.types.Reference)Unit">setRefid</span><span class="delimiter">(</span><a href="#208546" title="org.apache.tools.ant.types.Reference">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the boot classpath attribute. Used by [[http://ant.apache.org Ant]].
+   *
+   *  @param input The value of `bootclasspath`. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Path)Unit" id="196711">setBootclasspath</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208549">input</a>: <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196616" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">bootclasspath</a> = <a href="#196693" title="(old: Option[org.apache.tools.ant.types.Path], arg: org.apache.tools.ant.types.Path)Option[org.apache.tools.ant.types.Path]">setOrAppend</a><span class="delimiter">(</span><a href="#196616" title="=&gt; Option[org.apache.tools.ant.types.Path]">bootclasspath</a>, <a href="#208549" title="org.apache.tools.ant.types.Path">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `bootclasspath` as a nested bootclasspath Ant parameter.
+   *  @return A source path to be configured. */
+  <span class="keyword">def</span> <a title="()org.apache.tools.ant.types.Path" id="196712">createBootclasspath</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="org.apache.tools.ant.types.Path">Path</span> = <a href="#196695" title="(getter: () =&gt; Option[org.apache.tools.ant.types.Path], setter: Option[org.apache.tools.ant.types.Path] =&gt; Unit)org.apache.tools.ant.types.Path">createNewPath</a><span class="delimiter">(</span><a href="#196616" title="=&gt; Option[org.apache.tools.ant.types.Path]">bootclasspath</a> _, <a title="Option[org.apache.tools.ant.types.Path]" id="208554">p</a> =&gt; <a href="#196616" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">bootclasspath</a> = <a href="#208554" title="Option[org.apache.tools.ant.types.Path]">p</a><span class="delimiter">)</span>
+
+  /** Sets the `bootclasspath` as an external reference Ant
+   *  parameter.
+   *  @param input A reference to a source path. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Reference)Unit" id="196713">setBootclasspathref</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Reference" id="208555">input</a>: <span title="org.apache.tools.ant.types.Reference">Reference</span><span class="delimiter">)</span> =
+    <a href="#196712" title="()org.apache.tools.ant.types.Path">createBootclasspath</a><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="(x$1: org.apache.tools.ant.types.Reference)Unit">setRefid</span><span class="delimiter">(</span><a href="#208555" title="org.apache.tools.ant.types.Reference">input</a><span class="delimiter">)</span>
+
+  /** Sets the external extensions path attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `extdirs`. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Path)Unit" id="196714">setExtdirs</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Path" id="208559">input</a>: <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196622" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">extdirs</a> = <a href="#196693" title="(old: Option[org.apache.tools.ant.types.Path], arg: org.apache.tools.ant.types.Path)Option[org.apache.tools.ant.types.Path]">setOrAppend</a><span class="delimiter">(</span><a href="#196622" title="=&gt; Option[org.apache.tools.ant.types.Path]">extdirs</a>, <a href="#208559" title="org.apache.tools.ant.types.Path">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `extdirs` as a nested extdirs Ant parameter.
+   *  @return An extensions path to be configured. */
+  <span class="keyword">def</span> <a title="()org.apache.tools.ant.types.Path" id="196715">createExtdirs</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="org.apache.tools.ant.types.Path">Path</span> = <a href="#196695" title="(getter: () =&gt; Option[org.apache.tools.ant.types.Path], setter: Option[org.apache.tools.ant.types.Path] =&gt; Unit)org.apache.tools.ant.types.Path">createNewPath</a><span class="delimiter">(</span><a href="#196622" title="=&gt; Option[org.apache.tools.ant.types.Path]">extdirs</a> _, <a title="Option[org.apache.tools.ant.types.Path]" id="208564">p</a> =&gt; <a href="#196622" title="(x$1: Option[org.apache.tools.ant.types.Path])Unit">extdirs</a> = <a href="#208564" title="Option[org.apache.tools.ant.types.Path]">p</a><span class="delimiter">)</span>
+
+  /** Sets the `extdirs` as an external reference Ant parameter.
+   *  @param input A reference to an extensions path. */
+  <span class="keyword">def</span> <a title="(input: org.apache.tools.ant.types.Reference)Unit" id="196716">setExtdirsref</a><span class="delimiter">(</span><a title="org.apache.tools.ant.types.Reference" id="208565">input</a>: <span title="org.apache.tools.ant.types.Reference">Reference</span><span class="delimiter">)</span> =
+    <a href="#196715" title="()org.apache.tools.ant.types.Path">createExtdirs</a><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="(x$1: org.apache.tools.ant.types.Reference)Unit">setRefid</span><span class="delimiter">(</span><a href="#208565" title="org.apache.tools.ant.types.Reference">input</a><span class="delimiter">)</span>
+
+  /** Sets the `argfile` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `argfile`. */
+  <span class="keyword">def</span> <a title="(input: java.io.File)Unit" id="196717">setArgfile</a><span class="delimiter">(</span><a title="java.io.File" id="208569">input</a>: <span title="java.io.File">File</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196625" title="(x$1: Option[java.io.File])Unit">argfile</a> = <span title="(x: java.io.File)Some[java.io.File]">Some</span><span class="delimiter">(</span><a href="#208569" title="java.io.File">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `dependencyfile` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `dependencyfile`. */
+  <span class="keyword">def</span> <a title="(input: java.io.File)Unit" id="196718">setDependencyfile</a><span class="delimiter">(</span><a title="java.io.File" id="208574">input</a>: <span title="java.io.File">File</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196628" title="(x$1: Option[java.io.File])Unit">dependencyfile</a> = <span title="(x: java.io.File)Some[java.io.File]">Some</span><span class="delimiter">(</span><a href="#208574" title="java.io.File">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `encoding` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value of `encoding`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196719">setEncoding</a><span class="delimiter">(</span><a title="String" id="208579">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196631" title="(x$1: Option[String])Unit">encoding</a> = <span title="(x: String)Some[String]">Some</span><span class="delimiter">(</span><a href="#208579" title="String">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `target` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value for `target`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196720">setTarget</a><span class="delimiter">(</span><a title="String" id="208584">input</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196599" title="object Scalac.this.Target">Target</a>.<a href="#208194" title="(value: String)Boolean">isPermissible</a><span class="delimiter">(</span><a href="#208584" title="String">input</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#196634" title="(x$1: Option[String])Unit">backend</a> = <span title="(x: String)Some[String]">Some</span><span class="delimiter">(</span><a href="#208584" title="String">input</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown target \'&quot;)" class="string">&quot;Unknown target '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208584" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+
+  /** Sets the `force` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value for `force`. */
+  <span class="keyword">def</span> <a title="(input: Boolean)Unit" id="196721">setForce</a><span class="delimiter">(</span><a title="Boolean" id="208589">input</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196637" title="(x$1: Boolean)Unit">force</a> = <a href="#208589" title="Boolean">input</a> <span class="delimiter">}</span>
+
+  /** Sets the `fork` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value for `fork`. */
+  <span class="keyword">def</span> <a title="(input: Boolean)Unit" id="196722">setFork</a><span class="delimiter">(</span><a title="Boolean" id="208591">input</a> : <span title="Boolean">Boolean</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196640" title="(x$1: Boolean)Unit">fork</a> = <a href="#208591" title="Boolean">input</a> <span class="delimiter">}</span>
+  /**
+   * Sets the `jvmargs` attribute.  Used by [[http://ant.apache.org Ant]].
+   * @param input The value for `jvmargs`
+   */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196723">setJvmargs</a><span class="delimiter">(</span><a title="String" id="208593">input</a> : <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196643" title="(x$1: Option[String])Unit">jvmArgs</a> = <span title="(x: String)Some[String]">Some</span><span class="delimiter">(</span><a href="#208593" title="String">input</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the logging level attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value for `logging`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196724">setLogging</a><span class="delimiter">(</span><a title="String" id="208598">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196595" title="object Scalac.this.LoggingLevel">LoggingLevel</a>.<a href="#208194" title="(value: String)Boolean">isPermissible</a><span class="delimiter">(</span><a href="#208598" title="String">input</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#196646" title="(x$1: Option[String])Unit">logging</a> = <span title="(x: String)Some[String]">Some</span><span class="delimiter">(</span><a href="#208598" title="String">input</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Logging level \'&quot;)" class="string">&quot;Logging level '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208598" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\' does not exist.&quot;)" class="string">&quot;' does not exist.&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `logphase` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value for `logPhase`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196725">setLogPhase</a><span class="delimiter">(</span><a title="String" id="208603">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196649" title="(x$1: List[String])Unit">logPhase</a> = <a href="#208603" title="String">input</a>.<span title="(x$1: String)Array[String]">split</span><span title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]" class="delimiter">(</span><span title="String(&quot;,&quot;)" class="string">&quot;,&quot;</span><span class="delimiter">)</span>.<span title="=&gt; List[String]">toList</span>.<span title="(f: String =&gt; scala.collection.GenTraversableOnce[String])(implicit bf: scala.collection.generic.CanBuildFrom[List[String],String,List[String]])List[String]">flatMap</span> <span title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.List.Coll,String,List[String]]" class="delimiter">{</span> s: <span title="String">String</span> =&gt;
+      <span class="keyword">val</span> <a title="String" id="208730">st</a> = <a href="#208729" title="String">s</a>.<span title="()String">trim</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span title="List[String]" class="keyword">if</span> <span class="delimiter">(</span><a href="#196597" title="object Scalac.this.CompilerPhase">CompilerPhase</a>.<a href="#208194" title="(value: String)Boolean">isPermissible</a><span class="delimiter">(</span><a href="#208730" title="String">st</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">(</span><span title="List[String]" class="keyword">if</span> <span class="delimiter">(</span><a href="#208603" title="String">input</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span> <span title="(xs: String*)List[String]">List</span><span class="delimiter">(</span><a href="#208730" title="String">st</a><span class="delimiter">)</span> <span class="keyword">else</span> <span title="object Nil">Nil</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span class="delimiter">{</span>
+        <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Phase &quot;)" class="string">&quot;Phase &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208730" title="String">st</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; in log does not exist.&quot;)" class="string">&quot; in log does not exist.&quot;</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Set the `debug` info attribute.
+   *  @param input The value for `debug`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196726">setDebuginfo</a><span class="delimiter">(</span><a title="String" id="208769">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196652" title="(x$1: Option[String])Unit">debugInfo</a> = <span title="(x: String)Some[String]">Some</span><span class="delimiter">(</span><a href="#208769" title="String">input</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** Set the `addparams` info attribute.
+   *  @param input The value for `addparams`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196727">setAddparams</a><span class="delimiter">(</span><a title="String" id="208774">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196655" title="(x$1: String)Unit">addParams</a> = <a href="#208774" title="String">input</a> <span class="delimiter">}</span>
+
+  /** Set the `explaintypes` info attribute.
+   *  @param input One of the flags `yes/no` or `on/off`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196728">setExplaintypes</a><span class="delimiter">(</span><a title="String" id="208776">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196658" title="(x$1: Option[Boolean])Unit">explaintypes</a> = <a href="#196601" title="object Scalac.this.Flag">Flag</a> <a href="#208247" title="(flag: String)Option[Boolean]">toBoolean</a> <a href="#208776" title="String">input</a> <span title="(alternative: =&gt; Option[Boolean])Option[Boolean]">orElse</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown explaintypes flag \'&quot;)" class="string">&quot;Unknown explaintypes flag '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208776" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Set the `deprecation` info attribute.
+   *  @param input One of the flags `yes/no` or `on/off`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196729">setDeprecation</a><span class="delimiter">(</span><a title="String" id="208783">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196661" title="(x$1: Option[Boolean])Unit">deprecation</a> = <a href="#196601" title="object Scalac.this.Flag">Flag</a> <a href="#208247" title="(flag: String)Option[Boolean]">toBoolean</a> <a href="#208783" title="String">input</a> <span title="(alternative: =&gt; Option[Boolean])Option[Boolean]">orElse</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown deprecation flag \'&quot;)" class="string">&quot;Unknown deprecation flag '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208783" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Set the `nobootcp` info attribute.
+   *  @param input One of the flags `yes/no` or `on/off`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196730">setNobootcp</a><span class="delimiter">(</span><a title="String" id="208788">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196664" title="(x$1: Option[Boolean])Unit">nobootcp</a> = <a href="#196601" title="object Scalac.this.Flag">Flag</a> <a href="#208247" title="(flag: String)Option[Boolean]">toBoolean</a> <a href="#208788" title="String">input</a> <span title="(alternative: =&gt; Option[Boolean])Option[Boolean]">orElse</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown nobootcp flag \'&quot;)" class="string">&quot;Unknown nobootcp flag '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208788" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Set the `nowarn` info attribute.
+   *  @param input One of the flags `yes/no` or `on/off`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196731">setNowarn</a><span class="delimiter">(</span><a title="String" id="208793">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196667" title="(x$1: Option[Boolean])Unit">nowarn</a> = <a href="#196601" title="object Scalac.this.Flag">Flag</a> <a href="#208247" title="(flag: String)Option[Boolean]">toBoolean</a> <a href="#208793" title="String">input</a> <span title="(alternative: =&gt; Option[Boolean])Option[Boolean]">orElse</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown nowarn flag \'&quot;)" class="string">&quot;Unknown nowarn flag '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208793" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Set the `optimise` info attribute.
+   *  @param input One of the flags `yes/no` or `on/off`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196732">setOptimise</a><span class="delimiter">(</span><a title="String" id="208798">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196670" title="(x$1: Option[Boolean])Unit">optimise</a> = <a href="#196601" title="object Scalac.this.Flag">Flag</a> <a href="#208247" title="(flag: String)Option[Boolean]">toBoolean</a> <a href="#208798" title="String">input</a> <span title="(alternative: =&gt; Option[Boolean])Option[Boolean]">orElse</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown optimisation flag \'&quot;)" class="string">&quot;Unknown optimisation flag '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208798" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Set the `unchecked` info attribute.
+   *  @param input One of the flags `yes/no` or `on/off`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196733">setUnchecked</a><span class="delimiter">(</span><a title="String" id="208803">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196673" title="(x$1: Option[Boolean])Unit">unchecked</a> = <a href="#196601" title="object Scalac.this.Flag">Flag</a> <a href="#208247" title="(flag: String)Option[Boolean]">toBoolean</a> <a href="#208803" title="String">input</a> <span title="(alternative: =&gt; Option[Boolean])Option[Boolean]">orElse</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown unchecked flag \'&quot;)" class="string">&quot;Unknown unchecked flag '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208803" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Set the `usejavacp` info attribute.
+   *  @param input One of the flags `yes/no` or `on/off`. */
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196734">setUsejavacp</a><span class="delimiter">(</span><a title="String" id="208808">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#196676" title="(x$1: Option[Boolean])Unit">usejavacp</a> = <a href="#196601" title="object Scalac.this.Flag">Flag</a> <a href="#208247" title="(flag: String)Option[Boolean]">toBoolean</a> <a href="#208808" title="String">input</a> <span title="(alternative: =&gt; Option[Boolean])Option[Boolean]">orElse</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Unknown usejavacp flag \'&quot;)" class="string">&quot;Unknown usejavacp flag '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208808" title="String">input</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Sets the `failonerror` attribute. Used by [[http://ant.apache.org Ant]].
+   *  @param input The value for `failonerror`. */
+  <span class="keyword">def</span> <a title="(input: Boolean)Unit" id="196735">setFailonerror</a><span class="delimiter">(</span><a title="Boolean" id="208813">input</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196679" title="(x$1: Boolean)Unit">failonerror</a> = <a href="#208813" title="Boolean">input</a> <span class="delimiter">}</span>
+
+  /** Set the `scalacdebugging` info attribute. If set to
+   *  `'''true'''`, the scalac ant task will print out the filenames
+   *  being compiled.
+   *  @param input The specified flag */
+  <span class="keyword">def</span> <a title="(input: Boolean)Unit" id="196736">setScalacdebugging</a><span class="delimiter">(</span><a title="Boolean" id="208815">input</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196688" title="(x$1: Boolean)Unit">scalacDebugging</a> = <a href="#208815" title="Boolean">input</a> <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196737">setAssemname</a><span class="delimiter">(</span><a title="String" id="208817">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196682" title="(x$1: Option[String])Unit">assemname</a> = <span title="(x: String)Some[String]">Some</span><span class="delimiter">(</span><a href="#208817" title="String">input</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+  <span class="keyword">def</span> <a title="(input: String)Unit" id="196738">setAssemrefs</a><span class="delimiter">(</span><a title="String" id="208822">input</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#196685" title="(x$1: Option[String])Unit">assemrefs</a> = <span title="(x: String)Some[String]">Some</span><span class="delimiter">(</span><a href="#208822" title="String">input</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** Sets the `compilerarg` as a nested compilerarg Ant parameter.
+   *  @return A compiler argument to be configured. */
+  <span class="keyword">def</span> <a title="()org.apache.tools.ant.util.facade.ImplementationSpecificArgument" id="196739">createCompilerArg</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="org.apache.tools.ant.util.facade.ImplementationSpecificArgument">ImplementationSpecificArgument</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="org.apache.tools.ant.util.facade.ImplementationSpecificArgument" id="208833">arg</a> = <span title="org.apache.tools.ant.util.facade.ImplementationSpecificArgument" class="keyword">new</span> <span title="org.apache.tools.ant.util.facade.ImplementationSpecificArgument">ImplementationSpecificArgument</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#196691" title="=&gt; org.apache.tools.ant.util.facade.FacadeTaskHelper">scalacCompilerArgs</a> <span title="(x$1: org.apache.tools.ant.util.facade.ImplementationSpecificArgument)Unit">addImplementationArgument</span> <a href="#208833" title="org.apache.tools.ant.util.facade.ImplementationSpecificArgument">arg</a>
+    <a href="#208833" title="org.apache.tools.ant.util.facade.ImplementationSpecificArgument">arg</a>
+  <span class="delimiter">}</span>
+
+/*============================================================================*\
+**                             Properties getters                             **
+\*============================================================================*/
+
+  /** Gets the value of the `classpath` attribute in a
+   *  Scala-friendly form.
+   *  @return The class path as a list of files. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; List[java.io.File]" id="196740">getClasspath</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <a href="#196694" title="(p: Option[org.apache.tools.ant.types.Path], name: String)List[java.io.File]">pathAsList</a><span class="delimiter">(</span><a href="#196610" title="=&gt; Option[org.apache.tools.ant.types.Path]">classpath</a>, <span title="String(&quot;classpath&quot;)" class="string">&quot;classpath&quot;</span><span class="delimiter">)</span>
+
+  /** Gets the value of the `origin` attribute in a
+   *  Scala-friendly form.
+   *  @return The origin path as a list of files. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; List[java.io.File]" id="196741">getOrigin</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <a href="#196694" title="(p: Option[org.apache.tools.ant.types.Path], name: String)List[java.io.File]">pathAsList</a><span class="delimiter">(</span><a href="#196604" title="=&gt; Option[org.apache.tools.ant.types.Path]">origin</a>, <span title="String(&quot;origin&quot;)" class="string">&quot;origin&quot;</span><span class="delimiter">)</span>
+
+  /** Gets the value of the `destination` attribute in a
+   *  Scala-friendly form.
+   *  @return The destination as a file. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; java.io.File" id="196742">getDestination</a>: <span title="java.io.File">File</span> =
+    <span title="java.io.File" class="keyword">if</span> <span class="delimiter">(</span><a href="#196607" title="=&gt; Option[java.io.File]">destination</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Member \'destination\' is empty.&quot;)" class="string">&quot;Member 'destination' is empty.&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#196748" title="(file: java.io.File)java.io.File">existing</a><span class="delimiter">(</span><a href="#11504" title="()org.apache.tools.ant.Project">getProject</a> <span title="(x$1: String)java.io.File">resolveFile</span> <a href="#196607" title="=&gt; Option[java.io.File]">destination</a>.<span title="=&gt; java.io.File">get</span>.<span title="()String">toString</span><span class="delimiter">)</span>
+
+  /** Gets the value of the `sourcepath` attribute in a
+   *  Scala-friendly form.
+   *  @return The source path as a list of files. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; List[java.io.File]" id="196743">getSourcepath</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <a href="#196694" title="(p: Option[org.apache.tools.ant.types.Path], name: String)List[java.io.File]">pathAsList</a><span class="delimiter">(</span><a href="#196613" title="=&gt; Option[org.apache.tools.ant.types.Path]">sourcepath</a>, <span title="String(&quot;sourcepath&quot;)" class="string">&quot;sourcepath&quot;</span><span class="delimiter">)</span>
+
+  /** Gets the value of the `bootclasspath` attribute in a
+   *  Scala-friendly form.
+   *  @return The boot class path as a list of files. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; List[java.io.File]" id="196744">getBootclasspath</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <a href="#196694" title="(p: Option[org.apache.tools.ant.types.Path], name: String)List[java.io.File]">pathAsList</a><span class="delimiter">(</span><a href="#196616" title="=&gt; Option[org.apache.tools.ant.types.Path]">bootclasspath</a>, <span title="String(&quot;bootclasspath&quot;)" class="string">&quot;bootclasspath&quot;</span><span class="delimiter">)</span>
+
+  /** Gets the value of the `extdirs` attribute in a
+   *  Scala-friendly form.
+   *  @return The extensions path as a list of files. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; List[java.io.File]" id="196745">getExtdirs</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <a href="#196694" title="(p: Option[org.apache.tools.ant.types.Path], name: String)List[java.io.File]">pathAsList</a><span class="delimiter">(</span><a href="#196622" title="=&gt; Option[org.apache.tools.ant.types.Path]">extdirs</a>, <span title="String(&quot;extdirs&quot;)" class="string">&quot;extdirs&quot;</span><span class="delimiter">)</span>
+
+/*============================================================================*\
+**                       Compilation and support methods                      **
+\*============================================================================*/
+
+  /** Transforms a string name into a file relative to the provided base
+   *  directory.
+   *  @param base A file pointing to the location relative to which the name
+   *              will be resolved.
+   *  @param name A relative or absolute path to the file as a string.
+   *  @return     A file created from the name and the base file. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(base: java.io.File)(name: String)java.io.File" id="196746">nameToFile</a><span class="delimiter">(</span><a title="java.io.File" id="208444">base</a>: <span title="java.io.File">File</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="String" id="208445">name</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="java.io.File">File</span> =
+    <a href="#196748" title="(file: java.io.File)java.io.File">existing</a><span class="delimiter">(</span><a href="#196592" title="=&gt; org.apache.tools.ant.util.FileUtils">fileUtils</a>.<span title="(x$1: java.io.File, x$2: String)java.io.File">resolveFile</span><span class="delimiter">(</span><a href="#208444" title="java.io.File">base</a>, <a href="#208445" title="String">name</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Transforms a string name into a file relative to the build root
+   *  directory.
+   *  @param name A relative or absolute path to the file as a string.
+   *  @return     A file created from the name. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(name: String)java.io.File" id="196747">nameToFile</a><span class="delimiter">(</span><a title="String" id="208442">name</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="java.io.File">File</span> =
+    <a href="#196748" title="(file: java.io.File)java.io.File">existing</a><span class="delimiter">(</span><a href="#11504" title="()org.apache.tools.ant.Project">getProject</a> <span title="(x$1: String)java.io.File">resolveFile</span> <a href="#208442" title="String">name</a><span class="delimiter">)</span>
+
+  /** Tests if a file exists and prints a warning in case it doesn't. Always
+   *  returns the file, even if it doesn't exist.
+   *  @param file A file to test for existance.
+   *  @return     The same file. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(file: java.io.File)java.io.File" id="196748">existing</a><span class="delimiter">(</span><a title="java.io.File" id="208840">file</a>: <span title="java.io.File">File</span><span class="delimiter">)</span>: <span title="java.io.File">File</span> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#208840" title="java.io.File">file</a>.<span title="()Boolean">exists</span><span class="delimiter">)</span>
+      <a href="#11504" title="(x$1: String, x$2: Int)Unit">log</a><span class="delimiter">(</span><span title="String(&quot;Element \'&quot;)" class="string">&quot;Element '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#208840" title="java.io.File">file</a>.<span title="()String">toString</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\' does not exist.&quot;)" class="string">&quot;' does not exist.&quot;</span>,
+          Project.<span title="Int(1)">MSG_WARN</span><span class="delimiter">)</span>
+    <a href="#208840" title="java.io.File">file</a>
+  <span class="delimiter">}</span>
+
+  /** Transforms a path into a Scalac-readable string.
+   *  @param path A path to convert.
+   *  @return     A string-representation of the path like `a.jar:b.jar`. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(path: List[java.io.File])String" id="196749">asString</a><span class="delimiter">(</span><a title="List[java.io.File]" id="208859">path</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="String">String</span> =
+    <a href="#208859" title="List[java.io.File]">path</a>.<span title="(f: java.io.File =&gt; String)(implicit bf: scala.collection.generic.CanBuildFrom[List[java.io.File],String,List[String]])List[String]">map</span><span title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.List.Coll,String,List[String]]" class="delimiter">(</span><a href="#196750" title="(file: java.io.File)String">asString</a><span class="delimiter">)</span> <span title="(sep: String)String">mkString</span> <span title="object java.io.File">File</span>.<span title="String">pathSeparator</span>
+
+  /** Transforms a file into a Scalac-readable string.
+   *  @param path A file to convert.
+   *  @return     A string-representation of the file like `/x/k/a.scala`. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(file: java.io.File)String" id="196750">asString</a><span class="delimiter">(</span><a title="java.io.File" id="208880">file</a>: <span title="java.io.File">File</span><span class="delimiter">)</span>: <span title="String">String</span> =
+    <a href="#208880" title="java.io.File">file</a>.<span title="()String">getAbsolutePath</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+/*============================================================================*\
+**                      Hooks for variants of Scala                           **
+\*============================================================================*/
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(error: String =&gt; Unit)scala.tools.nsc.Settings" id="196751">newSettings</a><span class="delimiter">(</span><a title="String =&gt; Unit" id="196812">error</a>: String=&gt;Unit<span class="delimiter">)</span>: <a href="../nsc/Settings.scala.html#13140" title="scala.tools.nsc.Settings">Settings</a> =
+    <span title="scala.tools.nsc.Settings" class="keyword">new</span> <a href="../nsc/Settings.scala.html#13140" title="scala.tools.nsc.Settings">Settings</a><span class="delimiter">(</span><a href="#196812" title="String =&gt; Unit">error</a><span class="delimiter">)</span>
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(settings: scala.tools.nsc.Settings, reporter: scala.tools.nsc.reporters.Reporter)scala.tools.nsc.Global" id="196752">newGlobal</a><span class="delimiter">(</span><a title="scala.tools.nsc.Settings" id="208921">settings</a>: <a href="../nsc/Settings.scala.html#13140" title="scala.tools.nsc.Settings">Settings</a>, <a title="scala.tools.nsc.reporters.Reporter" id="208922">reporter</a>: <a href="../nsc/reporters/Reporter.scala.html#26281" title="scala.tools.nsc.reporters.Reporter">Reporter</a><span class="delimiter">)</span> =
+    <span title="scala.tools.nsc.Global" class="keyword">new</span> <a href="../nsc/Global.scala.html#12873" title="scala.tools.nsc.Global">Global</a><span class="delimiter">(</span><a href="#208921" title="scala.tools.nsc.Settings">settings</a>, <a href="#208922" title="scala.tools.nsc.reporters.Reporter">reporter</a><span class="delimiter">)</span>
+
+/*============================================================================*\
+**                           The big execute method                           **
+\*============================================================================*/
+
+  /** Initializes settings and source files */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; (scala.tools.nsc.Settings, List[java.io.File], Boolean)" id="196753">initialize</a>: <span title="(scala.tools.nsc.Settings, List[java.io.File], Boolean)" class="delimiter">(</span>Settings, List<span class="delimiter">[</span>File<span class="delimiter">]</span>, Boolean<span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196688" title="=&gt; Boolean">scalacDebugging</a><span class="delimiter">)</span>
+      <a href="#11504" title="(x$1: String)Unit">log</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Base directory is `%s`&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="../nsc/io/Path.scala.html#191077" title="(path: String)scala.tools.nsc.io.Path">SPath</a><span class="delimiter">(</span><span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span>.<a href="../nsc/io/Path.scala.html#190949" title="=&gt; scala.tools.nsc.io.Path">normalize</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    // Tests if all mandatory attributes are set and valid.
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196604" title="=&gt; Option[org.apache.tools.ant.types.Path]">origin</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Attribute \'srcdir\' is not set.&quot;)" class="string">&quot;Attribute 'srcdir' is not set.&quot;</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196607" title="=&gt; Option[java.io.File]">destination</a>.<span title="=&gt; Boolean">isEmpty</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <span title="=&gt; Boolean">!</span><a href="#196607" title="=&gt; Option[java.io.File]">destination</a>.<span title="=&gt; java.io.File">get</span>.<span title="()Boolean">isDirectory</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Attribute \'destdir\' does not refer to an existing directory.&quot;)" class="string">&quot;Attribute 'destdir' does not refer to an existing directory.&quot;</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196607" title="=&gt; Option[java.io.File]">destination</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#196607" title="(x$1: Option[java.io.File])Unit">destination</a> = <span title="(x: java.io.File)Some[java.io.File]">Some</span><span class="delimiter">(</span><a href="#196741" title="=&gt; List[java.io.File]">getOrigin</a>.<span title="=&gt; java.io.File">head</span><span class="delimiter">)</span>
+
+    <span class="keyword">val</span> <a title="org.apache.tools.ant.util.GlobPatternMapper" id="208932">mapper</a> = <span title="org.apache.tools.ant.util.GlobPatternMapper" class="keyword">new</span> <span title="org.apache.tools.ant.util.GlobPatternMapper">GlobPatternMapper</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#208932" title="org.apache.tools.ant.util.GlobPatternMapper">mapper</a> <span title="(x$1: String)Unit">setTo</span> <span title="String(&quot;*.class&quot;)" class="string">&quot;*.class&quot;</span>
+    <a href="#208932" title="org.apache.tools.ant.util.GlobPatternMapper">mapper</a> <span title="(x$1: String)Unit">setFrom</span> <span title="String(&quot;*.scala&quot;)" class="string">&quot;*.scala&quot;</span>
+
+    <span class="keyword">var</span> <a title="Boolean" id="208933">javaOnly</a> = <span title="Boolean(true)" class="keyword">true</span>
+
+    <span class="keyword">def</span> <a title="(originDir: java.io.File)List[String]" id="208934">getOriginFiles</a><span class="delimiter">(</span><a title="java.io.File" id="208986">originDir</a>: <span title="java.io.File">File</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Array[String]" id="208987">includedFiles</a> = <a href="#11504" title="(x$1: java.io.File)org.apache.tools.ant.DirectoryScanner">getDirectoryScanner</a><span class="delimiter">(</span><a href="#208986" title="java.io.File">originDir</a><span class="delimiter">)</span>.<span title="()Array[String]">getIncludedFiles</span>
+      <span class="keyword">val</span> <a title="Array[String]" id="208988">javaFiles</a> = <a href="#208987" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">includedFiles</a> <span title="(p: String =&gt; Boolean)Array[String]">filter</span> <span class="delimiter">(</span><a href="#209188" title="String">_</a> <span title="(x$1: String)Boolean">endsWith</span> <span title="String(&quot;.java&quot;)" class="string">&quot;.java&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">val</span> <a title="Array[String]" id="208989">scalaFiles</a> = <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="Array[String]" id="209189">xs</a> = <a href="#208987" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">includedFiles</a> <span title="(p: String =&gt; Boolean)Array[String]">filter</span> <span class="delimiter">(</span><a href="#209386" title="String">_</a> <span title="(x$1: String)Boolean">endsWith</span> <span title="String(&quot;.scala&quot;)" class="string">&quot;.scala&quot;</span><span class="delimiter">)</span>
+        <span title="Array[String]" class="keyword">if</span> <span class="delimiter">(</span><a href="#196637" title="=&gt; Boolean">force</a><span class="delimiter">)</span> <a href="#209189" title="Array[String]">xs</a>
+        <span class="keyword">else</span> <span title="org.apache.tools.ant.util.SourceFileScanner" class="keyword">new</span> <span title="org.apache.tools.ant.util.SourceFileScanner">SourceFileScanner</span><span class="delimiter">(</span><a href="#11504" title="scala.tools.ant.Scalac" class="keyword">this</a><span class="delimiter">)</span>.<span title="(x$1: Array[String], x$2: java.io.File, x$3: java.io.File, x$4: org.apache.tools.ant.util.FileNameMapper)Array[String]">restrict</span><span class="delimiter">(</span><a href="#209189" title="Array[String]">xs</a>, <a href="#208986" title="java.io.File">originDir</a>, <a href="#196607" title="=&gt; Option[java.io.File]">destination</a>.<span title="=&gt; java.io.File">get</span>, <a href="#208932" title="org.apache.tools.ant.util.GlobPatternMapper">mapper</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      <a href="#208933" title="Boolean">javaOnly</a> = <a href="#208933" title="Boolean">javaOnly</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <span class="delimiter">(</span><a href="#208989" title="Array[String]">scalaFiles</a>.<span title="=&gt; Int">length</span> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <span class="keyword">val</span> <a title="List[String]" id="208990">list</a> = <span class="delimiter">(</span><a href="#208989" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">scalaFiles</a> <span title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">++</span> <a href="#208988" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">javaFiles</a><span class="delimiter">)</span>.<span title="=&gt; List[String]">toList</span>
+
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196688" title="=&gt; Boolean">scalacDebugging</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <span title="=&gt; Boolean">!</span><a href="#208990" title="List[String]">list</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span>
+        <a href="#11504" title="(x$1: String)Unit">log</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Compiling source file%s: %s to %s&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span>
+          <a href="#196696" title="(xs: List[Any])String">plural</a><span class="delimiter">(</span><a href="#208990" title="List[String]">list</a><span class="delimiter">)</span>,
+          <a href="#208990" title="List[String]">list</a>.<span title="(sep: String)String">mkString</span><span class="delimiter">(</span><span title="String(&quot;, &quot;)" class="string">&quot;, &quot;</span><span class="delimiter">)</span>,
+          <a href="#196742" title="=&gt; java.io.File">getDestination</a>.<span title="()String">toString</span>
+        <span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#208990" title="List[String]">list</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="String" id="210175">str</a> =
+          <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#208988" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">javaFiles</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;%d source file%s&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#208990" title="List[String]">list</a>.<span title="=&gt; Int">length</span>, <a href="#196696" title="(xs: List[Any])String">plural</a><span class="delimiter">(</span><a href="#208990" title="List[String]">list</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <span class="keyword">else</span> <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;%d scala and %d java source files&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#208989" title="Array[String]">scalaFiles</a>.<span title="=&gt; Int">length</span>, <a href="#208988" title="Array[String]">javaFiles</a>.<span title="=&gt; Int">length</span><span class="delimiter">)</span>
+        <a href="#11504" title="(x$1: String)Unit">log</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Compiling %s to %s&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#210175" title="String">str</a>, <a href="#196742" title="=&gt; java.io.File">getDestination</a>.<span title="()String">toString</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <span class="keyword">else</span> <a href="#11504" title="(x$1: String, x$2: Int)Unit">log</a><span class="delimiter">(</span><span title="String(&quot;No files selected for compilation&quot;)" class="string">&quot;No files selected for compilation&quot;</span>, Project.<span title="Int(3)">MSG_VERBOSE</span><span class="delimiter">)</span>
+
+      <a href="#208990" title="List[String]">list</a>
+    <span class="delimiter">}</span>
+
+    // Scans source directories to build up a compile lists.
+    // If force is false, only files were the .class file in destination is
+    // older than the .scala file will be used.
+    <span class="keyword">val</span> <a title="List[java.io.File]" id="208935">sourceFiles</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span> =
+      <span class="keyword">for</span> <span class="delimiter">(</span><a title="java.io.File" id="210330">originDir</a> &lt;- <a href="#196741" title="(f: java.io.File =&gt; scala.collection.GenTraversableOnce[java.io.File])(implicit bf: scala.collection.generic.CanBuildFrom[List[java.io.File],java.io.File,List[java.io.File]])List[java.io.File]">getOrigin</a> ; <a title="String" id="210350">originFile</a> &lt;- <a href="#208934" title="(originDir: java.io.File)List[String]">getOriginFiles</a><span title="(f: String =&gt; java.io.File)(implicit bf: scala.collection.generic.CanBuildFrom[List[String],java.io.File,List[java.io.File]])List[java.io.File]" class="delimiter">(</span><a href="#210330" title="java.io.File">originDir</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">yield</span> <span class="delimiter">{</span>
+        <a href="#11504" title="(x$1: String, x$2: Int)Unit">log</a><span class="delimiter">(</span><a href="#210350" title="String">originFile</a>, Project.<span title="Int(4)">MSG_DEBUG</span><span class="delimiter">)</span>
+        <a href="#196746" title="(base: java.io.File)(name: String)java.io.File">nameToFile</a><span class="delimiter">(</span><a href="#210330" title="java.io.File">originDir</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#210350" title="String">originFile</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+    // Builds-up the compilation settings for Scalac with the existing Ant
+    // parameters.
+    <span class="keyword">val</span> <a title="scala.tools.nsc.Settings" id="208936">settings</a> = <a href="#196751" title="(error: String =&gt; Unit)scala.tools.nsc.Settings">newSettings</a><span class="delimiter">(</span><a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">)</span>
+    <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186748" title="=&gt; settings.OutputSetting">outdir</a>.<a href="../nsc/settings/MutableSettings.scala.html#197187" title="(str: String)Unit">value</a> = <a href="#196750" title="(file: java.io.File)String">asString</a><span class="delimiter">(</span><a href="#196607" title="=&gt; Option[java.io.File]">destination</a>.<span title="=&gt; java.io.File">get</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196610" title="=&gt; Option[org.apache.tools.ant.types.Path]">classpath</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186660" title="=&gt; settings.PathSetting">classpath</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.classpath.T)Unit">value</a> = <a href="#196749" title="(path: List[java.io.File])String">asString</a><span class="delimiter">(</span><a href="#196740" title="=&gt; List[java.io.File]">getClasspath</a><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196613" title="=&gt; Option[org.apache.tools.ant.types.Path]">sourcepath</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186899" title="=&gt; settings.PathSetting">sourcepath</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.sourcepath.T)Unit">value</a> = <a href="#196749" title="(path: List[java.io.File])String">asString</a><span class="delimiter">(</span><a href="#196743" title="=&gt; List[java.io.File]">getSourcepath</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196604" title="=&gt; Option[org.apache.tools.ant.types.Path]">origin</a>.<span title="=&gt; org.apache.tools.ant.types.Path">get</span>.<span title="()Int">size</span><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186899" title="=&gt; settings.PathSetting">sourcepath</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.sourcepath.T)Unit">value</a> = <a href="#196604" title="=&gt; Option[org.apache.tools.ant.types.Path]">origin</a>.<span title="=&gt; org.apache.tools.ant.types.Path">get</span>.<span title="()Array[String]">list</span><span title="(i: Int)String" class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196616" title="=&gt; Option[org.apache.tools.ant.types.Path]">bootclasspath</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186889" title="=&gt; settings.PathSetting">bootclasspath</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.bootclasspath.T)Unit">value</a> = <a href="#196749" title="(path: List[java.io.File])String">asString</a><span class="delimiter">(</span><a href="#196744" title="=&gt; List[java.io.File]">getBootclasspath</a><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196622" title="=&gt; Option[org.apache.tools.ant.types.Path]">extdirs</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186893" title="=&gt; settings.PathSetting">extdirs</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.extdirs.T)Unit">value</a> = <a href="#196749" title="(path: List[java.io.File])String">asString</a><span class="delimiter">(</span><a href="#196745" title="=&gt; List[java.io.File]">getExtdirs</a><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196628" title="=&gt; Option[java.io.File]">dependencyfile</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186901" title="=&gt; settings.StringSetting">dependencyfile</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.dependencyfile.T)Unit">value</a> = <a href="#196750" title="(file: java.io.File)String">asString</a><span class="delimiter">(</span><a href="#196628" title="=&gt; Option[java.io.File]">dependencyfile</a>.<span title="=&gt; java.io.File">get</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196631" title="=&gt; Option[String]">encoding</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186905" title="=&gt; settings.StringSetting">encoding</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.encoding.T)Unit">value</a> = <a href="#196631" title="=&gt; Option[String]">encoding</a>.<span title="=&gt; String">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196634" title="=&gt; Option[String]">backend</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186920" title="=&gt; settings.ChoiceSetting">target</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.target.T)Unit">value</a> = <a href="#196634" title="=&gt; Option[String]">backend</a>.<span title="=&gt; String">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196646" title="=&gt; Option[String]">logging</a>.<span title="=&gt; Boolean">isEmpty</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#196646" title="=&gt; Option[String]">logging</a>.<span title="=&gt; String">get</span> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;verbose&quot;)" class="string">&quot;verbose&quot;</span><span class="delimiter">)</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186928" title="=&gt; settings.BooleanSetting">verbose</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.verbose.T)Unit">value</a> = <span title="Boolean(true)" class="keyword">true</span>
+    <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196646" title="=&gt; Option[String]">logging</a>.<span title="=&gt; Boolean">isEmpty</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#196646" title="=&gt; Option[String]">logging</a>.<span title="=&gt; String">get</span> <span title="(x$1: AnyRef)Boolean">==</span> <span title="String(&quot;debug&quot;)" class="string">&quot;debug&quot;</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186928" title="=&gt; settings.BooleanSetting">verbose</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.verbose.T)Unit">value</a> = <span title="Boolean(true)" class="keyword">true</span>
+      <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186768" title="=&gt; settings.BooleanSetting">debug</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.debug.T)Unit">value</a> = <span title="Boolean(true)" class="keyword">true</span>
+    <span class="delimiter">}</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196649" title="=&gt; List[String]">logPhase</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186778" title="=&gt; settings.PhasesSetting">log</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.log.T)Unit">value</a> = <a href="#196649" title="=&gt; List[String]">logPhase</a>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196652" title="=&gt; Option[String]">debugInfo</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186745" title="=&gt; settings.ChoiceSetting">debuginfo</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: String)Unit">value</a> = <a href="#196652" title="=&gt; Option[String]">debugInfo</a>.<span title="=&gt; String">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196658" title="=&gt; Option[Boolean]">explaintypes</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186907" title="=&gt; settings.BooleanSetting">explaintypes</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.explaintypes.T)Unit">value</a> = <a href="#196658" title="=&gt; Option[Boolean]">explaintypes</a>.<span title="=&gt; Boolean">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196661" title="=&gt; Option[Boolean]">deprecation</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186903" title="=&gt; settings.BooleanSetting">deprecation</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.deprecation.T)Unit">value</a> = <a href="#196661" title="=&gt; Option[Boolean]">deprecation</a>.<span title="=&gt; Boolean">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196664" title="=&gt; Option[Boolean]">nobootcp</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186656" title="=&gt; settings.BooleanSetting">nobootcp</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.nobootcp.T)Unit">value</a> = <a href="#196664" title="=&gt; Option[Boolean]">nobootcp</a>.<span title="=&gt; Boolean">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196667" title="=&gt; Option[Boolean]">nowarn</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186915" title="=&gt; settings.BooleanSetting">nowarn</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.nowarn.T)Unit">value</a> = <a href="#196667" title="=&gt; Option[Boolean]">nowarn</a>.<span title="=&gt; Boolean">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196670" title="=&gt; Option[Boolean]">optimise</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186664" title="=&gt; settings.BooleanSetting">optimise</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.optimise.T)Unit">value</a> = <a href="#196670" title="=&gt; Option[Boolean]">optimise</a>.<span title="=&gt; Boolean">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196673" title="=&gt; Option[Boolean]">unchecked</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186922" title="=&gt; settings.BooleanSetting">unchecked</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.unchecked.T)Unit">value</a> = <a href="#196673" title="=&gt; Option[Boolean]">unchecked</a>.<span title="=&gt; Boolean">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196676" title="=&gt; Option[Boolean]">usejavacp</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/StandardScalaSettings.scala.html#186926" title="=&gt; settings.BooleanSetting">usejavacp</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.usejavacp.T)Unit">value</a> = <a href="#196676" title="=&gt; Option[Boolean]">usejavacp</a>.<span title="=&gt; Boolean">get</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196682" title="=&gt; Option[String]">assemname</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186670" title="=&gt; settings.StringSetting">assemname</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.assemname.T)Unit">value</a> = <a href="#196682" title="=&gt; Option[String]">assemname</a>.<span title="=&gt; String">get</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#196685" title="=&gt; Option[String]">assemrefs</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186672" title="=&gt; settings.StringSetting">assemrefs</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.assemrefs.T)Unit">value</a> = <a href="#196685" title="=&gt; Option[String]">assemrefs</a>.<span title="=&gt; String">get</span>
+
+    <span class="keyword">val</span> <a title="Array[String]" id="208937">jvmargs</a> = <a href="#196691" title="=&gt; org.apache.tools.ant.util.facade.FacadeTaskHelper">scalacCompilerArgs</a>.<span title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">getArgs</span> <span title="(p: String =&gt; Boolean)Array[String]">filter</span> <span class="delimiter">(</span><a href="#210741" title="String">_</a> <span title="(x$1: String)Boolean">startsWith</span> <span title="String(&quot;-J&quot;)" class="string">&quot;-J&quot;</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#208937" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">jvmargs</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186650" title="=&gt; settings.PrefixSetting">jvmargs</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.jvmargs.T)Unit">value</a> = <a href="#208937" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">jvmargs</a>.<span title="=&gt; List[String]">toList</span>
+    <span class="keyword">val</span> <a title="Array[String]" id="208938">defines</a> = <a href="#196691" title="=&gt; org.apache.tools.ant.util.facade.FacadeTaskHelper">scalacCompilerArgs</a>.<span title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">getArgs</span> <span title="(p: String =&gt; Boolean)Array[String]">filter</span> <span class="delimiter">(</span><a href="#211151" title="String">_</a> <span title="(x$1: String)Boolean">startsWith</span> <span title="String(&quot;-D&quot;)" class="string">&quot;-D&quot;</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#208938" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">defines</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186652" title="=&gt; settings.PrefixSetting">defines</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: settings.defines.T)Unit">value</a> = <a href="#208938" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]">defines</a>.<span title="=&gt; List[String]">toList</span>
+
+    <a href="#11504" title="(x$1: String, x$2: Int)Unit">log</a><span class="delimiter">(</span><span title="String(&quot;Scalac params = \'&quot;)" class="string">&quot;Scalac params = '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#196655" title="=&gt; String">addParams</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span>, Project.<span title="Int(4)">MSG_DEBUG</span><span class="delimiter">)</span>
+
+    // let CompilerCommand processes all params
+    <span class="keyword">val</span> <a title="scala.tools.nsc.CompilerCommand" id="208939">command</a> = <span title="scala.tools.nsc.CompilerCommand" class="keyword">new</span> <a href="../nsc/CompilerCommand.scala.html#13284" title="scala.tools.nsc.CompilerCommand">CompilerCommand</a><span class="delimiter">(</span><a href="#208936" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/MutableSettings.scala.html#186564" title="(line: String)List[String]">splitParams</a><span class="delimiter">(</span><a href="#196655" title="=&gt; String">addParams</a><span class="delimiter">)</span>, <a href="#208936" title="scala.tools.nsc.Settings">settings</a><span class="delimiter">)</span>
+
+    // resolve dependenciesFile path from project's basedir, so &lt;ant antfile ...&gt; call from other project works.
+    // the dependenciesFile may be relative path to basedir or absolute path, in either case, the following code
+    // will return correct answer.
+    <a href="#208939" title="scala.tools.nsc.CompilerCommand">command</a>.<a href="../nsc/CompilerCommand.scala.html#191845" title="=&gt; scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186746" title="=&gt; command.settings.StringSetting">dependenciesFile</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74542" title="=&gt; String">value</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <span title="Unit" class="string">&quot;none&quot;</span> =&gt;
+      <span class="keyword">case</span> <a title="Unit" id="212253">x</a> =&gt;
+        <span class="keyword">val</span> <a title="scala.tools.nsc.io.Path" id="212254">depFilePath</a> = <a href="../nsc/io/Path.scala.html#191077" title="(path: String)scala.tools.nsc.io.Path">SPath</a><span class="delimiter">(</span><a href="#212253" title="String">x</a><span class="delimiter">)</span>
+        <a href="#208939" title="scala.tools.nsc.CompilerCommand">command</a>.<a href="../nsc/CompilerCommand.scala.html#191845" title="=&gt; scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/ScalaSettings.scala.html#186746" title="=&gt; command.settings.StringSetting">dependenciesFile</a>.<a href="../../reflect/internal/settings/MutableSettings.scala.html#74543" title="(arg: String)Unit">value</a> = <a href="../nsc/io/Path.scala.html#191078" title="(jfile: scala.tools.nsc.io.JFile)scala.tools.nsc.io.Path">SPath</a><span class="delimiter">(</span><a href="#11504" title="()org.apache.tools.ant.Project">getProject</a>.<span title="()java.io.File">getBaseDir</span><span class="delimiter">)</span>.<a href="../nsc/io/Path.scala.html#190949" title="=&gt; scala.tools.nsc.io.Path">normalize</a> <a href="../nsc/io/Path.scala.html#190951" title="(other: scala.tools.nsc.io.Path)scala.tools.nsc.io.Path">resolve</a> <a href="#212254" title="scala.tools.nsc.io.Path">depFilePath</a> <a href="../nsc/io/Path.scala.html#190948" title="=&gt; String">path</a>
+    <span class="delimiter">}</span>
+
+    <span title="(_1: scala.tools.nsc.Settings, _2: List[java.io.File], _3: Boolean)(scala.tools.nsc.Settings, List[java.io.File], Boolean)" class="delimiter">(</span><a href="#208939" title="scala.tools.nsc.CompilerCommand">command</a>.<a href="../nsc/CompilerCommand.scala.html#191845" title="=&gt; scala.tools.nsc.Settings">settings</a>, <a href="#208935" title="List[java.io.File]">sourceFiles</a>, <a href="#208933" title="Boolean">javaOnly</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="196754">execute</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a href="#212331" title="(scala.tools.nsc.Settings, List[java.io.File], Boolean)" class="delimiter">(</a><a href="#212330" title="scala.tools.nsc.Settings" id="212331">settings</a>, <a href="#212330" title="List[java.io.File]" id="212332">sourceFiles</a>, <a href="#212330" title="Boolean" id="212333">javaOnly</a><span class="delimiter">)</span> = <a href="#196753" title="=&gt; (scala.tools.nsc.Settings, List[java.io.File], Boolean)">initialize</a>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#212332" title="List[java.io.File]">sourceFiles</a>.<span title="=&gt; Boolean">isEmpty</span> <span title="(x: Boolean)Boolean">||</span> <a href="#212333" title="Boolean">javaOnly</a><span class="delimiter">)</span>
+      <span title="Nothing" class="keyword">return</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196640" title="=&gt; Boolean">fork</a><span class="delimiter">)</span> <a href="#196755" title="(settings: scala.tools.nsc.Settings, sourceFiles: List[java.io.File])Unit">executeFork</a><span class="delimiter">(</span><a href="#212331" title="scala.tools.nsc.Settings">settings</a>, <a href="#212332" title="List[java.io.File]">sourceFiles</a><span class="delimiter">)</span>  // TODO - Error
+    <span class="keyword">else</span> <a href="#196756" title="(settings: scala.tools.nsc.Settings, sourceFiles: List[java.io.File])Unit">executeInternal</a><span class="delimiter">(</span><a href="#212331" title="scala.tools.nsc.Settings">settings</a>, <a href="#212332" title="List[java.io.File]">sourceFiles</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(settings: scala.tools.nsc.Settings, sourceFiles: List[java.io.File])Unit" id="196755">executeFork</a><span class="delimiter">(</span><a title="scala.tools.nsc.Settings" id="212349">settings</a>: <a href="../nsc/Settings.scala.html#13140" title="scala.tools.nsc.Settings">Settings</a>, <a title="List[java.io.File]" id="212350">sourceFiles</a>: <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="org.apache.tools.ant.taskdefs.Java" id="212355">java</a> = <span title="(x$1: org.apache.tools.ant.Task)org.apache.tools.ant.taskdefs.Java" class="keyword">new</span> <span title="org.apache.tools.ant.taskdefs.Java">Java</span><span class="delimiter">(</span><a href="#11504" title="scala.tools.ant.Scalac" class="keyword">this</a><span class="delimiter">)</span>
+      <a href="#212355" title="org.apache.tools.ant.taskdefs.Java">java</a> <span title="(x$1: Boolean)Unit">setFork</span> <span title="Boolean(true)" class="keyword">true</span>
+      // using 'setLine' creates multiple arguments out of a space-separated string
+      <a href="#196643" title="=&gt; Option[String]">jvmArgs</a> <span title="(f: String =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span> <a href="#212355" title="org.apache.tools.ant.taskdefs.Java">java</a>.<span title="()org.apache.tools.ant.types.Commandline.Argument">createJvmarg</span><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(x$1: String)Unit">setLine</span> <a href="#212365" title="String">_</a> <span class="delimiter">}</span>
+
+      // use user-provided path or retrieve from classloader
+      // TODO - Allow user to override the compiler classpath
+      <span class="keyword">val</span> <a title="org.apache.tools.ant.types.Path" id="212356">scalacPath</a>: <span title="org.apache.tools.ant.types.Path">Path</span> = <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="org.apache.tools.ant.types.Path" id="212367">path</a> = <span title="(x$1: org.apache.tools.ant.Project)org.apache.tools.ant.types.Path" class="keyword">new</span> <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">(</span><a href="#11504" title="()org.apache.tools.ant.Project">getProject</a><span class="delimiter">)</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196619" title="=&gt; Option[org.apache.tools.ant.types.Path]">compilerPath</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <a href="#212367" title="org.apache.tools.ant.types.Path">path</a> <span title="(x$1: org.apache.tools.ant.types.Path)Unit">add</span> <a href="#196619" title="=&gt; Option[org.apache.tools.ant.types.Path]">compilerPath</a>.<span title="=&gt; org.apache.tools.ant.types.Path">get</span>
+        <span class="keyword">else</span> <a href="#11504" title="()Class[_]">getClass</a>.<span title="()ClassLoader">getClassLoader</span> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a title="Unit" id="212375">cl</a>: <span title="org.apache.tools.ant.AntClassLoader">AntClassLoader</span> =&gt; <a href="#212367" title="org.apache.tools.ant.types.Path">path</a> <span title="(x$1: org.apache.tools.ant.types.Path)Unit">add</span> <span title="org.apache.tools.ant.types.Path" class="keyword">new</span> <span title="org.apache.tools.ant.types.Path">Path</span><span class="delimiter">(</span><a href="#11504" title="()org.apache.tools.ant.Project">getProject</a>, <a href="#212375" title="org.apache.tools.ant.AntClassLoader">cl</a>.<span title="()String">getClasspath</span><span class="delimiter">)</span>
+          <span class="keyword">case</span> <span title="Nothing">_</span>                  =&gt; <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Cannot determine default classpath for scalac, please specify one!&quot;)" class="string">&quot;Cannot determine default classpath for scalac, please specify one!&quot;</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <a href="#212367" title="org.apache.tools.ant.types.Path">path</a>
+      <span class="delimiter">}</span>
+
+      <a href="#212355" title="org.apache.tools.ant.taskdefs.Java">java</a> <span title="(x$1: org.apache.tools.ant.types.Path)Unit">setClasspath</span> <a href="#212356" title="org.apache.tools.ant.types.Path">scalacPath</a>
+      <a href="#212355" title="org.apache.tools.ant.taskdefs.Java">java</a> <span title="(x$1: String)Unit">setClassname</span> <a href="ScalacShared.scala.html#196782" title="=&gt; String">MainClass</a>
+
+      // Write all settings to a temporary file
+      <span class="keyword">def</span> <a title="()java.io.File" id="212357">writeSettings</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="java.io.File">File</span> = <span class="delimiter">{</span>
+        <span class="keyword">def</span> <a title="(arg: String)String" id="212382">escapeArgument</a><span class="delimiter">(</span><a title="String" id="212385">arg</a> : <span title="String">String</span><span class="delimiter">)</span> = <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#212385" title="String">arg</a> <span title="(x$1: String)Boolean">matches</span> <span title="String(&quot;.*\\s.*&quot;)" class="string">&quot;.*\\s.*&quot;</span><span class="delimiter">)</span> <span title="Char('\&quot;')" class="char">'&quot;'</span> <span title="(x: String)String">+</span> <a href="#212385" title="String">arg</a> <span title="(x$1: Any)String">+</span> <span title="Char('\&quot;')" class="char">'&quot;'</span> <span class="keyword">else</span> <a href="#212385" title="String">arg</a>
+        <span class="keyword">val</span> <a title="java.io.File" id="212383">file</a> = <span title="object java.io.File">File</span>.<span title="(x$1: String, x$2: String)java.io.File">createTempFile</span><span class="delimiter">(</span><span title="String(&quot;scalac-ant-&quot;)" class="string">&quot;scalac-ant-&quot;</span>,<span title="String(&quot;.args&quot;)" class="string">&quot;.args&quot;</span><span class="delimiter">)</span>
+        <a href="#212383" title="java.io.File">file</a>.<span title="()Unit">deleteOnExit</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="java.io.PrintWriter" id="212384">out</a> = <span title="java.io.PrintWriter" class="keyword">new</span> <span title="java.io.PrintWriter">PrintWriter</span><span class="delimiter">(</span><span title="java.io.BufferedWriter" class="keyword">new</span> <span title="java.io.BufferedWriter">BufferedWriter</span><span class="delimiter">(</span><span title="(x$1: java.io.File)java.io.FileWriter" class="keyword">new</span> <span title="java.io.FileWriter">FileWriter</span><span class="delimiter">(</span><a href="#212383" title="java.io.File">file</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+          <span class="keyword">for</span> <span class="delimiter">(</span><a title="settings.Setting" id="212500">setting</a> &lt;- <a href="#212349" title="scala.tools.nsc.Settings">settings</a>.<a href="../nsc/settings/AbsSettings.scala.html#186608" title="(f: settings.Setting =&gt; Unit)Unit">visibleSettings</a> ; <a title="String" id="212524">arg</a> &lt;- <a href="#212500" title="settings.Setting">setting</a>.<a href="../nsc/settings/AbsSettings.scala.html#186978" title="(f: String =&gt; Unit)Unit">unparse</a><span class="delimiter">)</span>
+            <a href="#212384" title="java.io.PrintWriter">out</a> <span title="(x$1: String)Unit">println</span> <a href="#212382" title="(arg: String)String">escapeArgument</a><span class="delimiter">(</span><a href="#212524" title="String">arg</a><span class="delimiter">)</span>
+          <span class="keyword">for</span> <span class="delimiter">(</span><a title="java.io.File" id="212550">file</a> &lt;- <a href="#212350" title="(f: java.io.File =&gt; Unit)Unit">sourceFiles</a><span class="delimiter">)</span>
+            <a href="#212384" title="java.io.PrintWriter">out</a> <span title="(x$1: String)Unit">println</span> <a href="#212382" title="(arg: String)String">escapeArgument</a><span class="delimiter">(</span><a href="#212550" title="java.io.File">file</a>.<span title="()String">getAbsolutePath</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">finally</span> <a href="#212384" title="java.io.PrintWriter">out</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+        <a href="#212383" title="java.io.File">file</a>
+      <span class="delimiter">}</span>
+      <span class="keyword">val</span> <a title="Int" id="212358">res</a> = <a href="ScalacShared.scala.html#196784" title="(java: org.apache.tools.ant.taskdefs.Java, paths: List[String])Int">execWithArgFiles</a><span class="delimiter">(</span><a href="#212355" title="org.apache.tools.ant.taskdefs.Java">java</a>, <span title="(xs: String*)List[String]">List</span><span class="delimiter">(</span><a href="#212357" title="()java.io.File">writeSettings</a>.<span title="()String">getAbsolutePath</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196679" title="=&gt; Boolean">failonerror</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#212358" title="Int">res</a> <span title="(x: Int)Boolean">!=</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+        <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span class="string">&quot;Compilation failed because of an internal compiler error;&quot;</span><span title="String(&quot;Compilation failed because of an internal compiler error; see the error output for details.&quot;)">+</span>
+              <span class="string">&quot; see the error output for details.&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Performs the compilation. */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(settings: scala.tools.nsc.Settings, sourceFiles: List[java.io.File])Unit" id="196756">executeInternal</a><span class="delimiter">(</span><a title="scala.tools.nsc.Settings" id="212352">settings</a>: <a href="../nsc/Settings.scala.html#13140" title="scala.tools.nsc.Settings">Settings</a>, <a title="List[java.io.File]" id="212353">sourceFiles</a> : <span title="List[java.io.File]">List</span><span class="delimiter">[</span>File<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.tools.nsc.reporters.ConsoleReporter" id="212567">reporter</a> = <a href="../nsc/reporters/ConsoleReporter.scala.html#212577" title="(settings: scala.tools.nsc.Settings)scala.tools.nsc.reporters.ConsoleReporter" class="keyword">new</a> <a href="../nsc/reporters/ConsoleReporter.scala.html#26269" title="scala.tools.nsc.reporters.ConsoleReporter">ConsoleReporter</a><span class="delimiter">(</span><a href="#212352" title="scala.tools.nsc.Settings">settings</a><span class="delimiter">)</span>
+    <span class="keyword">val</span> <a title="scala.tools.nsc.Global" id="212568">compiler</a> = <a href="#196752" title="(settings: scala.tools.nsc.Settings, reporter: scala.tools.nsc.reporters.Reporter)scala.tools.nsc.Global">newGlobal</a><span class="delimiter">(</span><a href="#212352" title="scala.tools.nsc.Settings">settings</a>, <a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a><span class="delimiter">)</span>  // compiles the actual code
+
+    <span class="keyword">try</span> <span title="compiler.Run" class="keyword">new</span> <a href="#212568" title="scala.tools.nsc.Global">compiler</a>.<a href="../nsc/Global.scala.html#186334" title="compiler.Run">Run</a> <a href="../nsc/Global.scala.html#188879" title="(filenames: List[String])Unit">compile</a> <span class="delimiter">(</span><a href="#212353" title="List[java.io.File]">sourceFiles</a> <span title="(f: java.io.File =&gt; String)(implicit bf: scala.collection.generic.CanBuildFrom[List[java.io.File],String,List[String]])List[String]">map</span> <span class="delimiter">(</span><a href="#212642" title="java.io.File">_</a>.<span title="()String">toString</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="keyword">catch</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a title="Nothing" id="212670">ex</a>: <span title="Throwable">Throwable</span> =&gt;
+        <a href="#212670" title="Throwable">ex</a>.<span title="()Unit">printStackTrace</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="String" id="212671">msg</a> = <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#212670" title="Throwable">ex</a>.<span title="()String">getMessage</span> <span title="(x$1: AnyRef)Boolean">==</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span title="String(&quot;no error message provided&quot;)" class="string">&quot;no error message provided&quot;</span> <span class="keyword">else</span> <a href="#212670" title="Throwable">ex</a>.<span title="()String">getMessage</span>
+        <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><span title="String(&quot;Compile failed because of an internal compiler error (&quot;)" class="string">&quot;Compile failed because of an internal compiler error (&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#212671" title="String">msg</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;); see the error output for details.&quot;)" class="string">&quot;); see the error output for details.&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a>.<a href="../nsc/reporters/ConsoleReporter.scala.html#212591" title="()Unit">printSummary</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a>.<a href="../nsc/reporters/Reporter.scala.html#186104" title="=&gt; Boolean">hasErrors</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="String" id="212680">msg</a> = <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Compile failed with %d error%s; see the compiler error output for details.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span>
+        <a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a>.<a href="../nsc/reporters/Reporter.scala.html#186085" title="=&gt; reporter.Severity">ERROR</a>.<a href="../nsc/reporters/Reporter.scala.html#189398" title="=&gt; Int">count</a>, <a href="#196697" title="(x: Int)String">plural</a><span class="delimiter">(</span><a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a>.<a href="../nsc/reporters/Reporter.scala.html#186085" title="=&gt; reporter.Severity">ERROR</a>.<a href="../nsc/reporters/Reporter.scala.html#189398" title="=&gt; Int">count</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#196679" title="=&gt; Boolean">failonerror</a><span class="delimiter">)</span> <a href="ScalaMatchingTask.scala.html#194492" title="(message: String)Nothing">buildError</a><span class="delimiter">(</span><a href="#212680" title="String">msg</a><span class="delimiter">)</span> <span class="keyword">else</span> <a href="#11504" title="(x$1: String)Unit">log</a><span class="delimiter">(</span><a href="#212680" title="String">msg</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a>.<a href="../nsc/reporters/Reporter.scala.html#186083" title="=&gt; reporter.Severity">WARNING</a>.<a href="../nsc/reporters/Reporter.scala.html#189398" title="=&gt; Int">count</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <a href="#11504" title="(x$1: String)Unit">log</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Compile succeeded with %d warning%s; see the compiler output for details.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span>
+        <a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a>.<a href="../nsc/reporters/Reporter.scala.html#186083" title="=&gt; reporter.Severity">WARNING</a>.<a href="../nsc/reporters/Reporter.scala.html#189398" title="=&gt; Int">count</a>, <a href="#196697" title="(x: Int)String">plural</a><span class="delimiter">(</span><a href="#212567" title="scala.tools.nsc.reporters.ConsoleReporter">reporter</a>.<a href="../nsc/reporters/Reporter.scala.html#186083" title="=&gt; reporter.Severity">WARNING</a>.<a href="../nsc/reporters/Reporter.scala.html#189398" title="=&gt; Int">count</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
