@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/actors/scheduler/ResizableThreadPoolScheduler.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2005-2011, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */</span>
+
+
+<span class="keyword">package</span> scala.actors.scheduler
+
+<span class="keyword">import</span> scala.actors.threadpool.<span class="delimiter">{</span>ThreadPoolExecutor, TimeUnit, LinkedBlockingQueue,
+                                ThreadFactory<span class="delimiter">}</span>
+<span class="keyword">import</span> scala.actors.<span class="delimiter">{</span>Debug, IScheduler<span class="delimiter">}</span>
+<span class="keyword">import</span> scala.concurrent.ManagedBlocker
+
+<span class="comment">/**
+ * This scheduler class uses a &lt;code&gt;ThreadPoolExecutor&lt;/code&gt;
+ * to execute &lt;code&gt;Actor&lt;/code&gt;s.
+ *
+ * The scheduler attempts to shut down itself and the underlying
+ * &lt;code&gt;ThreadPoolExecutor&lt;/code&gt; only if &lt;code&gt;terminate&lt;/code&gt;
+ * is set to true. Otherwise, the scheduler must be shut down
+ * explicitly.
+ *
+ * @author Philipp Haller
+ */</span>
+<span class="keyword">class</span> <a title="class ResizableThreadPoolScheduler extends java.lang.Thread with scala.actors.IScheduler with scala.actors.scheduler.TerminationMonitor with ScalaObject" id="11632">ResizableThreadPoolScheduler</a><a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">(</a><span class="keyword">protected</span> <span class="keyword">val</span> <a title="Boolean" id="103611">terminate</a>: <a href="../../Boolean.scala.html#65" title="Boolean">Boolean</a>,
+                                   <span class="keyword">protected</span> <span class="keyword">val</span> <a title="Boolean" id="103612">daemon</a>: <a href="../../Boolean.scala.html#65" title="Boolean">Boolean</a><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <span title="java.lang.Thread">Thread</span> <span class="keyword">with</span> <a href="../IScheduler.scala.html#10964" title="scala.actors.IScheduler">IScheduler</a> <span class="keyword">with</span> <a href="TerminationMonitor.scala.html#11584" title="scala.actors.scheduler.TerminationMonitor">TerminationMonitor</a> <span class="delimiter">{</span>
+
+  <a href="#11632" title="(x$1: Boolean)Unit">setDaemon</a><span class="delimiter">(</span><a href="#103612" title="=&gt; Boolean">daemon</a><span class="delimiter">)</span>
+
+  <span class="comment">// guarded by this</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Boolean" id="103573">terminating</a> = <span title="Boolean(false)" class="keyword">false</span>
+  <span class="comment">// guarded by this</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Boolean" id="103576">suspending</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+  <span class="comment">// this has to be a java.util.Collection, since this is what</span>
+  <span class="comment">// the ForkJoinPool returns.</span>
+  @volatile
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="java.util.List[_]" id="103579">drainedTasks</a>: java.util.<span title="java.util.List[_]">List</span><span class="delimiter">[</span>_<span class="delimiter">]</span> = <span title="Null(null)" class="keyword">null</span>
+
+  <span class="comment">// guarded by this</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Int" id="103582">coreSize</a> = <a href="ThreadPoolConfig.scala.html#11576" title="object scala.actors.scheduler.ThreadPoolConfig">ThreadPoolConfig</a>.<a href="ThreadPoolConfig.scala.html#101663" title="=&gt; Int">corePoolSize</a>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Int" id="103584">maxSize</a> = <a href="ThreadPoolConfig.scala.html#11576" title="object scala.actors.scheduler.ThreadPoolConfig">ThreadPoolConfig</a>.<a href="ThreadPoolConfig.scala.html#101665" title="=&gt; Int">maxPoolSize</a>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Int" id="103586">numCores</a> = <span title="object java.lang.Runtime">Runtime</span>.<span title="()java.lang.Runtime">getRuntime</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="()Int">availableProcessors</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="keyword">protected</span> <span class="keyword">val</span> <a title="Int" id="103588">CHECK_FREQ</a> = <span title="Int(10)" class="int">10</span>
+
+  <span class="keyword">private</span> <span class="keyword">class</span> <a title="class DaemonThreadFactory extends java.lang.Object with scala.actors.threadpool.ThreadFactory with ScalaObject" id="103590">DaemonThreadFactory</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <a href="../threadpool/ThreadFactory.java.html#11833" title="scala.actors.threadpool.ThreadFactory">ThreadFactory</a> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(r: java.lang.Runnable)java.lang.Thread" id="109923">newThread</a><span class="delimiter">(</span><a title="java.lang.Runnable" id="109926">r</a>: <span title="java.lang.Runnable">Runnable</span><span class="delimiter">)</span>: <span title="java.lang.Thread">Thread</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="java.lang.Thread" id="109946">t</a> = <span title="(x$1: java.lang.Runnable)java.lang.Thread" class="keyword">new</span> <span title="java.lang.Thread">Thread</span><span class="delimiter">(</span><a href="#109926" title="java.lang.Runnable">r</a><span class="delimiter">)</span>
+      <a href="#109946" title="java.lang.Thread">t</a>.<span title="(x$1: Boolean)Unit">setDaemon</span><span class="delimiter">(</span><a href="#103612" title="=&gt; Boolean">daemon</a><span class="delimiter">)</span>
+      <a href="#109946" title="java.lang.Thread">t</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="ResizableThreadPoolScheduler.this.DaemonThreadFactory" id="103591">threadFac</a> = <span title="ResizableThreadPoolScheduler.this.DaemonThreadFactory" class="keyword">new</span> <a href="#103590" title="ResizableThreadPoolScheduler.this.DaemonThreadFactory">DaemonThreadFactory</a>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()scala.actors.threadpool.ThreadPoolExecutor" id="103593">makeNewPool</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../threadpool/ThreadPoolExecutor.java.html#11713" title="scala.actors.threadpool.ThreadPoolExecutor">ThreadPoolExecutor</a> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.actors.threadpool.LinkedBlockingQueue[Nothing]" id="109951">workQueue</a> = <span title="scala.actors.threadpool.LinkedBlockingQueue[Nothing]" class="keyword">new</span> <a href="../threadpool/LinkedBlockingQueue.java.html#11758" title="scala.actors.threadpool.LinkedBlockingQueue[Nothing]">LinkedBlockingQueue</a>
+    <a href="../threadpool/ThreadPoolExecutor.java.html#103689" title="(corePoolSize: Int, maximumPoolSize: Int, keepAliveTime: Long, unit: scala.actors.threadpool.TimeUnit, workQueue: scala.actors.threadpool.BlockingQueue[_], threadFactory: scala.actors.threadpool.ThreadFactory, handler: scala.actors.threadpool.RejectedExecutionHandler)scala.actors.threadpool.ThreadPoolExecutor" class="keyword">new</a> <a href="../threadpool/ThreadPoolExecutor.java.html#11713" title="scala.actors.threadpool.ThreadPoolExecutor">ThreadPoolExecutor</a><span class="delimiter">(</span><a href="#103582" title="=&gt; Int">coreSize</a>,
+                           <a href="#103584" title="=&gt; Int">maxSize</a>,
+                           <span title="Long(60000L)" class="long">60000L</span>,
+                           <a href="../threadpool/TimeUnit.java.html#11819" title="object scala.actors.threadpool.TimeUnit">TimeUnit</a>.<a href="../threadpool/TimeUnit.java.html#110219" title="scala.actors.threadpool.TimeUnit">MILLISECONDS</a>,
+                           <a href="#109951" title="scala.actors.threadpool.LinkedBlockingQueue[Nothing]">workQueue</a>,
+                           <a href="#103591" title="=&gt; ResizableThreadPoolScheduler.this.DaemonThreadFactory">threadFac</a>,
+                           <span title="scala.actors.threadpool.ThreadPoolExecutor.CallerRunsPolicy" class="keyword">new</span> <a href="../threadpool/ThreadPoolExecutor.java.html#11714" title="object scala.actors.threadpool.ThreadPoolExecutor">ThreadPoolExecutor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#110134" title="scala.actors.threadpool.ThreadPoolExecutor.CallerRunsPolicy">CallerRunsPolicy</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">// guarded by this</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="scala.actors.threadpool.ThreadPoolExecutor" id="103595">executor</a> = <a href="#103593" title="()scala.actors.threadpool.ThreadPoolExecutor">makeNewPool</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <a href="../Debug.scala.html#11097" title="object scala.actors.Debug">Debug</a>.<a href="../Debug.scala.html#100280" title="(s: String)Unit">info</a><span class="delimiter">(</span><a href="../../Predef.scala.html#9681" title="implicit scala.Predef.any2stringadd : (x: Any)scala.runtime.StringAdd" class="keyword">this</a><a href="../../runtime/StringAdd.scala.html#58450" title="(other: String)java.lang.String">+</a><span title="java.lang.String(&quot;: corePoolSize = &quot;)" class="string">&quot;: corePoolSize = &quot;</span><span title="(x$1: Any)java.lang.String">+</span><a href="#103582" title="=&gt; Int">coreSize</a><span title="(x$1: Any)java.lang.String">+</span><span title="java.lang.String(&quot;, maxPoolSize = &quot;)" class="string">&quot;, maxPoolSize = &quot;</span><span title="(x$1: Any)java.lang.String">+</span><a href="#103584" title="=&gt; Int">maxSize</a><span class="delimiter">)</span>
+
+  <span class="keyword">def</span> <a title="(d: Boolean)scala.actors.scheduler.ResizableThreadPoolScheduler" id="103597" class="keyword">this</a><span class="delimiter">(</span><a title="Boolean" id="103610">d</a>: <a href="../../Boolean.scala.html#65" title="Boolean">Boolean</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+    <a href="#11632" title="ResizableThreadPoolScheduler.this.type" class="keyword">this</a><span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span>, <a href="#103610" title="Boolean">d</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="()scala.actors.scheduler.ResizableThreadPoolScheduler" id="103598" class="keyword">this</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+    <a href="#103597" title="(d: Boolean)scala.actors.scheduler.ResizableThreadPoolScheduler" class="keyword">this</a><span class="delimiter">(</span><span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; Int" id="103599">numWorkersBlocked</a> = <span class="delimiter">{</span>
+    <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103657" title="scala.actors.threadpool.locks.ReentrantLock">mainLock</a>.<a href="../threadpool/locks/ReentrantLock.java.html#110270" title="()Unit">lock</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="keyword">val</span> <a title="java.util.Iterator[_]" id="110258">iter</a> = <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103658" title="java.util.HashSet[_]">workers</a>.<span title="()java.util.Iterator[?0]">iterator</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="keyword">var</span> <a title="Int" id="110259">numBlocked</a> = <span title="Int(0)" class="int">0</span>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#110258" title="java.util.Iterator[_]">iter</a>.<span title="()Boolean">hasNext</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#110260" title="()Unit" class="delimiter">{</a>
+      <span class="keyword">val</span> <a title="scala.actors.threadpool.ThreadPoolExecutor#Worker" id="110390">w</a> = <a href="#110258" title="java.util.Iterator[_]">iter</a>.<span title="()Any">next</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.actors.threadpool.ThreadPoolExecutor#Worker" class="delimiter">[</span>ThreadPoolExecutor#<a href="../threadpool/ThreadPoolExecutor.java.html#103670" title="scala.actors.threadpool.ThreadPoolExecutor#Worker">Worker</a><span class="delimiter">]</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#110390" title="scala.actors.threadpool.ThreadPoolExecutor#Worker">w</a>.<a href="../threadpool/locks/ReentrantLock.java.html#110272" title="()Boolean">tryLock</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// worker is idle</span>
+        <a href="#110390" title="scala.actors.threadpool.ThreadPoolExecutor#Worker">w</a>.<a href="../threadpool/locks/ReentrantLock.java.html#110274" title="()Unit">unlock</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="java.lang.Thread.State" id="110421">s</a> = <a href="#110390" title="scala.actors.threadpool.ThreadPoolExecutor#Worker">w</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#110394" title="java.lang.Thread">thread</a>.<span title="()java.lang.Thread.State">getState</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#110421" title="java.lang.Thread.State">s</a> <span title="(x$1: AnyRef)Boolean">==</span> Thread.State.<span title="java.lang.Thread.State(value WAITING)">WAITING</span> <a href="../../Boolean.scala.html#55579" title="(x: Boolean)Boolean">||</a> <a href="#110421" title="java.lang.Thread.State">s</a> <span title="(x$1: AnyRef)Boolean">==</span> Thread.State.<span title="java.lang.Thread.State(value TIMED_WAITING)">TIMED_WAITING</span><span class="delimiter">)</span>
+          <a href="#110259" title="Int">numBlocked</a> <a href="../../Int.scala.html#54804" title="(x: Int)Int">+=</a> <span title="Int(1)" class="int">1</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103657" title="scala.actors.threadpool.locks.ReentrantLock">mainLock</a>.<a href="../threadpool/locks/ReentrantLock.java.html#110274" title="()Unit">unlock</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#110259" title="Int">numBlocked</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="103600">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">try</span> <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#11632" title="ResizableThreadPoolScheduler.this.type" class="keyword">this</a>.<span title="(x$1: Unit)Unit">synchronized</span> <a href="#110448" title="()Unit" class="delimiter">{</a>
+          <span class="keyword">try</span> <span class="delimiter">{</span>
+            <a href="#11632" title="(x$1: Long)Unit">wait</a><span class="delimiter">(</span><a href="../../Int.scala.html#54731" title="=&gt; Long">CHECK_FREQ</a><span class="delimiter">)</span>
+          <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+            <span class="keyword">case</span> <span title="Unit">_</span>: <span title="java.lang.InterruptedException">InterruptedException</span> =&gt;
+          <span class="delimiter">}</span>
+
+          <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#103573" title="=&gt; Boolean">terminating</a><span class="delimiter">)</span>
+            <span title="Nothing" class="keyword">throw</span> <span title="scala.actors.scheduler.QuitControl" class="keyword">new</span> <a href="QuitControl.scala.html#11605" title="scala.actors.scheduler.QuitControl">QuitControl</a>
+
+          <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#103576" title="=&gt; Boolean">suspending</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <a href="TerminationMonitor.scala.html#102544" title="()Unit">gc</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+            <span class="comment">// check if we need more worker threads</span>
+            <span class="keyword">val</span> <a title="Int" id="110455">activeBlocked</a> = <a href="#103599" title="=&gt; Int">numWorkersBlocked</a>
+            <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#103582" title="=&gt; Int">coreSize</a> <a href="../../Int.scala.html#54811" title="(x: Int)Int">-</a> <a href="#110455" title="Int">activeBlocked</a> <a href="../../Int.scala.html#54761" title="(x: Int)Boolean">&lt;</a> <a href="#103586" title="=&gt; Int">numCores</a> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#103582" title="=&gt; Int">coreSize</a> <a href="../../Int.scala.html#54761" title="(x: Int)Boolean">&lt;</a> <a href="#103584" title="=&gt; Int">maxSize</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+              <a href="#103582" title="(x$1: Int)Unit">coreSize</a> = <a href="#103586" title="=&gt; Int">numCores</a> <a href="../../Int.scala.html#54804" title="(x: Int)Int">+</a> <a href="#110455" title="Int">activeBlocked</a>
+              <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103702" title="(corePoolSize: Int)Unit">setCorePoolSize</a><span class="delimiter">(</span><a href="#103582" title="=&gt; Int">coreSize</a><span class="delimiter">)</span>
+            <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#103611" title="=&gt; Boolean">terminate</a> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="TerminationMonitor.scala.html#102542" title="=&gt; Boolean">allActorsTerminated</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+              <span class="comment">// if all worker threads idle terminate</span>
+              <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103716" title="()Int">getActiveCount</a><span class="delimiter">(</span><span class="delimiter">)</span> <a href="../../Int.scala.html#54747" title="(x: Int)Boolean">==</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <a href="../Debug.scala.html#11097" title="object scala.actors.Debug">Debug</a>.<a href="../Debug.scala.html#100280" title="(s: String)Unit">info</a><span class="delimiter">(</span><a href="../../Predef.scala.html#9681" title="implicit scala.Predef.any2stringadd : (x: Any)scala.runtime.StringAdd" class="keyword">this</a><a href="../../runtime/StringAdd.scala.html#58450" title="(other: String)java.lang.String">+</a><span title="java.lang.String(&quot;: initiating shutdown...&quot;)" class="string">&quot;: initiating shutdown...&quot;</span><span class="delimiter">)</span>
+                <a href="../Debug.scala.html#11097" title="object scala.actors.Debug">Debug</a>.<a href="../Debug.scala.html#100280" title="(s: String)Unit">info</a><span class="delimiter">(</span><a href="../../Predef.scala.html#9681" title="implicit scala.Predef.any2stringadd : (x: Any)scala.runtime.StringAdd" class="keyword">this</a><a href="../../runtime/StringAdd.scala.html#58450" title="(other: String)java.lang.String">+</a><span title="java.lang.String(&quot;: corePoolSize = &quot;)" class="string">&quot;: corePoolSize = &quot;</span><span title="(x$1: Any)java.lang.String">+</span><a href="#103582" title="=&gt; Int">coreSize</a><span title="(x$1: Any)java.lang.String">+</span><span title="java.lang.String(&quot;, maxPoolSize = &quot;)" class="string">&quot;, maxPoolSize = &quot;</span><span title="(x$1: Any)java.lang.String">+</span><a href="#103584" title="=&gt; Int">maxSize</a><span class="delimiter">)</span>
+
+                <a href="#103573" title="(x$1: Boolean)Unit">terminating</a> = <span title="Boolean(true)" class="keyword">true</span>
+                <span title="Nothing" class="keyword">throw</span> <span title="scala.actors.scheduler.QuitControl" class="keyword">new</span> <a href="QuitControl.scala.html#11605" title="scala.actors.scheduler.QuitControl">QuitControl</a>
+              <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+          <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+            <a href="#103579" title="(x$1: java.util.List[_])Unit">drainedTasks</a> = <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103692" title="()java.util.List[_]">shutdownNow</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            <a href="../Debug.scala.html#11097" title="object scala.actors.Debug">Debug</a>.<a href="../Debug.scala.html#100280" title="(s: String)Unit">info</a><span class="delimiter">(</span><a href="../../Predef.scala.html#9681" title="implicit scala.Predef.any2stringadd : (x: Any)scala.runtime.StringAdd" class="keyword">this</a><a href="../../runtime/StringAdd.scala.html#58450" title="(other: String)java.lang.String">+</a><span title="java.lang.String(&quot;: drained &quot;)" class="string">&quot;: drained &quot;</span><span title="(x$1: Any)java.lang.String">+</span><a href="#103579" title="=&gt; java.util.List[_]">drainedTasks</a>.<span title="()Int">size</span><span class="delimiter">(</span><span class="delimiter">)</span><span title="(x$1: Any)java.lang.String">+</span><span title="java.lang.String(&quot; tasks&quot;)" class="string">&quot; tasks&quot;</span><span class="delimiter">)</span>
+            <a href="#103573" title="(x$1: Boolean)Unit">terminating</a> = <span title="Boolean(true)" class="keyword">true</span>
+            <span title="Nothing" class="keyword">throw</span> <span title="scala.actors.scheduler.QuitControl" class="keyword">new</span> <a href="QuitControl.scala.html#11605" title="scala.actors.scheduler.QuitControl">QuitControl</a>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="comment">// sync</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <span title="Unit">_</span>: <a href="QuitControl.scala.html#11605" title="scala.actors.scheduler.QuitControl">QuitControl</a> =&gt;
+        <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103691" title="()Unit">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="comment">// allow thread to exit</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="(task: java.lang.Runnable)Unit" id="103601">execute</a><span class="delimiter">(</span><a title="java.lang.Runnable" id="103742">task</a>: <span title="java.lang.Runnable">Runnable</span><span class="delimiter">)</span>: <a href="../../Unit.scala.html#461" title="Unit">Unit</a> =
+    <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a> <a href="../threadpool/ThreadPoolExecutor.java.html#103690" title="(command: java.lang.Runnable)Unit">execute</a> <a href="#103742" title="java.lang.Runnable">task</a>
+
+  <span class="keyword">def</span> <a title="(fun: =&gt; Unit)Unit" id="103602">execute</a><span class="delimiter">(</span><a title="=&gt; Unit" id="103745">fun</a>: =&gt; Unit<span class="delimiter">)</span>: <a href="../../Unit.scala.html#461" title="Unit">Unit</a> =
+    <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103690" title="(command: java.lang.Runnable)Unit">execute</a><span class="delimiter">(</span><a href="#110498" title="java.lang.Object with java.lang.Runnable" class="keyword">new</a> <a title="anonymous class $anon extends java.lang.Object with java.lang.Runnable" id="110498">Runnable</a> <span class="delimiter">{</span>
+      <span class="keyword">def</span> <a title="()Unit" id="110502">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#103745" title="=&gt; Unit">fun</a> <span class="delimiter">}</span>
+    <span class="delimiter">}</span><span class="delimiter">)</span>
+
+  <span class="comment">/** Shuts down the scheduler.
+   */</span>
+  <span class="keyword">def</span> <a title="()Unit" id="103603">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../Unit.scala.html#461" title="Unit">Unit</a> = <a href="#11632" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <a href="#103573" title="(x$1: Boolean)Unit">terminating</a> = <span title="Boolean(true)" class="keyword">true</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="103604">isActive</a> = <a href="#11632" title="(x$1: Boolean)Boolean">synchronized</a> <span class="delimiter">{</span>
+    <a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#103573" title="=&gt; Boolean">terminating</a> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <span class="delimiter">(</span><a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a> <span title="(x$1: AnyRef)Boolean">ne</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103693" title="()Boolean">isShutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="(blocker: scala.concurrent.ManagedBlocker)Unit" id="103605">managedBlock</a><span class="delimiter">(</span><a title="scala.concurrent.ManagedBlocker" id="103632">blocker</a>: <a href="../../concurrent/ManagedBlocker.scala.html#18281" title="scala.concurrent.ManagedBlocker">ManagedBlocker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#103632" title="scala.concurrent.ManagedBlocker">blocker</a>.<a href="../../concurrent/ManagedBlocker.scala.html#97964" title="()Boolean">block</a><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Suspends the scheduler. All threads that were in use by the
+   *  scheduler and its internal thread pool are terminated.
+   */</span>
+  <span class="keyword">def</span> <a title="()Unit" id="103606">snapshot</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#11632" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <a href="#103576" title="(x$1: Boolean)Unit">suspending</a> = <span title="Boolean(true)" class="keyword">true</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Resumes the execution of the scheduler if it was previously
+   *  suspended using &lt;code&gt;snapshot&lt;/code&gt;.
+   */</span>
+  <span class="keyword">def</span> <a title="()Unit" id="103607">restart</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#11632" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#103576" title="=&gt; Boolean">suspending</a><span class="delimiter">)</span>
+        sys.<a href="../../sys/package.scala.html#48163" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="java.lang.String(&quot;snapshot has not been invoked&quot;)" class="string">&quot;snapshot has not been invoked&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#103604" title="=&gt; Boolean">isActive</a><span class="delimiter">)</span>
+        sys.<a href="../../sys/package.scala.html#48163" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="java.lang.String(&quot;scheduler is still active&quot;)" class="string">&quot;scheduler is still active&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">else</span>
+        <a href="#103576" title="(x$1: Boolean)Unit">suspending</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+      <a href="#103595" title="(x$1: scala.actors.threadpool.ThreadPoolExecutor)Unit">executor</a> = <a href="#103593" title="()scala.actors.threadpool.ThreadPoolExecutor">makeNewPool</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">val</span> <a title="java.util.Iterator[_]" id="110515">iter</a> = <a href="#103579" title="=&gt; java.util.List[_]">drainedTasks</a>.<span title="()java.util.Iterator[_$1]">iterator</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#110515" title="java.util.Iterator[_]">iter</a>.<span title="()Boolean">hasNext</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#103595" title="=&gt; scala.actors.threadpool.ThreadPoolExecutor">executor</a>.<a href="../threadpool/ThreadPoolExecutor.java.html#103690" title="(command: java.lang.Runnable)Unit">execute</a><a href="#110516" title="()Unit" class="delimiter">(</a><a href="#110515" title="java.util.Iterator[_]">iter</a>.<span title="()Any">next</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="java.lang.Runnable" class="delimiter">[</span><span title="java.lang.Runnable">Runnable</span><span class="delimiter">]</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <a href="#11632" title="()Unit">start</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/collection/parallel/Tasks.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */</span>
+
+
+<span class="keyword">package</span> scala.collection.parallel
+
+
+
+
+<span class="keyword">import</span> scala.concurrent.forkjoin._
+<span class="keyword">import</span> scala.util.control.<a href="../../util/control/Breaks.scala.html#44387" title="object scala.util.control.Breaks">Breaks</a>._
+
+
+<span class="keyword">import</span> annotation.unchecked.uncheckedVariance
+
+
+
+
+<span class="comment">/** A trait that declares task execution capabilities used
+ *  by parallel collections.
+ */</span>
+<span class="keyword">trait</span> <a title="trait Tasks extends java.lang.Object with ScalaObject" id="16929">Tasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">val</span> <a title="scala.collection.mutable.ArrayBuffer[String]" id="238456">debugMessages</a> = collection.mutable.<a href="../generic/GenericCompanion.scala.html#48813" title="[A](elems: A*)scala.collection.mutable.ArrayBuffer[A]">ArrayBuffer</a><span title="(elems: String*)scala.collection.mutable.ArrayBuffer[String]" class="delimiter">[</span><span title="String">String</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(s: String)scala.collection.mutable.ArrayBuffer[String]" id="238458">debuglog</a><span class="delimiter">(</span><a title="String" id="391161">s</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="#16929" title="(x$1: scala.collection.mutable.ArrayBuffer[String])scala.collection.mutable.ArrayBuffer[String]">synchronized</a> <span class="delimiter">{</span>
+    <a href="#238456" title="=&gt; scala.collection.mutable.ArrayBuffer[String]">debugMessages</a> <a href="../mutable/ArrayBuffer.scala.html#66119" title="(elem: String)Tasks.this.debugMessages.type">+=</a> <a href="#391161" title="String">s</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">trait</span> <a title="trait Task[R, +Tp] extends java.lang.Object with ScalaObject" id="238459">Task</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="238460">R</a>, +<a title="&gt;: Nothing &lt;: Any" id="238461">Tp</a><span class="delimiter">]</span> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+    <span class="keyword">type</span> <a title="R" id="238600">Result</a> = <a href="#238460" title="R">R</a>
+
+    <span class="keyword">def</span> <a title="=&gt; Tp" id="238601">repr</a> = <a href="#238459" title="Task.this.type" class="keyword">this</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Tp" class="delimiter">[</span><a href="#238461" title="Tp">Tp</a><span class="delimiter">]</span>
+
+    <span class="comment">/** Body of the task - non-divisible unit of work done by this task.
+     *  Optionally is provided with the result from the previous completed task
+     *  or `None` if there was no previous task (or the previous task is uncompleted or unknown).
+     */</span>
+    <span class="keyword">def</span> <a title="(result: Option[R])Unit" id="238602">leaf</a><span class="delimiter">(</span><a title="Option[R]" id="238684">result</a>: <a href="../../Option.scala.html#560" title="Option[R]">Option</a><span class="delimiter">[</span>R<span class="delimiter">]</span><span class="delimiter">)</span>
+
+    <span class="comment">/** A result that can be accessed once the task is completed. */</span>
+    <span class="keyword">var</span> <a title="=&gt; R" id="238604">result</a>: <a href="#238460" title="R">R</a>
+
+    <span class="comment">/** Decides whether or not this task should be split further. */</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="238605">shouldSplitFurther</a>: <a href="../../Boolean.scala.html#65" title="Boolean">Boolean</a>
+
+    <span class="comment">/** Splits this task into a list of smaller tasks. */</span>
+    <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">def</span> <a title="=&gt; Seq[Tasks.this.Task[R,Tp]]" id="238606">split</a>: <a href="../Seq.scala.html#8648" title="Seq[Tasks.this.Task[R,Tp]]">Seq</a><span class="delimiter">[</span>Task<span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">]</span>
+
+    <span class="comment">/** Read of results of `that` task and merge them into results of this one. */</span>
+    <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(that: Tp)Unit" id="238607">merge</a><span class="delimiter">(</span><a title="Tp @scala.annotation.unchecked.uncheckedVariance" id="360857">that</a>: Tp @<a href="#238461" title="Tp @scala.annotation.unchecked.uncheckedVariance">uncheckedVariance</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span><span class="delimiter">}</span>
+
+    <span class="comment">// exception handling mechanism</span>
+    @volatile <span class="keyword">var</span> <a title="Throwable" id="238609">throwable</a>: <span title="Throwable">Throwable</span> = <span title="Null(null)" class="keyword">null</span>
+    <span class="keyword">def</span> <a title="()Unit" id="238611">forwardThrowable</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span title="Nothing" class="keyword">throw</span> <a href="#238609" title="=&gt; Throwable">throwable</a>
+
+    <span class="comment">// tries to do the leaf computation, storing the possible exception</span>
+    <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(lastres: Option[R])Unit" id="238612">tryLeaf</a><span class="delimiter">(</span><a title="Option[R]" id="391188">lastres</a>: <a href="../../Option.scala.html#560" title="Option[R]">Option</a><span class="delimiter">[</span>R<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">try</span> <span class="delimiter">{</span>
+        <a href="../../util/control/Breaks.scala.html#53480" title="(op: =&gt; Unit)java.lang.Object with util.control.Breaks.TryBlock">tryBreakable</a> <span class="delimiter">{</span>
+          <a href="#238602" title="(result: Option[R])Unit">leaf</a><span class="delimiter">(</span><a href="#391188" title="Option[R]">lastres</a><span class="delimiter">)</span>
+          <a href="#238604" title="(x$1: R)Unit">result</a> = <a href="#238604" title="=&gt; R">result</a> <span class="comment">// ensure that effects of `leaf` are visible to readers of `result`</span>
+        <span class="delimiter">}</span> <a href="../../util/control/Breaks.scala.html#391194" title="(onBreak: =&gt; Unit)Unit">catchBreak</a> <span class="delimiter">{</span>
+          <a href="#238616" title="()Unit">signalAbort</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a title="Unit" id="391214">thr</a>: <span title="Exception">Exception</span> =&gt;
+          <a href="#238604" title="(x$1: R)Unit">result</a> = <a href="#238604" title="=&gt; R">result</a> <span class="comment">// ensure that effects of `leaf` are visible</span>
+          <a href="#238609" title="(x$1: Throwable)Unit">throwable</a> = <a href="#391214" title="Exception">thr</a>
+          <a href="#238616" title="()Unit">signalAbort</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(t: Tp)Unit" id="238613">tryMerge</a><span class="delimiter">(</span><a title="Tp @scala.annotation.unchecked.uncheckedVariance" id="391215">t</a>: Tp @<a href="#238461" title="Tp @scala.annotation.unchecked.uncheckedVariance">uncheckedVariance</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Tasks.this.Task[R,Tp]" id="391217">that</a> = <a href="#391215" title="Tp @scala.annotation.unchecked.uncheckedVariance">t</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Tasks.this.Task[R,Tp]" class="delimiter">[</span><a href="#238459" title="Tasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">]</span>
+      <span class="keyword">val</span> <a title="R" id="391218">local</a> = <a href="#238604" title="=&gt; R">result</a> <span class="comment">// ensure that any effects of modifying `result` are detected</span>
+      <span class="comment">// checkMerge(that)</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#391217" title="Tasks.this.Task[R,Tp]">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <a href="#238607" title="(that: Tp)Unit">merge</a><span class="delimiter">(</span><a href="#391215" title="Tp @scala.annotation.unchecked.uncheckedVariance">t</a><span class="delimiter">)</span>
+      <a href="#238615" title="(that: Tasks.this.Task[_, _])Unit">mergeThrowables</a><span class="delimiter">(</span><a href="#391217" title="Tasks.this.Task[R,Tp]">that</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="(that: Tasks.this.Task[R,Tp])Unit" id="238614">checkMerge</a><span class="delimiter">(</span><a title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance" id="391232">that</a>: Task<span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> @<a href="#238459" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">uncheckedVariance</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#391232" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">==</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <span class="delimiter">(</span><a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238604" title="=&gt; R">result</a> <span title="(x$1: Any)Boolean">==</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#55579" title="(x: Boolean)Boolean">||</a> <a href="#391232" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">that</a>.<a href="#238604" title="=&gt; R">result</a> <span title="(x$1: Any)Boolean">==</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="../../Predef.scala.html#9594" title="(x: Any)Unit">println</a><span class="delimiter">(</span><span title="java.lang.String(&quot;This: &quot;)" class="string">&quot;This: &quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#238459" title="Tasks.this.Task[R,Tp]" class="keyword">this</a> <span title="(x$1: Any)java.lang.String">+</span> <span title="java.lang.String(&quot;, thr=&quot;)" class="string">&quot;, thr=&quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: Any)java.lang.String">+</span> <span title="java.lang.String(&quot;; merged with &quot;)" class="string">&quot;; merged with &quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#391232" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">that</a> <span title="(x$1: Any)java.lang.String">+</span> <span title="java.lang.String(&quot;, thr=&quot;)" class="string">&quot;, thr=&quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#391232" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#55579" title="(x: Boolean)Boolean">||</a> <a href="#391232" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="../../Predef.scala.html#9594" title="(x: Any)Unit">println</a><span class="delimiter">(</span><span title="java.lang.String(&quot;merging this thr: &quot;)" class="string">&quot;merging this thr: &quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: Any)java.lang.String">+</span> <span title="java.lang.String(&quot; with &quot;)" class="string">&quot; with &quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#391232" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">that</a> <span title="(x$1: Any)java.lang.String">+</span> <span title="java.lang.String(&quot;, thr=&quot;)" class="string">&quot;, thr=&quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#391232" title="Tasks.this.Task[R,Tp] @scala.annotation.unchecked.uncheckedVariance">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(that: Tasks.this.Task[_, _])Unit" id="238615">mergeThrowables</a><span class="delimiter">(</span><a title="Tasks.this.Task[_, _]" id="360783">that</a>: <a href="#238459" title="Tasks.this.Task[_, _]">Task</a><span class="delimiter">[</span>_, _<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span> <a href="../../Boolean.scala.html#55580" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#360783" title="Tasks.this.Task[_, _]">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// merge exceptions, since there were multiple exceptions</span>
+        <a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="(x$1: Throwable)Unit">throwable</a> = <a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="package.scala.html#47472" title="implicit scala.collection.parallel.package.throwable2ops : (self: Throwable)java.lang.Object with scala.collection.parallel.package#ThrowableOps">throwable</a> <a href="package.scala.html#65184" title="(that: Throwable)Throwable">alongWith</a> <a href="#360783" title="Tasks.this.Task[_, _]">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a>
+      <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#360783" title="Tasks.this.Task[_, _]">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="(x$1: Throwable)Unit">throwable</a> = <a href="#360783" title="Tasks.this.Task[_, _]">that</a>.<a href="#238609" title="=&gt; Throwable">throwable</a>
+      <span class="keyword">else</span> <a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="(x$1: Throwable)Unit">throwable</a> = <a href="#238459" title="Task.this.type" class="keyword">this</a>.<a href="#238609" title="=&gt; Throwable">throwable</a>
+    <span class="delimiter">}</span>
+
+    <span class="comment">// override in concrete task implementations to signal abort to other tasks</span>
+    <span class="keyword">private</span><span class="delimiter">[</span>parallel<span class="delimiter">]</span> <span class="keyword">def</span> <a title="()Unit" id="238616">signalAbort</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span><span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">trait</span> <a title="trait TaskImpl[R, +Tp] extends java.lang.Object with ScalaObject" id="238462">TaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="238463">R</a>, +<a title="&gt;: Nothing &lt;: Any" id="238464">Tp</a><span class="delimiter">]</span> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+    <span class="comment">/** the body of this task - what it executes, how it gets split and how results are merged. */</span>
+    <span class="keyword">val</span> <a title="=&gt; Tasks.this.Task[R,Tp]" id="391281">body</a>: <a href="#238459" title="Tasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="=&gt; Seq[Tasks.this.TaskImpl[R,Tp]]" id="391282">split</a>: <a href="../Seq.scala.html#8648" title="Seq[Tasks.this.TaskImpl[R,Tp]]">Seq</a><span class="delimiter">[</span>TaskImpl<span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">]</span>
+    <span class="comment">/** Code that gets called after the task gets started - it may spawn other tasks instead of calling `leaf`. */</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391283">compute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="comment">/** Start task. */</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391284">start</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="comment">/** Wait for task to finish. */</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391285">sync</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="comment">/** Try to cancel the task.
+     *  @return     `true` if cancellation is successful.
+     */</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="391286">tryCancel</a>: <a href="../../Boolean.scala.html#65" title="Boolean">Boolean</a>
+    <span class="comment">/** If the task has been cancelled successfully, those syncing on it may
+     *  automatically be notified, depending on the implementation. If they
+     *  aren't, this release method should be called after processing the
+     *  cancelled task.
+     *
+     *  This method may be overridden.
+     */</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391287">release</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span><span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="[R, Tp](b: Tasks.this.Task[R,Tp])Tasks.this.TaskImpl[R,Tp]" id="238465">newTaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="238468">R</a>, <a title="&gt;: Nothing &lt;: Any" id="238469">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Tasks.this.Task[R,Tp]" id="391298">b</a>: <a href="#238459" title="Tasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#238462" title="Tasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span>
+
+  <span class="comment">/* task control */</span>
+
+  <span class="comment">// safe to assume it will always have the same type,</span>
+  <span class="comment">// because the `tasksupport` in parallel iterable is final</span>
+  <span class="keyword">var</span> <a title="=&gt; AnyRef" id="238471">environment</a>: <span title="AnyRef">AnyRef</span>
+
+  <span class="comment">/** Executes a task and returns a future. Forwards an exception if some task threw it. */</span>
+  <span class="keyword">def</span> <a title="[R, Tp](fjtask: Tasks.this.Task[R,Tp])() =&gt; R" id="238472">execute</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="238475">R</a>, <a title="&gt;: Nothing &lt;: Any" id="238476">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Tasks.this.Task[R,Tp]" id="238782">fjtask</a>: <a href="#238459" title="Tasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; R
+
+  <span class="comment">/** Executes a result task, waits for it to finish, then returns its result. Forwards an exception if some task threw it. */</span>
+  <span class="keyword">def</span> <a title="[R, Tp](task: Tasks.this.Task[R,Tp])R" id="238477">executeAndWaitResult</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="238480">R</a>, <a title="&gt;: Nothing &lt;: Any" id="238481">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Tasks.this.Task[R,Tp]" id="238691">task</a>: <a href="#238459" title="Tasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#238480" title="R">R</a>
+
+  <span class="comment">/** Retrieves the parallelism level of the task execution environment. */</span>
+  <span class="keyword">def</span> <a title="=&gt; Int" id="238482">parallelismLevel</a>: <a href="../../Int.scala.html#386" title="Int">Int</a>
+
+<span class="delimiter">}</span>
+
+
+
+<span class="comment">/** This trait implements scheduling by employing
+ *  an adaptive work stealing technique.
+ */</span>
+<span class="keyword">trait</span> <a title="trait AdaptiveWorkStealingTasks extends java.lang.Object with scala.collection.parallel.Tasks with ScalaObject" id="15951">AdaptiveWorkStealingTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <a href="#16929" title="scala.collection.parallel.Tasks">Tasks</a> <span class="delimiter">{</span>
+
+  <span class="keyword">trait</span> <a title="trait TaskImpl[R, Tp] extends java.lang.Object with AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp] with ScalaObject" id="391104">TaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391105">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391106">Tp</a><span class="delimiter">]</span> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <span class="keyword">super</span>.<a href="#238462" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="delimiter">{</span>
+    @volatile <span class="keyword">var</span> <a title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391306">next</a>: <a href="#391104" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> = <span title="Null(null)" class="keyword">null</span>
+    @volatile <span class="keyword">var</span> <a title="Boolean" id="391309">shouldWaitFor</a> = <span title="Boolean(true)" class="keyword">true</span>
+
+    <span class="keyword">def</span> <a title="=&gt; Seq[AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]]" id="391311">split</a>: <a href="../Seq.scala.html#8648" title="Seq[AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]]">Seq</a><span class="delimiter">[</span>TaskImpl<span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="()Unit" id="391312">compute</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238605" title="=&gt; Boolean">shouldSplitFurther</a><span class="delimiter">)</span> <a href="#391313" title="()Unit">internal</a> <span class="keyword">else</span> <a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238612" title="(lastres: Option[R])Unit">tryLeaf</a><span class="delimiter">(</span><a href="../../Option.scala.html#1737" title="object None">None</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="()Unit" id="391313">internal</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <span class="keyword">var</span> <a title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391326">last</a> = <a href="#391314" title="()AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">spawnSubtasks</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+      <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238612" title="(lastres: Option[R])Unit">tryLeaf</a><span class="delimiter">(</span><a href="../../Option.scala.html#1737" title="object None">None</a><span class="delimiter">)</span>
+      <a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="(x$1: R)Unit">result</a> = <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a>
+      <a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238609" title="(x$1: Throwable)Unit">throwable</a> = <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238609" title="=&gt; Throwable">throwable</a>
+
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391306" title="=&gt; AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">next</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <a href="#391359" title="()Unit" class="delimiter">{</a>
+        <span class="comment">// val lastresult = Option(last.body.result)</span>
+        <span class="keyword">val</span> <a title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391365">beforelast</a> = <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>
+        <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a> = <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391306" title="=&gt; AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">next</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391286" title="=&gt; Boolean">tryCancel</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span class="comment">// println(&quot;Done with &quot; + beforelast.body + &quot;, next direct is &quot; + last.body)</span>
+          <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238612" title="(lastres: Option[R])Unit">tryLeaf</a><span class="delimiter">(</span><a href="../../Option.scala.html#57885" title="(x: R)Some[R]">Some</a><span class="delimiter">(</span><a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391287" title="()Unit">release</a>
+        <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+          <span class="comment">// println(&quot;Done with &quot; + beforelast.body + &quot;, next sync is &quot; + last.body)</span>
+          <a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391285" title="()Unit">sync</a>
+        <span class="delimiter">}</span>
+        <span class="comment">// println(&quot;Merging &quot; + body + &quot; with &quot; + last.body)</span>
+        <a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238613" title="(t: Tp)Unit">tryMerge</a><span class="delimiter">(</span><a href="#391326" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>.<a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238601" title="=&gt; Tp">repr</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="()AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391314">spawnSubtasks</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <span class="keyword">var</span> <a title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391329">last</a>: <a href="#391104" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> = <span title="Null(null)" class="keyword">null</span>
+      <span class="keyword">var</span> <a title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391330">head</a>: <a href="#391104" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> = <a href="#391104" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" class="keyword">this</a>
+      <a href="#391331" title="Unit" class="keyword">do</a> <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="Seq[AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]]" id="391332">subtasks</a> = <a href="#391330" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">head</a>.<a href="#391311" title="=&gt; Seq[AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]]">split</a>
+        <a href="#391330" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">head</a> = <a href="#391332" title="Seq[AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]]">subtasks</a>.<a href="../IterableLike.scala.html#53870" title="=&gt; AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">head</a>
+        <span class="keyword">for</span> <span class="delimiter">(</span><a title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391355">t</a> &lt;- <a href="#391332" title="Seq[AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]]">subtasks</a>.<a href="../TraversableLike.scala.html#49082" title="=&gt; Seq[AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]]">tail</a>.<a href="../IterableLike.scala.html#53856" title="(f: AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp] =&gt; Unit)Unit">reverse</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#391355" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391306" title="(x$1: AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp])Unit">next</a> = <a href="#391329" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>
+          <a href="#391329" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a> = <a href="#391355" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">t</a>
+          <a href="#391355" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391284" title="()Unit">start</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span> <span class="keyword">while</span> <span class="delimiter">(</span><a href="#391330" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">head</a>.<a href="#391281" title="=&gt; AdaptiveWorkStealingTasks.this.Task[R,Tp]">body</a>.<a href="#238605" title="=&gt; Boolean">shouldSplitFurther</a><span class="delimiter">)</span>;
+      <a href="#391330" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">head</a>.<a href="#391306" title="(x$1: AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp])Unit">next</a> = <a href="#391329" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">last</a>
+      <a href="#391330" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">head</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="()Unit" id="391315">printChain</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <span class="keyword">var</span> <a title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391373">curr</a> = <a href="#391104" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" class="keyword">this</a>
+      <span class="keyword">var</span> <a title="java.lang.String" id="391374">chain</a> = <span title="java.lang.String(&quot;chain: &quot;)" class="string">&quot;chain: &quot;</span>
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#391373" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">curr</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <a href="#391375" title="()Unit" class="delimiter">{</a>
+        <a href="#391374" title="java.lang.String">chain</a> <span title="(x$1: Any)java.lang.String">+=</span> <a href="../../Predef.scala.html#9681" title="implicit scala.Predef.any2stringadd : (x: Any)scala.runtime.StringAdd">curr</a> <a href="../../runtime/StringAdd.scala.html#58450" title="(other: String)java.lang.String">+</a> <span title="java.lang.String(&quot; ---&gt; &quot;)" class="string">&quot; ---&gt; &quot;</span>
+        <a href="#391373" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">curr</a> = <a href="#391373" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">curr</a>.<a href="#391306" title="=&gt; AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">next</a>
+      <span class="delimiter">}</span>
+      <a href="../../Predef.scala.html#9594" title="(x: Any)Unit">println</a><span class="delimiter">(</span><a href="#391374" title="java.lang.String">chain</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">// specialize ctor</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="[R, Tp](b: AdaptiveWorkStealingTasks.this.Task[R,Tp])AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]" id="391107">newTaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391110">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391111">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="AdaptiveWorkStealingTasks.this.Task[R,Tp]" id="391387">b</a>: <a href="#238459" title="AdaptiveWorkStealingTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391104" title="AdaptiveWorkStealingTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span>
+
+<span class="delimiter">}</span>
+
+
+<span class="comment">/** An implementation of tasks objects based on the Java thread pooling API. */</span>
+<span class="keyword">trait</span> <a title="trait ThreadPoolTasks extends java.lang.Object with scala.collection.parallel.Tasks with ScalaObject" id="16803">ThreadPoolTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <a href="#16929" title="scala.collection.parallel.Tasks">Tasks</a> <span class="delimiter">{</span>
+  <span class="keyword">import</span> java.util.concurrent._
+
+  <span class="keyword">trait</span> <a title="trait TaskImpl[R, +Tp] extends java.lang.Object with java.lang.Runnable with ThreadPoolTasks.this.TaskImpl[R,Tp] with ScalaObject" id="391116">TaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391117">R</a>, +<a title="&gt;: Nothing &lt;: Any" id="391118">Tp</a><span class="delimiter">]</span> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <span title="java.lang.Runnable">Runnable</span> <span class="keyword">with</span> <span class="keyword">super</span>.<a href="#238462" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="comment">// initially, this is null</span>
+    <span class="comment">// once the task is started, this future is set and used for `sync`</span>
+    <span class="comment">// utb: var future: Future[_] = null</span>
+    @volatile <span class="keyword">var</span> <a title="Boolean" id="391400">owned</a> = <span title="Boolean(false)" class="keyword">false</span>
+    @volatile <span class="keyword">var</span> <a title="Boolean" id="391403">completed</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+    <span class="keyword">def</span> <a title="()Unit" id="391405">start</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#391116" title="(x$1: java.util.concurrent.Future[?0])java.util.concurrent.Future[?0]">synchronized</a> <span title="Unit" class="delimiter">{</span>
+      <span class="comment">// debuglog(&quot;Starting &quot; + body)</span>
+      <span class="comment">// utb: future = executor.submit(this)</span>
+      <a href="#391127" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="(x$1: java.util.concurrent.Future[?0])java.util.concurrent.Future[?0]">synchronized</span> <span class="delimiter">{</span>
+        <a href="#391132" title="()Unit">incrTasks</a>
+        <a href="#391127" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="(x$1: java.lang.Runnable)java.util.concurrent.Future[_]">submit</span><span class="delimiter">(</span><a href="#391116" title="ThreadPoolTasks.this.TaskImpl[R,Tp]" class="keyword">this</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391406">sync</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#391116" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+      <span class="comment">// debuglog(&quot;Syncing on &quot; + body)</span>
+      <span class="comment">// utb: future.get()</span>
+      <a href="#391127" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="(x$1: Unit)Unit">synchronized</span> <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="Int" id="391457">coresize</a> = <a href="#391127" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="()Int">getCorePoolSize</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#391457" title="Int">coresize</a> <a href="../../Int.scala.html#54761" title="(x: Int)Boolean">&lt;</a> <a href="#391130" title="=&gt; Int">totaltasks</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#391127" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="(x$1: Int)Unit">setCorePoolSize</span><span class="delimiter">(</span><a href="#391457" title="Int">coresize</a> <a href="../../Int.scala.html#54804" title="(x: Int)Int">+</a> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+          <span class="comment">//assert(executor.getCorePoolSize == (coresize + 1))</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#391403" title="=&gt; Boolean">completed</a><span class="delimiter">)</span> <a href="#391116" title="TaskImpl.this.type" class="keyword">this</a>.<span title="()Unit">wait</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="391407">tryCancel</a> = <a href="#391116" title="(x$1: Boolean)Boolean">synchronized</a> <span class="delimiter">{</span>
+      <span class="comment">// utb: future.cancel(false)</span>
+      <span title="Boolean" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#391400" title="=&gt; Boolean">owned</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// debuglog(&quot;Cancelling &quot; + body)</span>
+        <a href="#391400" title="(x$1: Boolean)Unit">owned</a> = <span title="Boolean(true)" class="keyword">true</span>
+        <span title="Boolean(true)" class="keyword">true</span>
+      <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Boolean(false)" class="keyword">false</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391408">run</a> = <span class="delimiter">{</span>
+      <span class="comment">// utb: compute</span>
+      <span class="keyword">var</span> <a title="Boolean" id="391479">isOkToRun</a> = <span title="Boolean(false)" class="keyword">false</span>
+      <a href="#391116" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#391400" title="=&gt; Boolean">owned</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#391400" title="(x$1: Boolean)Unit">owned</a> = <span title="Boolean(true)" class="keyword">true</span>
+          <a href="#391479" title="Boolean">isOkToRun</a> = <span title="Boolean(true)" class="keyword">true</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#391479" title="Boolean">isOkToRun</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// debuglog(&quot;Running body of &quot; + body)</span>
+        <a href="#391283" title="()Unit">compute</a>
+        <a href="#391409" title="()Unit">release</a>
+      <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Unit" class="delimiter">{</span>
+        <span class="comment">// just skip</span>
+        <span class="comment">// debuglog(&quot;skipping body of &quot; + body)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="391409">release</a> = <a href="#391116" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+      <a href="#391403" title="(x$1: Boolean)Unit">completed</a> = <span title="Boolean(true)" class="keyword">true</span>
+      <a href="#391127" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="(x$1: Unit)Unit">synchronized</span> <span class="delimiter">{</span>
+        <a href="#391133" title="()Unit">decrTasks</a>
+      <span class="delimiter">}</span>
+      <a href="#391116" title="TaskImpl.this.type" class="keyword">this</a>.<span title="()Unit">notifyAll</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="[R, Tp](b: ThreadPoolTasks.this.Task[R,Tp])ThreadPoolTasks.this.TaskImpl[R,Tp]" id="391119">newTaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391122">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391123">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="ThreadPoolTasks.this.Task[R,Tp]" id="391501">b</a>: <a href="#238459" title="ThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391116" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span>
+
+  <span class="keyword">var</span> <a title="AnyRef" id="391125">environment</a>: <span title="AnyRef">AnyRef</span> = <a href="#16804" title="object scala.collection.parallel.ThreadPoolTasks">ThreadPoolTasks</a>.<a href="#391513" title="=&gt; java.util.concurrent.ThreadPoolExecutor">defaultThreadPool</a>
+  <span class="keyword">def</span> <a title="=&gt; java.util.concurrent.ThreadPoolExecutor" id="391127">executor</a> = <a href="#391125" title="=&gt; AnyRef">environment</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="java.util.concurrent.ThreadPoolExecutor" class="delimiter">[</span><span title="java.util.concurrent.ThreadPoolExecutor">ThreadPoolExecutor</span><span class="delimiter">]</span>
+  <span class="keyword">def</span> <a title="=&gt; java.util.concurrent.LinkedBlockingQueue[java.lang.Runnable]" id="391128">queue</a> = <a href="#391127" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="()java.util.concurrent.BlockingQueue[java.lang.Runnable]">getQueue</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="java.util.concurrent.LinkedBlockingQueue[java.lang.Runnable]" class="delimiter">[</span><span title="java.util.concurrent.LinkedBlockingQueue[java.lang.Runnable]">LinkedBlockingQueue</span><span class="delimiter">[</span>Runnable<span class="delimiter">]</span><span class="delimiter">]</span>
+  @volatile <span class="keyword">var</span> <a title="Int" id="391130">totaltasks</a> = <span title="Int(0)" class="int">0</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="391132">incrTasks</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#16803" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <a href="#391130" title="(x$1: Int)Unit">totaltasks</a> <a href="../../Int.scala.html#54804" title="(x: Int)Int">+=</a> <span title="Int(1)" class="int">1</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="391133">decrTasks</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#16803" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <a href="#391130" title="(x$1: Int)Unit">totaltasks</a> <a href="../../Int.scala.html#54811" title="(x: Int)Int">-=</a> <span title="Int(1)" class="int">1</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[R, Tp](task: ThreadPoolTasks.this.Task[R,Tp])() =&gt; R" id="391134">execute</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391137">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391138">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="ThreadPoolTasks.this.Task[R,Tp]" id="391651">task</a>: <a href="#238459" title="ThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; R = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="ThreadPoolTasks.this.TaskImpl[R,Tp]" id="391657">t</a> = <a href="#391119" title="(b: ThreadPoolTasks.this.Task[R,Tp])ThreadPoolTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#391651" title="ThreadPoolTasks.this.Task[R,Tp]">task</a><span class="delimiter">)</span>
+
+    <span class="comment">// debuglog(&quot;-----------&gt; Executing without wait: &quot; + task)</span>
+    <a href="#391657" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391405" title="()Unit">start</a>
+
+    <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <span class="delimiter">{</span>
+      <a href="#391657" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391406" title="()Unit">sync</a>
+      <a href="#391657" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; ThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238611" title="()Unit">forwardThrowable</a>
+      <a href="#391657" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; ThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[R, Tp](task: ThreadPoolTasks.this.Task[R,Tp])R" id="391139">executeAndWaitResult</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391142">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391143">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="ThreadPoolTasks.this.Task[R,Tp]" id="391664">task</a>: <a href="#238459" title="ThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391142" title="R">R</a> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="ThreadPoolTasks.this.TaskImpl[R,Tp]" id="391670">t</a> = <a href="#391119" title="(b: ThreadPoolTasks.this.Task[R,Tp])ThreadPoolTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#391664" title="ThreadPoolTasks.this.Task[R,Tp]">task</a><span class="delimiter">)</span>
+
+    <span class="comment">// debuglog(&quot;-----------&gt; Executing with wait: &quot; + task)</span>
+    <a href="#391670" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391405" title="()Unit">start</a>
+
+    <a href="#391670" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391406" title="()Unit">sync</a>
+    <a href="#391670" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; ThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238611" title="()Unit">forwardThrowable</a>
+    <a href="#391670" title="ThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; ThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; Int" id="391144">parallelismLevel</a> = <a href="#16804" title="object scala.collection.parallel.ThreadPoolTasks">ThreadPoolTasks</a>.<a href="#391509" title="=&gt; Int">numCores</a>
+
+<span class="delimiter">}</span>
+
+<span class="keyword">object</span> <a title="object scala.collection.parallel.ThreadPoolTasks" id="16804">ThreadPoolTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+  <span class="keyword">import</span> java.util.concurrent._
+
+  <span class="keyword">val</span> <a title="Int" id="391509">numCores</a> = <span title="object java.lang.Runtime">Runtime</span>.<span title="()java.lang.Runtime">getRuntime</span>.<span title="()Int">availableProcessors</span>
+
+  <span class="keyword">val</span> <a title="java.util.concurrent.atomic.AtomicLong" id="391511">tcount</a> = <span title="java.util.concurrent.atomic.AtomicLong" class="keyword">new</span> atomic.<span title="java.util.concurrent.atomic.AtomicLong">AtomicLong</span><span class="delimiter">(</span><span title="Long(0L)" class="long">0L</span><span class="delimiter">)</span>
+
+  <span class="keyword">val</span> <a title="java.util.concurrent.ThreadPoolExecutor" id="391513">defaultThreadPool</a> = <span title="(x$1: Int, x$2: Int, x$3: Long, x$4: java.util.concurrent.TimeUnit, x$5: java.util.concurrent.BlockingQueue[java.lang.Runnable], x$6: java.util.concurrent.ThreadFactory, x$7: java.util.concurrent.RejectedExecutionHandler)java.util.concurrent.ThreadPoolExecutor" class="keyword">new</span> <span title="java.util.concurrent.ThreadPoolExecutor">ThreadPoolExecutor</span><span class="delimiter">(</span>
+    <a href="#391509" title="=&gt; Int">numCores</a>,
+    Int.<span title="Int(2147483647)">MaxValue</span>,
+    <span title="Long(60L)" class="long">60L</span>, TimeUnit.<span title="java.util.concurrent.TimeUnit(value MILLISECONDS)">MILLISECONDS</span>,
+    <span title="java.util.concurrent.LinkedBlockingQueue[java.lang.Runnable]" class="keyword">new</span> <span title="java.util.concurrent.LinkedBlockingQueue[java.lang.Runnable]">LinkedBlockingQueue</span><span class="delimiter">[</span>Runnable<span class="delimiter">]</span>,
+    <a href="#391600" title="java.lang.Object with java.util.concurrent.ThreadFactory" class="keyword">new</a> <a title="anonymous class $anon extends java.lang.Object with java.util.concurrent.ThreadFactory" id="391600">ThreadFactory</a> <span class="delimiter">{</span>
+      <span class="keyword">def</span> <a title="(r: java.lang.Runnable)java.lang.Thread" id="391604">newThread</a><span class="delimiter">(</span><a title="java.lang.Runnable" id="391605">r</a>: <span title="java.lang.Runnable">Runnable</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="java.lang.Thread" id="391608">t</a> = <span title="(x$1: java.lang.Runnable)java.lang.Thread" class="keyword">new</span> <span title="java.lang.Thread">Thread</span><span class="delimiter">(</span><a href="#391605" title="java.lang.Runnable">r</a><span class="delimiter">)</span>
+        <a href="#391608" title="java.lang.Thread">t</a>.<span title="(x$1: java.lang.String)Unit">setName</span><span class="delimiter">(</span><span title="java.lang.String(&quot;pc-thread-&quot;)" class="string">&quot;pc-thread-&quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#391511" title="=&gt; java.util.concurrent.atomic.AtomicLong">tcount</a>.<span title="()Long">incrementAndGet</span><span class="delimiter">)</span>
+        <a href="#391608" title="java.lang.Thread">t</a>.<span title="(x$1: Boolean)Unit">setDaemon</span><span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+        <a href="#391608" title="java.lang.Thread">t</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>,
+    <span title="java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy" class="keyword">new</span> <span title="object java.util.concurrent.ThreadPoolExecutor">ThreadPoolExecutor</span>.<span title="java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy">CallerRunsPolicy</span>
+  <span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+
+<span class="comment">/** An implementation of tasks objects based on the Java thread pooling API and synchronization using futures. */</span>
+<span class="keyword">trait</span> <a title="trait FutureThreadPoolTasks extends java.lang.Object with scala.collection.parallel.Tasks with ScalaObject" id="16143">FutureThreadPoolTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <a href="#16929" title="scala.collection.parallel.Tasks">Tasks</a> <span class="delimiter">{</span>
+  <span class="keyword">import</span> java.util.concurrent._
+
+  <span class="keyword">trait</span> <a title="trait TaskImpl[R, +Tp] extends java.lang.Object with java.lang.Runnable with FutureThreadPoolTasks.this.TaskImpl[R,Tp] with ScalaObject" id="391682">TaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391683">R</a>, +<a title="&gt;: Nothing &lt;: Any" id="391684">Tp</a><span class="delimiter">]</span> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <span title="java.lang.Runnable">Runnable</span> <span class="keyword">with</span> <span class="keyword">super</span>.<a href="#238462" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="delimiter">{</span>
+    @volatile <span class="keyword">var</span> <a title="java.util.concurrent.Future[_]" id="391711">future</a>: <span title="java.util.concurrent.Future[_]">Future</span><span class="delimiter">[</span>_<span class="delimiter">]</span> = <span title="Null(null)" class="keyword">null</span>
+
+    <span class="keyword">def</span> <a title="()Unit" id="391713">start</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <a href="#391693" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="(x$1: Unit)Unit">synchronized</span> <span class="delimiter">{</span>
+        <a href="#391711" title="(x$1: java.util.concurrent.Future[_])Unit">future</a> = <a href="#391693" title="=&gt; java.util.concurrent.ThreadPoolExecutor">executor</a>.<span title="(x$1: java.lang.Runnable)java.util.concurrent.Future[_]">submit</span><span class="delimiter">(</span><a href="#391682" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]" class="keyword">this</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391714">sync</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#391711" title="=&gt; java.util.concurrent.Future[_]">future</a>.<span title="()_$3">get</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="391715">tryCancel</a> = <span title="Boolean(false)" class="keyword">false</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391716">run</a> = <span class="delimiter">{</span>
+      <a href="#391283" title="()Unit">compute</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="[R, Tp](b: FutureThreadPoolTasks.this.Task[R,Tp])FutureThreadPoolTasks.this.TaskImpl[R,Tp]" id="391685">newTaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391688">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391689">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="FutureThreadPoolTasks.this.Task[R,Tp]" id="391774">b</a>: <a href="#238459" title="FutureThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391682" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span>
+
+  <span class="keyword">var</span> <a title="AnyRef" id="391691">environment</a>: <span title="AnyRef">AnyRef</span> = <a href="#16144" title="object scala.collection.parallel.FutureThreadPoolTasks">FutureThreadPoolTasks</a>.<a href="#391786" title="=&gt; java.util.concurrent.ExecutorService">defaultThreadPool</a>
+  <span class="keyword">def</span> <a title="=&gt; java.util.concurrent.ThreadPoolExecutor" id="391693">executor</a> = <a href="#391691" title="=&gt; AnyRef">environment</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="java.util.concurrent.ThreadPoolExecutor" class="delimiter">[</span><span title="java.util.concurrent.ThreadPoolExecutor">ThreadPoolExecutor</span><span class="delimiter">]</span>
+
+  <span class="keyword">def</span> <a title="[R, Tp](task: FutureThreadPoolTasks.this.Task[R,Tp])() =&gt; R" id="391694">execute</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391697">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391698">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="FutureThreadPoolTasks.this.Task[R,Tp]" id="391872">task</a>: <a href="#238459" title="FutureThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; R = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]" id="391878">t</a> = <a href="#391685" title="(b: FutureThreadPoolTasks.this.Task[R,Tp])FutureThreadPoolTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#391872" title="FutureThreadPoolTasks.this.Task[R,Tp]">task</a><span class="delimiter">)</span>
+
+    <span class="comment">// debuglog(&quot;-----------&gt; Executing without wait: &quot; + task)</span>
+    <a href="#391878" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391713" title="()Unit">start</a>
+
+    <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <span class="delimiter">{</span>
+      <a href="#391878" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391714" title="()Unit">sync</a>
+      <a href="#391878" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; FutureThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238611" title="()Unit">forwardThrowable</a>
+      <a href="#391878" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; FutureThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[R, Tp](task: FutureThreadPoolTasks.this.Task[R,Tp])R" id="391699">executeAndWaitResult</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391702">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391703">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="FutureThreadPoolTasks.this.Task[R,Tp]" id="391885">task</a>: <a href="#238459" title="FutureThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391702" title="R">R</a> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]" id="391891">t</a> = <a href="#391685" title="(b: FutureThreadPoolTasks.this.Task[R,Tp])FutureThreadPoolTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#391885" title="FutureThreadPoolTasks.this.Task[R,Tp]">task</a><span class="delimiter">)</span>
+
+    <span class="comment">// debuglog(&quot;-----------&gt; Executing with wait: &quot; + task)</span>
+    <a href="#391891" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391713" title="()Unit">start</a>
+
+    <a href="#391891" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391714" title="()Unit">sync</a>
+    <a href="#391891" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; FutureThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238611" title="()Unit">forwardThrowable</a>
+    <a href="#391891" title="FutureThreadPoolTasks.this.TaskImpl[R,Tp]">t</a>.<a href="#391281" title="=&gt; FutureThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; Int" id="391704">parallelismLevel</a> = <a href="#16144" title="object scala.collection.parallel.FutureThreadPoolTasks">FutureThreadPoolTasks</a>.<a href="#391782" title="=&gt; Int">numCores</a>
+
+<span class="delimiter">}</span>
+
+<span class="keyword">object</span> <a title="object scala.collection.parallel.FutureThreadPoolTasks" id="16144">FutureThreadPoolTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+  <span class="keyword">import</span> java.util.concurrent._
+
+  <span class="keyword">val</span> <a title="Int" id="391782">numCores</a> = <span title="object java.lang.Runtime">Runtime</span>.<span title="()java.lang.Runtime">getRuntime</span>.<span title="()Int">availableProcessors</span>
+
+  <span class="keyword">val</span> <a title="java.util.concurrent.atomic.AtomicLong" id="391784">tcount</a> = <span title="java.util.concurrent.atomic.AtomicLong" class="keyword">new</span> atomic.<span title="java.util.concurrent.atomic.AtomicLong">AtomicLong</span><span class="delimiter">(</span><span title="Long(0L)" class="long">0L</span><span class="delimiter">)</span>
+
+  <span class="keyword">val</span> <a title="java.util.concurrent.ExecutorService" id="391786">defaultThreadPool</a> = <span title="object java.util.concurrent.Executors">Executors</span>.<span title="()java.util.concurrent.ExecutorService">newCachedThreadPool</span><span class="delimiter">(</span><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+
+
+<span class="comment">/**
+ * A trait describing objects that provide a fork/join pool.
+ */</span>
+<span class="keyword">trait</span> <a title="trait HavingForkJoinPool extends java.lang.Object" id="15948">HavingForkJoinPool</a> <span title="java.lang.Object" class="delimiter">{</span>
+  <span class="keyword">def</span> <a title="=&gt; scala.concurrent.forkjoin.ForkJoinPool" id="391102">forkJoinPool</a>: <span title="scala.concurrent.forkjoin.ForkJoinPool">ForkJoinPool</span>
+<span class="delimiter">}</span>
+
+
+<span class="comment">/** An implementation trait for parallel tasks based on the fork/join framework.
+ *
+ *  @define fjdispatch
+ *  If the current thread is a fork/join worker thread, the task's `fork` method will
+ *  be invoked. Otherwise, the task will be executed on the fork/join pool.
+ */</span>
+<span class="keyword">trait</span> <a title="trait ForkJoinTasks extends java.lang.Object with scala.collection.parallel.Tasks with scala.collection.parallel.HavingForkJoinPool with ScalaObject" id="16467">ForkJoinTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <a href="#16929" title="scala.collection.parallel.Tasks">Tasks</a> <span class="keyword">with</span> <a href="#15948" title="scala.collection.parallel.HavingForkJoinPool">HavingForkJoinPool</a> <span class="delimiter">{</span>
+
+  <span class="keyword">trait</span> <a title="trait TaskImpl[R, +Tp] extends scala.concurrent.forkjoin.RecursiveAction with ForkJoinTasks.this.TaskImpl[R,Tp] with ScalaObject" id="391070">TaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391071">R</a>, +<a title="&gt;: Nothing &lt;: Any" id="391072">Tp</a><span class="delimiter">]</span> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <span title="scala.concurrent.forkjoin.RecursiveAction">RecursiveAction</span> <span class="keyword">with</span> <span class="keyword">super</span>.<a href="#238462" title="ForkJoinTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="()Unit" id="391909">start</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#391070" title="()Unit">fork</a>
+    <span class="keyword">def</span> <a title="()Unit" id="391910">sync</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#391070" title="()java.lang.Void">join</a>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="391911">tryCancel</a> = <a href="#391070" title="()Boolean">tryUnfork</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">// specialize ctor</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="[R, Tp](b: ForkJoinTasks.this.Task[R,Tp])ForkJoinTasks.this.TaskImpl[R,Tp]" id="391073">newTaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391076">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391077">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="ForkJoinTasks.this.Task[R,Tp]" id="391924">b</a>: <a href="#238459" title="ForkJoinTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391070" title="ForkJoinTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span>
+
+  <span class="comment">/** The fork/join pool of this collection.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; scala.concurrent.forkjoin.ForkJoinPool" id="391078">forkJoinPool</a>: <span title="scala.concurrent.forkjoin.ForkJoinPool">ForkJoinPool</span> = <a href="#391080" title="=&gt; AnyRef">environment</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.concurrent.forkjoin.ForkJoinPool" class="delimiter">[</span><span title="scala.concurrent.forkjoin.ForkJoinPool">ForkJoinPool</span><span class="delimiter">]</span>
+  <span class="keyword">var</span> <a title="AnyRef" id="391080">environment</a>: <span title="AnyRef">AnyRef</span> = <a href="#16468" title="object scala.collection.parallel.ForkJoinTasks">ForkJoinTasks</a>.<a href="#391933" title="=&gt; scala.concurrent.forkjoin.ForkJoinPool">defaultForkJoinPool</a>
+
+  <span class="comment">/** Executes a task and does not wait for it to finish - instead returns a future.
+   *
+   *  $fjdispatch
+   */</span>
+  <span class="keyword">def</span> <a title="[R, Tp](task: ForkJoinTasks.this.Task[R,Tp])() =&gt; R" id="391082">execute</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391085">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391086">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="ForkJoinTasks.this.Task[R,Tp]" id="391935">task</a>: <a href="#238459" title="ForkJoinTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; R = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="ForkJoinTasks.this.TaskImpl[R,Tp]" id="391941">fjtask</a> = <a href="#391073" title="(b: ForkJoinTasks.this.Task[R,Tp])ForkJoinTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#391935" title="ForkJoinTasks.this.Task[R,Tp]">task</a><span class="delimiter">)</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="object java.lang.Thread">Thread</span>.<span title="()java.lang.Thread">currentThread</span>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><span title="scala.concurrent.forkjoin.ForkJoinWorkerThread">ForkJoinWorkerThread</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#391941" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<span title="()Unit">fork</span>
+    <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+      <a href="#391078" title="=&gt; scala.concurrent.forkjoin.ForkJoinPool">forkJoinPool</a>.<span title="(x$1: scala.concurrent.forkjoin.ForkJoinTask[java.lang.Void])Unit">execute</span><span class="delimiter">(</span><a href="#391941" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <span class="delimiter">{</span>
+      <a href="#391941" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<a href="#391910" title="()Unit">sync</a>
+      <a href="#391941" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<a href="#391281" title="=&gt; ForkJoinTasks.this.Task[R,Tp]">body</a>.<a href="#238611" title="()Unit">forwardThrowable</a>
+      <a href="#391941" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<a href="#391281" title="=&gt; ForkJoinTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Executes a task on a fork/join pool and waits for it to finish.
+   *  Returns its result when it does.
+   *
+   *  $fjdispatch
+   *
+   *  @return    the result of the task
+   */</span>
+  <span class="keyword">def</span> <a title="[R, Tp](task: ForkJoinTasks.this.Task[R,Tp])R" id="391087">executeAndWaitResult</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391090">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391091">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="ForkJoinTasks.this.Task[R,Tp]" id="392029">task</a>: <a href="#238459" title="ForkJoinTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391090" title="R">R</a> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="ForkJoinTasks.this.TaskImpl[R,Tp]" id="392035">fjtask</a> = <a href="#391073" title="(b: ForkJoinTasks.this.Task[R,Tp])ForkJoinTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#392029" title="ForkJoinTasks.this.Task[R,Tp]">task</a><span class="delimiter">)</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="object java.lang.Thread">Thread</span>.<span title="()java.lang.Thread">currentThread</span>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><span title="scala.concurrent.forkjoin.ForkJoinWorkerThread">ForkJoinWorkerThread</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#392035" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<span title="()Unit">fork</span>
+    <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+      <a href="#391078" title="=&gt; scala.concurrent.forkjoin.ForkJoinPool">forkJoinPool</a>.<span title="(x$1: scala.concurrent.forkjoin.ForkJoinTask[java.lang.Void])Unit">execute</span><span class="delimiter">(</span><a href="#392035" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="#392035" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<a href="#391910" title="()Unit">sync</a>
+    <span class="comment">// if (fjtask.body.throwable != null) println(&quot;throwing: &quot; + fjtask.body.throwable + &quot; at &quot; + fjtask.body)</span>
+    <a href="#392035" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<a href="#391281" title="=&gt; ForkJoinTasks.this.Task[R,Tp]">body</a>.<a href="#238611" title="()Unit">forwardThrowable</a>
+    <a href="#392035" title="ForkJoinTasks.this.TaskImpl[R,Tp]">fjtask</a>.<a href="#391281" title="=&gt; ForkJoinTasks.this.Task[R,Tp]">body</a>.<a href="#238604" title="=&gt; R">result</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; Int" id="391092">parallelismLevel</a> = <a href="#391078" title="=&gt; scala.concurrent.forkjoin.ForkJoinPool">forkJoinPool</a>.<span title="()Int">getParallelism</span>
+
+<span class="delimiter">}</span>
+
+
+<span class="keyword">object</span> <a title="object scala.collection.parallel.ForkJoinTasks" id="16468">ForkJoinTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+  <span class="keyword">val</span> <a title="scala.concurrent.forkjoin.ForkJoinPool" id="391933">defaultForkJoinPool</a>: <span title="scala.concurrent.forkjoin.ForkJoinPool">ForkJoinPool</span> = <span title="scala.concurrent.forkjoin.ForkJoinPool" class="keyword">new</span> <span title="scala.concurrent.forkjoin.ForkJoinPool">ForkJoinPool</span><span class="delimiter">(</span><span class="delimiter">)</span> <span class="comment">// scala.parallel.forkjoinpool</span>
+  <span class="comment">// defaultForkJoinPool.setParallelism(Runtime.getRuntime.availableProcessors)</span>
+  <span class="comment">// defaultForkJoinPool.setMaximumPoolSize(Runtime.getRuntime.availableProcessors)</span>
+<span class="delimiter">}</span>
+
+
+<span class="comment">/* Some boilerplate due to no deep mixin composition. Not sure if it can be done differently without them.
+ */</span>
+<span class="keyword">trait</span> <a title="trait AdaptiveWorkStealingForkJoinTasks extends java.lang.Object with scala.collection.parallel.ForkJoinTasks with scala.collection.parallel.AdaptiveWorkStealingTasks with ScalaObject" id="15972">AdaptiveWorkStealingForkJoinTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <a href="#16467" title="scala.collection.parallel.ForkJoinTasks">ForkJoinTasks</a> <span class="keyword">with</span> <a href="#15951" title="scala.collection.parallel.AdaptiveWorkStealingTasks">AdaptiveWorkStealingTasks</a> <span class="delimiter">{</span>
+
+  <span class="keyword">class</span> <a title="class TaskImpl[R, Tp] extends scala.concurrent.forkjoin.RecursiveAction with AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp] with AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp] with ScalaObject" id="391094">TaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391095">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391096">Tp</a><span class="delimiter">]</span><a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">(</a><span class="keyword">val</span> <a title="AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]" id="392067">body</a>: <a href="#238459" title="AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <span class="keyword">super</span><span class="delimiter">[</span>ForkJoinTasks<span class="delimiter">]</span>.<a href="#391070" title="AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="keyword">with</span> <span class="keyword">super</span><span class="delimiter">[</span>AdaptiveWorkStealingTasks<span class="delimiter">]</span>.<a href="#391104" title="AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="=&gt; Seq[AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]]" id="392064">split</a> = <a href="#392067" title="=&gt; AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]">body</a>.<a href="#238606" title="=&gt; Seq[AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]]">split</a>.<a href="../TraversableLike.scala.html#49041" title="(f: AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp] =&gt; AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp])(implicit bf: scala.collection.generic.CanBuildFrom[Seq[AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]],AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp],Seq[AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]]])Seq[AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]]">map</a><a href="../Seq.scala.html#64333" title="scala.collection.generic.CanBuildFrom[scala.collection.Seq.Coll,AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp],Seq[AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]]]" class="delimiter">(</a><a title="AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]" id="392093">b</a> =&gt; <a href="#391097" title="(b: AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp])AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#392093" title="AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]">b</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[R, Tp](b: AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp])AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]" id="391097">newTaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391100">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391101">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]" id="392094">b</a>: <a href="#238459" title="AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span> = <span title="AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]" class="keyword">new</span> <a href="#391094" title="AdaptiveWorkStealingForkJoinTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">(</span><a href="#392094" title="AdaptiveWorkStealingForkJoinTasks.this.Task[R,Tp]">b</a><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+
+<span class="keyword">trait</span> <a title="trait AdaptiveWorkStealingThreadPoolTasks extends java.lang.Object with scala.collection.parallel.ThreadPoolTasks with scala.collection.parallel.AdaptiveWorkStealingTasks with ScalaObject" id="16209">AdaptiveWorkStealingThreadPoolTasks</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="keyword">extends</a> <a href="#16803" title="scala.collection.parallel.ThreadPoolTasks">ThreadPoolTasks</a> <span class="keyword">with</span> <a href="#15951" title="scala.collection.parallel.AdaptiveWorkStealingTasks">AdaptiveWorkStealingTasks</a> <span class="delimiter">{</span>
+
+  <span class="keyword">class</span> <a title="class TaskImpl[R, Tp] extends java.lang.Object with AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp] with AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp] with ScalaObject" id="391146">TaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391147">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391148">Tp</a><span class="delimiter">]</span><a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">(</a><span class="keyword">val</span> <a title="AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]" id="392153">body</a>: <a href="#238459" title="AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <span class="keyword">super</span><span class="delimiter">[</span>ThreadPoolTasks<span class="delimiter">]</span>.<a href="#391116" title="AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="keyword">with</span> <span class="keyword">super</span><span class="delimiter">[</span>AdaptiveWorkStealingTasks<span class="delimiter">]</span>.<a href="#391104" title="AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="=&gt; Seq[AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]]" id="392150">split</a> = <a href="#392153" title="=&gt; AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]">body</a>.<a href="#238606" title="=&gt; Seq[AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]]">split</a>.<a href="../TraversableLike.scala.html#49041" title="(f: AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp] =&gt; AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp])(implicit bf: scala.collection.generic.CanBuildFrom[Seq[AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]],AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp],Seq[AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]]])Seq[AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]]">map</a><a href="../Seq.scala.html#64333" title="scala.collection.generic.CanBuildFrom[scala.collection.Seq.Coll,AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp],Seq[AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]]]" class="delimiter">(</a><a title="AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]" id="392179">b</a> =&gt; <a href="#391149" title="(b: AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp])AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]">newTaskImpl</a><span class="delimiter">(</span><a href="#392179" title="AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]">b</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[R, Tp](b: AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp])AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]" id="391149">newTaskImpl</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="391152">R</a>, <a title="&gt;: Nothing &lt;: Any" id="391153">Tp</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]" id="392180">b</a>: <a href="#238459" title="AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]">Task</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">)</span> = <span title="AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]" class="keyword">new</span> <a href="#391146" title="AdaptiveWorkStealingThreadPoolTasks.this.TaskImpl[R,Tp]">TaskImpl</a><span class="delimiter">[</span>R, Tp<span class="delimiter">]</span><span class="delimiter">(</span><a href="#392180" title="AdaptiveWorkStealingThreadPoolTasks.this.Task[R,Tp]">b</a><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+
+
+
+
+
+
+
+
+        </pre>
+    </body>
+</html>

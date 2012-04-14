@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/actors/threadpool/ExecutorCompletionService.java</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*
+ * Written by Doug Lea with assistance from members of JCP JSR-166
+ * Expert Group and released to the public domain, as explained at
+ * http://creativecommons.org/licenses/publicdomain
+ */</span>
+
+<span class="keyword">package</span> scala.actors.threadpool;
+<span class="keyword">import</span> scala.actors.threadpool.*; <span class="comment">// for javadoc (till 6280605 is fixed)</span>
+
+<span class="comment">/**
+ * A {@link CompletionService} that uses a supplied {@link Executor}
+ * to execute tasks.  This class arranges that submitted tasks are,
+ * upon completion, placed on a queue accessible using &lt;tt&gt;take&lt;/tt&gt;.
+ * The class is lightweight enough to be suitable for transient use
+ * when processing groups of tasks.
+ *
+ * &lt;p&gt;
+ *
+ * &lt;b&gt;Usage Examples.&lt;/b&gt;
+ *
+ * Suppose you have a set of solvers for a certain problem, each
+ * returning a value of some type &lt;tt&gt;Result&lt;/tt&gt;, and would like to
+ * run them concurrently, processing the results of each of them that
+ * return a non-null value, in some method &lt;tt&gt;use(Result r)&lt;/tt&gt;. You
+ * could write this as:
+ *
+ * &lt;pre&gt;
+ *   void solve(Executor e,
+ *              Collection&amp;lt;Callable&amp;lt;Result&amp;gt;&amp;gt; solvers)
+ *     throws InterruptedException, ExecutionException {
+ *       CompletionService&amp;lt;Result&amp;gt; ecs
+ *           = new ExecutorCompletionService&amp;lt;Result&amp;gt;(e);
+ *       for (Callable&amp;lt;Result&amp;gt; s : solvers)
+ *           ecs.submit(s);
+ *       int n = solvers.size();
+ *       for (int i = 0; i &amp;lt; n; ++i) {
+ *           Result r = ecs.take().get();
+ *           if (r != null)
+ *               use(r);
+ *       }
+ *   }
+ * &lt;/pre&gt;
+ *
+ * Suppose instead that you would like to use the first non-null result
+ * of the set of tasks, ignoring any that encounter exceptions,
+ * and cancelling all other tasks when the first one is ready:
+ *
+ * &lt;pre&gt;
+ *   void solve(Executor e,
+ *              Collection&amp;lt;Callable&amp;lt;Result&amp;gt;&amp;gt; solvers)
+ *     throws InterruptedException {
+ *       CompletionService&amp;lt;Result&amp;gt; ecs
+ *           = new ExecutorCompletionService&amp;lt;Result&amp;gt;(e);
+ *       int n = solvers.size();
+ *       List&amp;lt;Future&amp;lt;Result&amp;gt;&amp;gt; futures
+ *           = new ArrayList&amp;lt;Future&amp;lt;Result&amp;gt;&amp;gt;(n);
+ *       Result result = null;
+ *       try {
+ *           for (Callable&amp;lt;Result&amp;gt; s : solvers)
+ *               futures.add(ecs.submit(s));
+ *           for (int i = 0; i &amp;lt; n; ++i) {
+ *               try {
+ *                   Result r = ecs.take().get();
+ *                   if (r != null) {
+ *                       result = r;
+ *                       break;
+ *                   }
+ *               } catch (ExecutionException ignore) {}
+ *           }
+ *       }
+ *       finally {
+ *           for (Future&amp;lt;Result&amp;gt; f : futures)
+ *               f.cancel(true);
+ *       }
+ *
+ *       if (result != null)
+ *           use(result);
+ *   }
+ * &lt;/pre&gt;
+ */</span>
+public <span class="keyword">class</span> <a title="object scala.actors.threadpool.ExecutorCompletionService" id="11836">ExecutorCompletionService</a> implements CompletionService <span class="delimiter">{</span>
+    <span class="keyword">private</span> <span class="keyword">final</span> Executor executor;
+    <span class="keyword">private</span> <span class="keyword">final</span> AbstractExecutorService aes;
+    <span class="keyword">private</span> <span class="keyword">final</span> BlockingQueue completionQueue;
+
+    <span class="comment">/**
+     * FutureTask extension to enqueue upon completion
+     */</span>
+    <span class="keyword">private</span> <span class="keyword">class</span> QueueingFuture <span class="keyword">extends</span> FutureTask <span class="delimiter">{</span>
+        QueueingFuture<span class="delimiter">(</span>RunnableFuture task<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">super</span><span class="delimiter">(</span>task, <span class="keyword">null</span><span class="delimiter">)</span>;
+            <span class="keyword">this</span>.task = task;
+        <span class="delimiter">}</span>
+        <span class="keyword">protected</span> void done<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> completionQueue.add<span class="delimiter">(</span>task<span class="delimiter">)</span>; <span class="delimiter">}</span>
+        <span class="keyword">private</span> <span class="keyword">final</span> Future task;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> RunnableFuture newTaskFor<span class="delimiter">(</span>Callable task<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>aes == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">new</span> FutureTask<span class="delimiter">(</span>task<span class="delimiter">)</span>;
+        <span class="keyword">else</span>
+            <span class="keyword">return</span> aes.newTaskFor<span class="delimiter">(</span>task<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> RunnableFuture newTaskFor<span class="delimiter">(</span>Runnable task, Object result<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>aes == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">return</span> <span class="keyword">new</span> FutureTask<span class="delimiter">(</span>task, result<span class="delimiter">)</span>;
+        <span class="keyword">else</span>
+            <span class="keyword">return</span> aes.newTaskFor<span class="delimiter">(</span>task, result<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Creates an ExecutorCompletionService using the supplied
+     * executor for base task execution and a
+     * {@link LinkedBlockingQueue} as a completion queue.
+     *
+     * @param executor the executor to use
+     * @throws NullPointerException if executor is &lt;tt&gt;null&lt;/tt&gt;
+     */</span>
+    public ExecutorCompletionService<span class="delimiter">(</span>Executor executor<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>executor == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">this</span>.executor = executor;
+        <span class="keyword">this</span>.aes = <span class="delimiter">(</span>executor instanceof AbstractExecutorService<span class="delimiter">)</span> ?
+            <span class="delimiter">(</span>AbstractExecutorService<span class="delimiter">)</span> executor : <span class="keyword">null</span>;
+        <span class="keyword">this</span>.completionQueue = <span class="keyword">new</span> LinkedBlockingQueue<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Creates an ExecutorCompletionService using the supplied
+     * executor for base task execution and the supplied queue as its
+     * completion queue.
+     *
+     * @param executor the executor to use
+     * @param completionQueue the queue to use as the completion queue
+     * normally one dedicated for use by this service. This queue is
+     * treated as unbounded -- failed attempted &lt;tt&gt;Queue.add&lt;/tt&gt;
+     * operations for completed taskes cause them not to be
+     * retrievable.
+     * @throws NullPointerException if executor or completionQueue are &lt;tt&gt;null&lt;/tt&gt;
+     */</span>
+    public ExecutorCompletionService<span class="delimiter">(</span>Executor executor,
+                                     BlockingQueue completionQueue<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>executor == <span class="keyword">null</span> || completionQueue == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">this</span>.executor = executor;
+        <span class="keyword">this</span>.aes = <span class="delimiter">(</span>executor instanceof AbstractExecutorService<span class="delimiter">)</span> ?
+            <span class="delimiter">(</span>AbstractExecutorService<span class="delimiter">)</span> executor : <span class="keyword">null</span>;
+        <span class="keyword">this</span>.completionQueue = completionQueue;
+    <span class="delimiter">}</span>
+
+    public Future submit<span class="delimiter">(</span>Callable task<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>task == <span class="keyword">null</span><span class="delimiter">)</span> <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        RunnableFuture f = newTaskFor<span class="delimiter">(</span>task<span class="delimiter">)</span>;
+        executor.execute<span class="delimiter">(</span><span class="keyword">new</span> QueueingFuture<span class="delimiter">(</span>f<span class="delimiter">)</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> f;
+    <span class="delimiter">}</span>
+
+    public Future submit<span class="delimiter">(</span>Runnable task, Object result<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>task == <span class="keyword">null</span><span class="delimiter">)</span> <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        RunnableFuture f = newTaskFor<span class="delimiter">(</span>task, result<span class="delimiter">)</span>;
+        executor.execute<span class="delimiter">(</span><span class="keyword">new</span> QueueingFuture<span class="delimiter">(</span>f<span class="delimiter">)</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> f;
+    <span class="delimiter">}</span>
+
+    public Future take<span class="delimiter">(</span><span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="delimiter">(</span>Future<span class="delimiter">)</span>completionQueue.take<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public Future poll<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="delimiter">(</span>Future<span class="delimiter">)</span>completionQueue.poll<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public Future poll<span class="delimiter">(</span>long timeout, TimeUnit unit<span class="delimiter">)</span> throws InterruptedException <span class="delimiter">{</span>
+        <span class="keyword">return</span> <span class="delimiter">(</span>Future<span class="delimiter">)</span>completionQueue.poll<span class="delimiter">(</span>timeout, unit<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

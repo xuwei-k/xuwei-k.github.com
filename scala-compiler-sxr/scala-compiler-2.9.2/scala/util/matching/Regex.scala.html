@@ -1,0 +1,619 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/util/matching/Regex.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2007-2011, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */</span>
+
+
+<span class="comment">/**
+ * This package is concerned with regular expression (regex) matching against strings,
+ * with the main goal of pulling out information from those matches, or replacing
+ * them with something else.
+ *
+ * There are four classes and three objects, with most of them being members of
+ * Regex companion object. [[scala.util.matching.Regex]] is the class users instantiate
+ * to do regular expression matching.
+ *
+ * The remaining classes and objects in the package are used in the following way:
+ *
+ * * The companion object to [[scala.util.matching.Regex]] just contains the other members.
+ * * [[scala.util.matching.Regex.Match]] makes more information about a match available.
+ * * [[scala.util.matching.Regex.MatchIterator]] is used to iterate over multiple matches.
+ * * [[scala.util.matching.Regex.MatchData]] is just a base trait for the above classes.
+ * * [[scala.util.matching.Regex.Groups]] extracts group from a [[scala.util.matching.Regex.Match]]
+ *   without recomputing the match.
+ * * [[scala.util.matching.Regex.Match]] converts a [[scala.util.matching.Regex.Match]]
+ *   into a [[java.lang.String]].
+ *
+ */</span>
+<span class="keyword">package</span> scala.util.matching
+
+<span class="keyword">import</span> java.util.regex.<span class="delimiter">{</span> Pattern, Matcher <span class="delimiter">}</span>
+
+<span class="comment">/** This class provides methods for creating and using regular expressions.
+ *  It is based on the regular expressions of the JDK since 1.4.
+ *
+ *  Its main goal is to extract strings that match a pattern, or the subgroups
+ *  that make it up. For that reason, it is usually used with for comprehensions
+ *  and matching (see methods for examples).
+ *
+ *  A Regex is created from a [[java.lang.String]] representation of the
+ *  regular expression pattern^1^. That pattern is compiled
+ *  during construction, so frequently used patterns should be declared outside
+ *  loops if performance is of concern. Possibly, they might be declared on a
+ *  companion object, so that they need only to be initialized once.
+ *
+ *  The canonical way of creating regex patterns is by using the method `r`, provided
+ *  on [[java.lang.String]] through an implicit conversion into
+ *  [[scala.collection.immutable.WrappedString]]. Using triple quotes to write these
+ *  strings avoids having to quote the backslash character (`\`).
+ *
+ *  Using the constructor directly, on the other hand, makes
+ *  it possible to declare names for subgroups in the pattern.
+ *
+ *  For example, both declarations below generate the same regex, but the second
+ *  one associate names with the subgroups.
+ *
+ *  {{{
+ *  val dateP1 = &quot;&quot;&quot;(\d\d\d\d)-(\d\d)-(\d\d)&quot;&quot;&quot;.r
+ *  val dateP2 = new scala.util.matching.Regex(&quot;&quot;&quot;(\d\d\d\d)-(\d\d)-(\d\d)&quot;&quot;&quot;, &quot;year&quot;, &quot;month&quot;, &quot;day&quot;)
+ *  }}}
+ *
+ *  There are two ways of using a `Regex` to find a pattern: calling methods on
+ *  Regex, such as `findFirstIn` or `findAllIn`, or using it as an extractor in a
+ *  pattern match.
+ *
+ *  Note, however, that when Regex is used as an extractor in a pattern match, it
+ *  only succeeds if the whole text can be matched. For this reason, one usually
+ *  calls a method to find the matching substrings, and then use it as an extractor
+ *  to break match into subgroups.
+ *
+ *  As an example, the above patterns can be used like this:
+ *
+ *  {{{
+ *  val dateP1(year, month, day) = &quot;2011-07-15&quot;
+ *
+ *  // val dateP1(year, month, day) = &quot;Date 2011-07-15&quot; // throws an exception at runtime
+ *
+ *  val copyright: String = dateP1 findFirstIn &quot;Date of this document: 2011-07-15&quot; match {
+ *    case Some(dateP1(year, month, day)) =&gt; &quot;Copyright &quot;+year
+ *    case None                           =&gt; &quot;No copyright&quot;
+ *  }
+ *
+ *  val copyright: Option[String] = for {
+ *    dateP1(year, month, day) &lt;- dateP1 findFirstIn &quot;Last modified 2011-07-15&quot;
+ *  } yield year
+
+ *  def getYears(text: String): Iterator[String] = for (dateP1(year, _, _) &lt;- dateP1 findAllIn text) yield year
+ *  def getFirstDay(text: String): Option[String] = for (m &lt;- dateP2 findFirstMatchIn text) yield m group &quot;day&quot;
+ *  }}}
+ *
+ *  Regex does not provide a method that returns a [[scala.Boolean]]. One can
+ *  use [[java.lang.String]] `matches` method, or, if `Regex` is preferred,
+ *  either ignore the return value or test the `Option` for emptyness. For example:
+ *
+ *  {{{
+ *  def hasDate(text: String): Boolean = (dateP1 findFirstIn text).nonEmpty
+ *  def printLinesWithDates(lines: Traversable[String]) {
+ *    lines foreach { line =&gt;
+ *      dateP1 findFirstIn line foreach { _ =&gt; println(line) }
+ *    }
+ *  }
+ *  }}}
+ *
+ *  There are also methods that can be used to replace the patterns
+ *  on a text. The substitutions can be simple replacements, or more
+ *  complex functions. For example:
+ *
+ *  {{{
+ *  val months = Map( 1 -&gt; &quot;Jan&quot;, 2 -&gt; &quot;Feb&quot;, 3 -&gt; &quot;Mar&quot;,
+ *                    4 -&gt; &quot;Apr&quot;, 5 -&gt; &quot;May&quot;, 6 -&gt; &quot;Jun&quot;,
+ *                    7 -&gt; &quot;Jul&quot;, 8 -&gt; &quot;Aug&quot;, 9 -&gt; &quot;Sep&quot;,
+ *                    10 -&gt; &quot;Oct&quot;, 11 -&gt; &quot;Nov&quot;, 12 -&gt; &quot;Dec&quot;)
+ *
+ *  import scala.util.matching.Regex.Match
+ *  def reformatDate(text: String) = dateP2 replaceAllIn ( text, (m: Match) =&gt;
+ *    &quot;%s %s, %s&quot; format (months(m group &quot;month&quot; toInt), m group &quot;day&quot;, m group &quot;year&quot;)
+ *  )
+ *  }}}
+ *
+ *  You can use special pattern syntax constructs like `(?idmsux-idmsux)`¹ to switch
+ *  various regex compilation options like `CASE_INSENSITIVE` or `UNICODE_CASE`.
+ *
+ *  @note ¹ A detailed description is available in [[java.util.regex.Pattern]].
+ *  @see [[java.util.regex.Pattern]]
+ *
+ *  @author  Thibaud Hottelier
+ *  @author  Philipp Haller
+ *  @author  Martin Odersky
+ *  @version 1.1, 29/01/2008
+ *
+ *  @param regex      A string representing a regular expression
+ *  @param groupNames A mapping from names to indices in capture groups
+ *
+ *  @define replacementString
+ *  In the replacement String, a dollar sign (`$`) followed by a number will be
+ *  interpreted as a reference to a group in the matched pattern, with numbers
+ *  1 through 9 corresponding to the first nine groups, and 0 standing for the
+ *  whole match. Any other character is an error. The backslash (`\`) character
+ *  will be interpreted as an escape character, and can be used to escape the
+ *  dollar sign. One can use [[scala.util.matching.Regex]]'s `quoteReplacement`
+ *  to automatically escape these characters.
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span>-<span class="long">2094783597747625537L</span><span class="delimiter">)</span>
+<span class="keyword">class</span> <a title="class Regex extends java.lang.Object with Serializable with ScalaObject" id="44629">Regex</a><a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">(</a><a title="String" id="232211">regex</a>: <span title="String">String</span>, <a title="String*" id="232212">groupNames</a>: <span title="String*">String</span>*<span class="delimiter">)</span> <span class="keyword">extends</span> <a href="../../Serializable.scala.html#902" title="Serializable">Serializable</a> <span class="delimiter">{</span>
+
+  <span class="keyword">import</span> <a href="#1021168" title="object scala.util.matching.Regex">Regex</a>._
+
+  <span class="comment">/** The compiled pattern */</span>
+  <span class="keyword">val</span> <a title="java.util.regex.Pattern" id="232197">pattern</a> = <span title="object java.util.regex.Pattern">Pattern</span>.<span title="(x$1: java.lang.String)java.util.regex.Pattern">compile</span><span class="delimiter">(</span><a href="#232211" title="String">regex</a><span class="delimiter">)</span>
+
+  <span class="comment">/** Tries to match target (whole match) and returns the matching subgroups.
+   *  if the pattern has no subgroups, then it returns an empty list on a
+   *  successful match.
+   *
+   *  Note, however, that if some subgroup has not been matched, a `null` will
+   *  be returned for that subgroup.
+   *
+   *  For example:
+   *
+   *  {{{
+   *  val p1 = &quot;ab*c&quot;.r
+   *  val p2 = &quot;a(b*)c&quot;.r
+   *
+   *  val p1Matches = &quot;abbbc&quot; match {
+   *    case p1() =&gt; true
+   *    case _    =&gt; false
+   *  }
+   *
+   *  val numberOfB = &quot;abbbc&quot; match {
+   *    case p2(b) =&gt; Some(b.length)
+   *    case _     =&gt; None
+   *  }
+   *  }}}
+   *
+   *  @param target The string to match
+   *  @return       The matches
+   */</span>
+  <span class="keyword">def</span> <a title="(target: Any)Option[List[String]]" id="232199">unapplySeq</a><span class="delimiter">(</span><a title="Any" id="531515">target</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../Option.scala.html#560" title="Option[List[String]]">Option</a><span class="delimiter">[</span>List<span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="#531515" title="Any">target</a> <span title="Option[List[String]]" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> <a title="Option[List[String]]" id="1019968">s</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span> =&gt;
+      <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="1019969">m</a> = <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#1019968" title="java.lang.CharSequence">s</a><span class="delimiter">)</span>
+      <span title="Option[List[String]]" class="keyword">if</span> <span class="delimiter">(</span><a href="#1019969" title="java.util.regex.Matcher">m</a>.<span title="()Boolean">matches</span><span class="delimiter">)</span> <a href="../../Option.scala.html#57885" title="(x: List[String])Some[List[String]]">Some</a><span class="delimiter">(</span><span class="delimiter">(</span><a href="../../LowPriorityImplicits.scala.html#9474" title="implicit scala.LowPriorityImplicits.intWrapper : (x: Int)scala.runtime.RichInt" class="int">1</a> <a href="../../runtime/RichInt.scala.html#54713" title="(end: Int)scala.collection.immutable.Range.Inclusive">to</a> <a href="#1019969" title="java.util.regex.Matcher">m</a>.<span title="()Int">groupCount</span><span class="delimiter">)</span>.<a href="../../collection/TraversableOnce.scala.html#53691" title="=&gt; List[Int]">toList</a> <a href="../../collection/TraversableLike.scala.html#49041" title="(f: Int =&gt; java.lang.String)(implicit bf: scala.collection.generic.CanBuildFrom[List[Int],java.lang.String,List[String]])List[String]">map</a> <a href="#1019969" title="java.util.regex.Matcher">m</a>.<a href="#1020108" title="(x$1: Int)java.lang.String">group</a><span class="delimiter">)</span>
+      <span class="keyword">else</span> <a href="../../Option.scala.html#1737" title="object None">None</a>
+    <span class="keyword">case</span> <a href="#1020140" title="Option[List[String]]">Match</a><span class="delimiter">(</span><a title="String" id="1020146">s</a><span class="delimiter">)</span> =&gt;
+      <a href="#232199" title="(target: Any)Option[List[String]]">unapplySeq</a><span class="delimiter">(</span><a href="#1020146" title="String">s</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <span title="None.type">_</span> =&gt;
+      <a href="../../Option.scala.html#1737" title="object None">None</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Return all matches of this regexp in given character sequence as a [[scala.util.mathcing.Regex.MatchIterator]],
+   *  which is a special [[scala.collection.Iterator]] that returns the
+   *  matched strings, but can also be converted into a normal iterator
+   *  that returns objects of type [[scala.util.matching.Regex.Match]]
+   *  that can be queried for data such as the text that precedes the
+   *  match, subgroups, etc.
+   *
+   *  @param source The text to match against.
+   *  @return       A [[scala.util.matching.Reegex.MatchIterator]] of all matches.
+   *  @example      {{{for (words &lt;- &quot;&quot;&quot;\w+&quot;&quot;&quot;.r findAllIn &quot;A simple example.&quot;) yield words}}}
+   */</span>
+  <span class="keyword">def</span> <a title="(source: java.lang.CharSequence)scala.util.matching.Regex.MatchIterator" id="232200">findAllIn</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="761366">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span><span class="delimiter">)</span> = <span title="scala.util.matching.Regex.MatchIterator" class="keyword">new</span> <a href="#1021168" title="object scala.util.matching.Regex">Regex</a>.<a href="#529982" title="scala.util.matching.Regex.MatchIterator">MatchIterator</a><span class="delimiter">(</span><a href="#761366" title="java.lang.CharSequence">source</a>, <a href="#44629" title="scala.util.matching.Regex" class="keyword">this</a>, <a href="#232212" title="String*">groupNames</a><span class="delimiter">)</span>
+
+  <span class="comment">/** Return optionally first matching string of this regexp in given character sequence,
+   *  or None if it does not exist.
+   *
+   *  @param source The text to match against.
+   *  @return       An [[scala.Option]] of the first matching string in the text.
+   *  @example      {{{&quot;&quot;&quot;\w+&quot;&quot;&quot;.r findFirstIn &quot;A simple example.&quot; foreach println // prints &quot;A&quot;}}}
+   */</span>
+  <span class="keyword">def</span> <a title="(source: java.lang.CharSequence)Option[String]" id="232201">findFirstIn</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="983083">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span><span class="delimiter">)</span>: <a href="../../Option.scala.html#560" title="Option[String]">Option</a><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="1020147">m</a> = <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#983083" title="java.lang.CharSequence">source</a><span class="delimiter">)</span>
+    <span title="Option[String]" class="keyword">if</span> <span class="delimiter">(</span><a href="#1020147" title="java.util.regex.Matcher">m</a>.<span title="()Boolean">find</span><span class="delimiter">)</span> <a href="../../Option.scala.html#57885" title="(x: java.lang.String)Some[java.lang.String]">Some</a><span class="delimiter">(</span><a href="#1020147" title="java.util.regex.Matcher">m</a>.<span title="()java.lang.String">group</span><span class="delimiter">)</span> <span class="keyword">else</span> <a href="../../Option.scala.html#1737" title="object None">None</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Return optionally first match of this regexp in given character sequence,
+   *  or None if it does not exist.
+   *
+   *  The main difference between this method and `findFirstIn` is that the (optional) return
+   *  type for this is [[scala.util.matching.Regex.Match]], through which more
+   *  data can be obtained about the match, such as the strings that precede and follow it,
+   *  or subgroups.
+   *
+   *  @param source The text to match against.
+   *  @return       A [[scala.Option]] of [[scala.util.matching.Regex.Match]] of the first matching string in the text.
+   *  @example      {{{(&quot;&quot;&quot;[a-z]&quot;&quot;&quot;.r findFirstMatchIn &quot;A simple example.&quot;) map (_.start) // returns Some(2), the index of the first match in the text}}}
+   */</span>
+  <span class="keyword">def</span> <a title="(source: java.lang.CharSequence)Option[scala.util.matching.Regex.Match]" id="232202">findFirstMatchIn</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="1020155">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span><span class="delimiter">)</span>: <a href="../../Option.scala.html#560" title="Option[scala.util.matching.Regex.Match]">Option</a><span class="delimiter">[</span>Match<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="1020157">m</a> = <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#1020155" title="java.lang.CharSequence">source</a><span class="delimiter">)</span>
+    <span title="Option[scala.util.matching.Regex.Match]" class="keyword">if</span> <span class="delimiter">(</span><a href="#1020157" title="java.util.regex.Matcher">m</a>.<span title="()Boolean">find</span><span class="delimiter">)</span> <a href="../../Option.scala.html#57885" title="(x: scala.util.matching.Regex.Match)Some[scala.util.matching.Regex.Match]">Some</a><span class="delimiter">(</span><span title="scala.util.matching.Regex.Match" class="keyword">new</span> <a href="#529977" title="scala.util.matching.Regex.Match">Match</a><span class="delimiter">(</span><a href="#1020155" title="java.lang.CharSequence">source</a>, <a href="#1020157" title="java.util.regex.Matcher">m</a>, <a href="#232212" title="String*">groupNames</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">else</span> <a href="../../Option.scala.html#1737" title="object None">None</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Return optionally match of this regexp at the beginning of the
+   *  given character sequence, or None if regexp matches no prefix
+   *  of the character sequence.
+   *
+   *  The main difference from this method to `findFirstIn` is that this
+   *  method will not return any matches that do not begin at the start
+   *  of the text being matched against.
+   *
+   *  @param source The text to match against.
+   *  @return       A [[scala.Option]] of the matched prefix.
+   *  @example      {{{&quot;&quot;&quot;[a-z]&quot;&quot;&quot;.r findPrefixOf &quot;A simple example.&quot; // returns None, since the text does not begin with a lowercase letter}}}
+   */</span>
+  <span class="keyword">def</span> <a title="(source: java.lang.CharSequence)Option[String]" id="232203">findPrefixOf</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="1020163">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span><span class="delimiter">)</span>: <a href="../../Option.scala.html#560" title="Option[String]">Option</a><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="1020165">m</a> = <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#1020163" title="java.lang.CharSequence">source</a><span class="delimiter">)</span>
+    <span title="Option[String]" class="keyword">if</span> <span class="delimiter">(</span><a href="#1020165" title="java.util.regex.Matcher">m</a>.<span title="()Boolean">lookingAt</span><span class="delimiter">)</span> <a href="../../Option.scala.html#57885" title="(x: java.lang.String)Some[java.lang.String]">Some</a><span class="delimiter">(</span><a href="#1020165" title="java.util.regex.Matcher">m</a>.<span title="()java.lang.String">group</span><span class="delimiter">)</span> <span class="keyword">else</span> <a href="../../Option.scala.html#1737" title="object None">None</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Return optionally match of this regexp at the beginning of the
+   *  given character sequence, or None if regexp matches no prefix
+   *  of the character sequence.
+   *
+   *  The main difference from this method to `findFirstMatchIn` is that
+   *  this method will not return any matches that do not begin at the
+   *  start of the text being matched against.
+   *
+   *  @param source The text to match against.
+   *  @return       A [[scala.Option]] of the [[scala.util.matching.Regex.Match]] of the matched string.
+   *  @example      {{{&quot;&quot;&quot;\w+&quot;&quot;&quot;.r findPrefixMatchOf &quot;A simple example.&quot; map (_.after) // returns Some(&quot; simple example.&quot;)}}}
+   */</span>
+  <span class="keyword">def</span> <a title="(source: java.lang.CharSequence)Option[scala.util.matching.Regex.Match]" id="232204">findPrefixMatchOf</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="1020171">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span><span class="delimiter">)</span>: <a href="../../Option.scala.html#560" title="Option[scala.util.matching.Regex.Match]">Option</a><span class="delimiter">[</span>Match<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="1020173">m</a> = <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#1020171" title="java.lang.CharSequence">source</a><span class="delimiter">)</span>
+    <span title="Option[scala.util.matching.Regex.Match]" class="keyword">if</span> <span class="delimiter">(</span><a href="#1020173" title="java.util.regex.Matcher">m</a>.<span title="()Boolean">lookingAt</span><span class="delimiter">)</span> <a href="../../Option.scala.html#57885" title="(x: scala.util.matching.Regex.Match)Some[scala.util.matching.Regex.Match]">Some</a><span class="delimiter">(</span><span title="scala.util.matching.Regex.Match" class="keyword">new</span> <a href="#529977" title="scala.util.matching.Regex.Match">Match</a><span class="delimiter">(</span><a href="#1020171" title="java.lang.CharSequence">source</a>, <a href="#1020173" title="java.util.regex.Matcher">m</a>, <a href="#232212" title="String*">groupNames</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">else</span> <a href="../../Option.scala.html#1737" title="object None">None</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Replaces all matches by a string.
+   *
+   *  $replacementString
+   *
+   *  @param target      The string to match
+   *  @param replacement The string that will replace each match
+   *  @return            The resulting string
+   *  @example           {{{&quot;&quot;&quot;\d+&quot;&quot;&quot;.r replaceAllIn (&quot;July 15&quot;, &quot;&lt;NUMBER&gt;&quot;) // returns &quot;July &lt;NUMBER&gt;&quot;}}}
+   */</span>
+  <span class="keyword">def</span> <a title="(target: java.lang.CharSequence, replacement: String)String" id="232205">replaceAllIn</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="529986">target</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span>, <a title="String" id="529987">replacement</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="1020177">m</a> = <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#529986" title="java.lang.CharSequence">target</a><span class="delimiter">)</span>
+    <a href="#1020177" title="java.util.regex.Matcher">m</a>.<span title="(x$1: java.lang.String)java.lang.String">replaceAll</span><span class="delimiter">(</span><a href="#529987" title="String">replacement</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Replaces all matches using a replacer function. The replacer function takes a
+   * [[scala.util.matching.Regex.Match]] so that extra information can be obtained
+   * from the match. For example:
+   *
+   * {{{
+   * import scala.util.matching.Regex
+   * val datePattern = new Regex(&quot;&quot;&quot;(\d\d\d\d)-(\d\d)-(\d\d)&quot;&quot;&quot;, &quot;year&quot;, &quot;month&quot;, &quot;day&quot;)
+   * val text = &quot;From 2011-07-15 to 2011-07-17&quot;
+   * val repl = datePattern replaceAllIn (text, m =&gt; m.group(&quot;month&quot;)+&quot;/&quot;+m.group(&quot;day&quot;))
+   * }}}
+   *
+   * $replacementString
+   *
+   * @param target      The string to match.
+   * @param replacer    The function which maps a match to another string.
+   * @return            The target string after replacements.
+   */</span>
+  <span class="keyword">def</span> <a title="(target: java.lang.CharSequence, replacer: scala.util.matching.Regex.Match =&gt; String)String" id="232206">replaceAllIn</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="529973">target</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span>, <a title="scala.util.matching.Regex.Match =&gt; String" id="529974">replacer</a>: Match =&gt; String<span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="replacementData extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement" id="1020178">it</a> = <span title="scala.util.matching.Regex.MatchIterator" class="keyword">new</span> <a href="#1021168" title="object scala.util.matching.Regex">Regex</a>.<a href="#529982" title="scala.util.matching.Regex.MatchIterator">MatchIterator</a><span class="delimiter">(</span><a href="#529973" title="java.lang.CharSequence">target</a>, <a href="#44629" title="scala.util.matching.Regex" class="keyword">this</a>, <a href="#232212" title="String*">groupNames</a><span class="delimiter">)</span>.<a href="#761394" title="=&gt; java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement">replacementData</a>
+    <a href="#1020178" title="replacementData extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement">it</a> <a href="../../collection/Iterator.scala.html#59154" title="(f: scala.util.matching.Regex.Match =&gt; java.util.regex.Matcher)Unit">foreach</a> <span class="delimiter">(</span><a title="scala.util.matching.Regex.Match" id="1020226">md</a> =&gt; <a href="#1020178" title="replacementData extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement">it</a> <a href="#1020193" title="(rs: String)java.util.regex.Matcher">replace</a> <a href="../../Function1.scala.html#53453" title="(v1: scala.util.matching.Regex.Match)String">replacer</a><span class="delimiter">(</span><a href="#1020226" title="scala.util.matching.Regex.Match">md</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#1020178" title="replacementData extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement">it</a>.<a href="#1020192" title="=&gt; java.lang.String">replaced</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Replaces some of the matches using a replacer function that returns an [[scala.Option]].
+   * The replacer function takes a [[scala.util.matching.Regex.Match]] so that extra
+   * information can be btained from the match. For example:
+   *
+   * {{{
+   * import scala.util.matching.Regex._
+   *
+   * val map = Map(&quot;x&quot; -&gt; &quot;a var&quot;, &quot;y&quot; -&gt; &quot;&quot;&quot;some $ and \ signs&quot;&quot;&quot;)
+   * val text = &quot;A text with variables %x, %y and %z.&quot;
+   * val varPattern = &quot;&quot;&quot;%(\w+)&quot;&quot;&quot;.r
+   * val mapper = (m: Match) =&gt; map get (m group 1) map (quoteReplacement(_))
+   * val repl = varPattern replaceSomeIn (text, mapper)
+   * }}}
+   *
+   * $replacementString
+   *
+   * @param target      The string to match.
+   * @param replacer    The function which optionally maps a match to another string.
+   * @return            The target string after replacements.
+   */</span>
+  <span class="keyword">def</span> <a title="(target: java.lang.CharSequence, replacer: scala.util.matching.Regex.Match =&gt; Option[String])String" id="232207">replaceSomeIn</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="1020243">target</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span>, <a title="scala.util.matching.Regex.Match =&gt; Option[String]" id="1020244">replacer</a>: Match =&gt; Option<span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="replacementData extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement" id="1020246">it</a> = <span title="scala.util.matching.Regex.MatchIterator" class="keyword">new</span> <a href="#1021168" title="object scala.util.matching.Regex">Regex</a>.<a href="#529982" title="scala.util.matching.Regex.MatchIterator">MatchIterator</a><span class="delimiter">(</span><a href="#1020243" title="java.lang.CharSequence">target</a>, <a href="#44629" title="scala.util.matching.Regex" class="keyword">this</a>, <a href="#232212" title="String*">groupNames</a><span class="delimiter">)</span>.<a href="#761394" title="=&gt; java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement">replacementData</a>
+    <span class="keyword">for</span> <span class="delimiter">(</span><a title="scala.util.matching.Regex.Match" id="1020255">matchdata</a> &lt;- <a href="../../collection/Iterator.scala.html#59154" title="(f: scala.util.matching.Regex.Match =&gt; Unit)Unit">it</a> ; <a title="String" id="1020261">replacement</a> &lt;- <a href="../../Function1.scala.html#53453" title="(v1: scala.util.matching.Regex.Match)Option[String]">replacer</a><a href="../../Option.scala.html#48491" title="(f: String =&gt; java.util.regex.Matcher)Unit" class="delimiter">(</a><a href="#1020255" title="scala.util.matching.Regex.Match">matchdata</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#1020246" title="replacementData extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement">it</a> <a href="#1020193" title="(rs: String)java.util.regex.Matcher">replace</a> <a href="#1020261" title="String">replacement</a>
+
+    <a href="#1020246" title="replacementData extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement">it</a>.<a href="#1020192" title="=&gt; java.lang.String">replaced</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Replaces the first match by a string.
+   *
+   *  $replacementString
+   *
+   *  @param target      The string to match
+   *  @param replacement The string that will replace the match
+   *  @return            The resulting string
+   */</span>
+  <span class="keyword">def</span> <a title="(target: java.lang.CharSequence, replacement: String)String" id="232208">replaceFirstIn</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="1020264">target</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span>, <a title="String" id="1020265">replacement</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="1020267">m</a> = <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#1020264" title="java.lang.CharSequence">target</a><span class="delimiter">)</span>
+    <a href="#1020267" title="java.util.regex.Matcher">m</a>.<span title="(x$1: java.lang.String)java.lang.String">replaceFirst</span><span class="delimiter">(</span><a href="#1020265" title="String">replacement</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Splits the provided character sequence around matches of this regexp.
+   *
+   *  @param toSplit The character sequence to split
+   *  @return        The array of strings computed by splitting the
+   *                 input around matches of this regexp
+   */</span>
+  <span class="keyword">def</span> <a title="(toSplit: java.lang.CharSequence)Array[String]" id="232209">split</a><span class="delimiter">(</span><a title="java.lang.CharSequence" id="1020268">toSplit</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span><span class="delimiter">)</span>: <a href="../../Array.scala.html#1430" title="Array[String]">Array</a><span class="delimiter">[</span>String<span class="delimiter">]</span> =
+    <a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)Array[java.lang.String]">split</span><span class="delimiter">(</span><a href="#1020268" title="java.lang.CharSequence">toSplit</a><span class="delimiter">)</span>
+
+  <span class="comment">/** The string defining the regular expression */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="232210">toString</a> = <a href="#232211" title="String">regex</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/** This object defines inner classes that describe
+ *  regex matches and helper objects. The class hierarchy
+ *  is as follows:
+ *
+ *  {{{
+ *            MatchData
+ *            /      \
+ *   MatchIterator  Match
+ *  }}}
+ *
+ */</span>
+<span class="keyword">object</span> <a title="object scala.util.matching.Regex" id="1021168">Regex</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+
+  <span class="comment">/** This class provides methods to access
+   *  the details of a match.
+   */</span>
+  <span class="keyword">trait</span> <a title="trait MatchData extends java.lang.Object with ScalaObject" id="529976">MatchData</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+
+    <span class="comment">/** The source from where the match originated */</span>
+    <span class="keyword">val</span> <a title="=&gt; java.lang.CharSequence" id="696275">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span>
+
+    <span class="comment">/** The names of the groups, or some empty sequence if one defined */</span>
+    <span class="keyword">val</span> <a title="=&gt; Seq[String]" id="696276">groupNames</a>: <a href="../../collection/Seq.scala.html#8648" title="Seq[String]">Seq</a><span class="delimiter">[</span>String<span class="delimiter">]</span>
+
+    <span class="comment">/** The number of subgroups in the pattern (not all of these need to match!) */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="696277">groupCount</a>: <a href="../../Int.scala.html#386" title="Int">Int</a>
+
+    <span class="comment">/** The index of the first matched character, or -1 if nothing was matched */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="696278">start</a>: <a href="../../Int.scala.html#386" title="Int">Int</a>
+
+    <span class="comment">/** The index of the first matched character in group `i`,
+     *  or -1 if nothing was matched for that group */</span>
+    <span class="keyword">def</span> <a title="(i: Int)Int" id="696279">start</a><span class="delimiter">(</span><a title="Int" id="1020279">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span>: <a href="../../Int.scala.html#386" title="Int">Int</a>
+
+    <span class="comment">/** The index of the last matched character, or -1 if nothing was matched */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="696280">end</a>: <a href="../../Int.scala.html#386" title="Int">Int</a>
+
+    <span class="comment">/** The index following the last matched character in group `i`,
+     *  or -1 if nothing was matched for that group */</span>
+    <span class="keyword">def</span> <a title="(i: Int)Int" id="696281">end</a><span class="delimiter">(</span><a title="Int" id="1020283">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span>: <a href="../../Int.scala.html#386" title="Int">Int</a>
+
+    <span class="comment">/** The matched string, or `null` if nothing was matched */</span>
+    <span class="keyword">def</span> <a title="=&gt; String" id="696282">matched</a>: <span title="String">String</span> =
+      <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#696278" title="=&gt; Int">start</a> <a href="../../Int.scala.html#54782" title="(x: Int)Boolean">&gt;=</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="(x$1: Int, x$2: Int)java.lang.CharSequence">subSequence</span><span class="delimiter">(</span><a href="#696278" title="=&gt; Int">start</a>, <a href="#696280" title="=&gt; Int">end</a><span class="delimiter">)</span>.<span title="()java.lang.String">toString</span>
+      <span class="keyword">else</span> <span title="Null(null)" class="keyword">null</span>
+
+    <span class="comment">/** The matched string in group `i`,
+     *  or `null` if nothing was matched */</span>
+    <span class="keyword">def</span> <a title="(i: Int)String" id="696283">group</a><span class="delimiter">(</span><a title="Int" id="696320">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span>: <span title="String">String</span> =
+      <span title="String" class="keyword">if</span> <span class="delimiter">(</span><a href="#696279" title="(i: Int)Int">start</a><span class="delimiter">(</span><a href="#696320" title="Int">i</a><span class="delimiter">)</span> <a href="../../Int.scala.html#54782" title="(x: Int)Boolean">&gt;=</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="(x$1: Int, x$2: Int)java.lang.CharSequence">subSequence</span><span class="delimiter">(</span><a href="#696279" title="(i: Int)Int">start</a><span class="delimiter">(</span><a href="#696320" title="Int">i</a><span class="delimiter">)</span>, <a href="#696281" title="(i: Int)Int">end</a><span class="delimiter">(</span><a href="#696320" title="Int">i</a><span class="delimiter">)</span><span class="delimiter">)</span>.<span title="()java.lang.String">toString</span>
+      <span class="keyword">else</span> <span title="Null(null)" class="keyword">null</span>
+
+    <span class="comment">/** All matched subgroups, i.e. not including group(0) */</span>
+    <span class="keyword">def</span> <a title="=&gt; List[String]" id="696284">subgroups</a>: <a href="../../collection/immutable/List.scala.html#14047" title="List[String]">List</a><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span class="delimiter">(</span><a href="../../LowPriorityImplicits.scala.html#9474" title="implicit scala.LowPriorityImplicits.intWrapper : (x: Int)scala.runtime.RichInt" class="int">1</a> <a href="../../runtime/RichInt.scala.html#54713" title="(end: Int)scala.collection.immutable.Range.Inclusive">to</a> <a href="#696277" title="=&gt; Int">groupCount</a><span class="delimiter">)</span>.<a href="../../collection/TraversableOnce.scala.html#53691" title="=&gt; List[Int]">toList</a> <a href="../../collection/TraversableLike.scala.html#49041" title="(f: Int =&gt; String)(implicit bf: scala.collection.generic.CanBuildFrom[List[Int],String,List[String]])List[String]">map</a> <a href="#696283" title="(i: Int)String">group</a>
+
+    <span class="comment">/** The char sequence before first character of match,
+     *  or `null` if nothing was matched */</span>
+    <span class="keyword">def</span> <a title="=&gt; java.lang.CharSequence" id="696285">before</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span> =
+      <span title="java.lang.CharSequence" class="keyword">if</span> <span class="delimiter">(</span><a href="#696278" title="=&gt; Int">start</a> <a href="../../Int.scala.html#54782" title="(x: Int)Boolean">&gt;=</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="(x$1: Int, x$2: Int)java.lang.CharSequence">subSequence</span><span class="delimiter">(</span><span title="Int(0)" class="int">0</span>, <a href="#696278" title="=&gt; Int">start</a><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Null(null)" class="keyword">null</span>
+
+    <span class="comment">/** The char sequence before first character of match in group `i`,
+     *  or `null` if nothing was matched for that group  */</span>
+    <span class="keyword">def</span> <a title="(i: Int)java.lang.CharSequence" id="696286">before</a><span class="delimiter">(</span><a title="Int" id="1020471">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span>: java.lang.<span title="java.lang.CharSequence">CharSequence</span> =
+      <span title="java.lang.CharSequence" class="keyword">if</span> <span class="delimiter">(</span><a href="#696279" title="(i: Int)Int">start</a><span class="delimiter">(</span><a href="#1020471" title="Int">i</a><span class="delimiter">)</span> <a href="../../Int.scala.html#54782" title="(x: Int)Boolean">&gt;=</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="(x$1: Int, x$2: Int)java.lang.CharSequence">subSequence</span><span class="delimiter">(</span><span title="Int(0)" class="int">0</span>, <a href="#696279" title="(i: Int)Int">start</a><span class="delimiter">(</span><a href="#1020471" title="Int">i</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Null(null)" class="keyword">null</span>
+
+    <span class="comment">/** Returns char sequence after last character of match,
+     *  or `null` if nothing was matched */</span>
+    <span class="keyword">def</span> <a title="=&gt; java.lang.CharSequence" id="696287">after</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span> =
+      <span title="java.lang.CharSequence" class="keyword">if</span> <span class="delimiter">(</span><a href="#696280" title="=&gt; Int">end</a> <a href="../../Int.scala.html#54782" title="(x: Int)Boolean">&gt;=</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="(x$1: Int, x$2: Int)java.lang.CharSequence">subSequence</span><span class="delimiter">(</span><a href="#696280" title="=&gt; Int">end</a>, <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="()Int">length</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Null(null)" class="keyword">null</span>
+
+    <span class="comment">/** The char sequence after last character of match in group `i`,
+     *  or `null` if nothing was matched for that group  */</span>
+    <span class="keyword">def</span> <a title="(i: Int)java.lang.CharSequence" id="696288">after</a><span class="delimiter">(</span><a title="Int" id="1020499">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span>: java.lang.<span title="java.lang.CharSequence">CharSequence</span> =
+      <span title="java.lang.CharSequence" class="keyword">if</span> <span class="delimiter">(</span><a href="#696281" title="(i: Int)Int">end</a><span class="delimiter">(</span><a href="#1020499" title="Int">i</a><span class="delimiter">)</span> <a href="../../Int.scala.html#54782" title="(x: Int)Boolean">&gt;=</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="(x$1: Int, x$2: Int)java.lang.CharSequence">subSequence</span><span class="delimiter">(</span><a href="#696281" title="(i: Int)Int">end</a><span class="delimiter">(</span><a href="#1020499" title="Int">i</a><span class="delimiter">)</span>, <a href="#696275" title="=&gt; java.lang.CharSequence">source</a>.<span title="()Int">length</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span title="Null(null)" class="keyword">null</span>
+
+    <span class="keyword">private</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Map[String,Int]" id="696290">nameToIndex</a>: <a href="../../collection/immutable/Map.scala.html#13468" title="Map[String,Int]">Map</a><span class="delimiter">[</span>String, Int<span class="delimiter">]</span> = <a href="../../collection/generic/GenMapFactory.scala.html#56702" title="[A, B](elems: (A, B)*)scala.collection.immutable.Map[A,B]">Map</a><span title="(elems: (String, Int)*)scala.collection.immutable.Map[String,Int]" class="delimiter">[</span><span title="String">String</span>, <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span> <a href="../../collection/immutable/MapLike.scala.html#102814" title="(xs: scala.collection.GenTraversableOnce[(String, Int)])scala.collection.immutable.Map[String,Int]">++</a> <span class="delimiter">(</span><span title="java.lang.String(&quot;&quot;)" class="string">&quot;&quot;</span> <a href="../../collection/immutable/List.scala.html#49140" title="(x: String)List[String]">::</a> <a href="#696276" title="=&gt; Seq[String]">groupNames</a>.<a href="../../collection/TraversableOnce.scala.html#53691" title="=&gt; List[String]">toList</a><span class="delimiter">)</span>.<a href="../../collection/IterableLike.scala.html#53915" title="(implicit bf: scala.collection.generic.CanBuildFrom[List[String],(String, Int),List[(String, Int)]])List[(String, Int)]">zipWithIndex</a>
+
+    <span class="comment">/** Returns the group with given name
+     *
+     *  @param id The group name
+     *  @return   The requested group
+     *  @throws   NoSuchElementException if the requested group name is not defined
+     */</span>
+    <span class="keyword">def</span> <a title="(id: String)String" id="696291">group</a><span class="delimiter">(</span><a title="String" id="696318">id</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> = <a href="#696289" title="=&gt; Map[String,Int]">nameToIndex</a>.<a href="../../collection/MapLike.scala.html#73194" title="(key: String)Option[Int]">get</a><span class="delimiter">(</span><a href="#696318" title="String">id</a><span class="delimiter">)</span> <span title="String" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a href="../../Option.scala.html#1737" title="Nothing">None</a> =&gt; <span title="Nothing" class="keyword">throw</span> <span title="(x$1: java.lang.String)java.util.NoSuchElementException" class="keyword">new</span> <a href="../../package.scala.html#47510" title="java.util.NoSuchElementException">NoSuchElementException</a><span class="delimiter">(</span><span title="java.lang.String(&quot;group name &quot;)" class="string">&quot;group name &quot;</span><span title="(x$1: Any)java.lang.String">+</span><a href="#696318" title="String">id</a><span title="(x$1: Any)java.lang.String">+</span><span title="java.lang.String(&quot; not defined&quot;)" class="string">&quot; not defined&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <span title="String">Some</span><span class="delimiter">(</span><a title="Int" id="1020649">index</a><span class="delimiter">)</span> =&gt; <a href="#696283" title="(i: Int)String">group</a><span class="delimiter">(</span><a href="#1020649" title="Int">index</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** The matched string; equivalent to `matched.toString` */</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="696292">toString</a> = <a href="#696282" title="=&gt; String">matched</a>
+
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Provides information about a succesful match.
+   */</span>
+  <span class="keyword">class</span> <a title="class Match extends java.lang.Object with scala.util.matching.Regex.MatchData with ScalaObject" id="529977">Match</a><a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">(</a><span class="keyword">val</span> <a title="java.lang.CharSequence" id="932794">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span>,
+              <a title="java.util.regex.Matcher" id="932795">matcher</a>: <span title="java.util.regex.Matcher">Matcher</span>,
+              <span class="keyword">val</span> <a title="Seq[String]" id="932796">groupNames</a>: <a href="../../collection/Seq.scala.html#8648" title="Seq[String]">Seq</a><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#529976" title="scala.util.matching.Regex.MatchData">MatchData</a> <span class="delimiter">{</span>
+
+    <span class="comment">/** The index of the first matched character */</span>
+    <span class="keyword">val</span> <a title="Int" id="696302">start</a> = <a href="#932795" title="java.util.regex.Matcher">matcher</a>.<span title="()Int">start</span>
+
+    <span class="comment">/** The index following the last matched character */</span>
+    <span class="keyword">val</span> <a title="Int" id="696304">end</a> = <a href="#932795" title="java.util.regex.Matcher">matcher</a>.<span title="()Int">end</span>
+
+    <span class="comment">/** The number of subgroups */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="696306">groupCount</a> = <a href="#932795" title="java.util.regex.Matcher">matcher</a>.<span title="()Int">groupCount</span>
+
+    <span class="keyword">private</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Array[Int]" id="696308">starts</a>: <a href="../../Array.scala.html#1430" title="Array[Int]">Array</a><span class="delimiter">[</span>Int<span class="delimiter">]</span> =
+      <span class="delimiter">(</span><span class="delimiter">(</span><a href="../../LowPriorityImplicits.scala.html#9474" title="implicit scala.LowPriorityImplicits.intWrapper : (x: Int)scala.runtime.RichInt" class="int">0</a> <a href="../../runtime/RichInt.scala.html#54713" title="(end: Int)scala.collection.immutable.Range.Inclusive">to</a> <a href="#696306" title="=&gt; Int">groupCount</a><span class="delimiter">)</span> <a href="../../collection/TraversableLike.scala.html#49041" title="(f: Int =&gt; Int)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.IndexedSeq[Int],Int,scala.collection.immutable.IndexedSeq[Int]])scala.collection.immutable.IndexedSeq[Int]">map</a> <a href="#932795" title="java.util.regex.Matcher">matcher</a>.<a href="#1020775" title="(x$1: Int)Int">start</a><span class="delimiter">)</span>.<a href="../../collection/TraversableOnce.scala.html#53687" title="(implicit evidence$1: ClassManifest[Int])Array[Int]">toArray</a>
+    <span class="keyword">private</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Array[Int]" id="696310">ends</a>: <a href="../../Array.scala.html#1430" title="Array[Int]">Array</a><span class="delimiter">[</span>Int<span class="delimiter">]</span> =
+      <span class="delimiter">(</span><span class="delimiter">(</span><a href="../../LowPriorityImplicits.scala.html#9474" title="implicit scala.LowPriorityImplicits.intWrapper : (x: Int)scala.runtime.RichInt" class="int">0</a> <a href="../../runtime/RichInt.scala.html#54713" title="(end: Int)scala.collection.immutable.Range.Inclusive">to</a> <a href="#696306" title="=&gt; Int">groupCount</a><span class="delimiter">)</span> <a href="../../collection/TraversableLike.scala.html#49041" title="(f: Int =&gt; Int)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.IndexedSeq[Int],Int,scala.collection.immutable.IndexedSeq[Int]])scala.collection.immutable.IndexedSeq[Int]">map</a> <a href="#932795" title="java.util.regex.Matcher">matcher</a>.<a href="#1020921" title="(x$1: Int)Int">end</a><span class="delimiter">)</span>.<a href="../../collection/TraversableOnce.scala.html#53687" title="(implicit evidence$1: ClassManifest[Int])Array[Int]">toArray</a>
+
+    <span class="comment">/** The index of the first matched character in group `i` */</span>
+    <span class="keyword">def</span> <a title="(i: Int)Int" id="696311">start</a><span class="delimiter">(</span><a title="Int" id="1020966">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span> = <a href="../../Array.scala.html#49205" title="(i: Int)Int">starts</a><span class="delimiter">(</span><a href="#1020966" title="Int">i</a><span class="delimiter">)</span>
+
+    <span class="comment">/** The index following the last matched character in group `i` */</span>
+    <span class="keyword">def</span> <a title="(i: Int)Int" id="696312">end</a><span class="delimiter">(</span><a title="Int" id="1020971">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span> = <a href="../../Array.scala.html#49205" title="(i: Int)Int">ends</a><span class="delimiter">(</span><a href="#1020971" title="Int">i</a><span class="delimiter">)</span>
+
+    <span class="comment">/** The match itself with matcher-dependent lazy vals forced,
+     *  so that match is valid even once matcher is advanced
+     */</span>
+    <span class="keyword">def</span> <a title="=&gt; Match.this.type" id="696313">force</a>: <span class="keyword">this</span>.<span class="keyword">type</span> = <span class="delimiter">{</span> <a href="#696307" title="=&gt; Array[Int]">starts</a>; <a href="#696309" title="=&gt; Array[Int]">ends</a>; <a href="#529977" title="Match.this.type" class="keyword">this</a> <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** An extractor object for Matches, yielding the matched string
+   *
+   *  This can be used to help writing replacer functions when you
+   *  are not interested in match data. For example:
+   *
+   *  {{{
+   *  import scala.util.matching.Regex.Match
+   *  &quot;&quot;&quot;\w+&quot;&quot;&quot;.r replaceAllIn (&quot;A simple example.&quot;, _ match { case Match(s) =&gt; s.toUpperCase })
+   *  }}}
+   *
+   */</span>
+  <span class="keyword">object</span> <a title="object scala.util.matching.Regex.Match" id="529978">Match</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+    <span class="keyword">def</span> <a title="(m: scala.util.matching.Regex.Match)Some[String]" id="1020140">unapply</a><span class="delimiter">(</span><a title="scala.util.matching.Regex.Match" id="1020141">m</a>: <a href="#529977" title="scala.util.matching.Regex.Match">Match</a><span class="delimiter">)</span>: <a href="../../Option.scala.html#56" title="Some[String]">Some</a><span class="delimiter">[</span>String<span class="delimiter">]</span> = <a href="../../Option.scala.html#57885" title="(x: String)Some[String]">Some</a><span class="delimiter">(</span><a href="#1020141" title="scala.util.matching.Regex.Match">m</a>.<a href="#696282" title="=&gt; String">matched</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** An extractor object that yields the groups in the match. Using an extractor
+   *  rather than the original regex avoids recomputing the match.
+   *
+   *  {{{
+   *  import scala.util.matching.Regex.Groups
+   *
+   *  val datePattern = &quot;&quot;&quot;(\d\d\d\d)-(\d\d)-(\d\d)&quot;&quot;&quot;.r
+   *  val text = &quot;The doc spree happened on 2011-07-15.&quot;
+   *  val day = datePattern replaceAllIn(text, _ match { case Groups(year, month, day) =&gt; month+&quot;/&quot;+day })
+   *  }}}
+   */</span>
+  <span class="keyword">object</span> <a title="object scala.util.matching.Regex.Groups" id="529980">Groups</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+    <span class="keyword">def</span> <a title="(m: scala.util.matching.Regex.Match)Option[Seq[String]]" id="932598">unapplySeq</a><span class="delimiter">(</span><a title="scala.util.matching.Regex.Match" id="932599">m</a>: <a href="#529977" title="scala.util.matching.Regex.Match">Match</a><span class="delimiter">)</span>: <a href="../../Option.scala.html#560" title="Option[Seq[String]]">Option</a><span class="delimiter">[</span>Seq<span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">]</span> = <span title="Option[Seq[String]]" class="keyword">if</span> <span class="delimiter">(</span><a href="#932599" title="scala.util.matching.Regex.Match">m</a>.<a href="#696306" title="=&gt; Int">groupCount</a> <a href="../../Int.scala.html#54775" title="(x: Int)Boolean">&gt;</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="../../Option.scala.html#57885" title="(x: Seq[String])Some[Seq[String]]">Some</a><span class="delimiter">(</span><a href="../../LowPriorityImplicits.scala.html#9474" title="implicit scala.LowPriorityImplicits.intWrapper : (x: Int)scala.runtime.RichInt" class="int">1</a> <a href="../../runtime/RichInt.scala.html#54713" title="(end: Int)scala.collection.immutable.Range.Inclusive">to</a> <a href="#932599" title="scala.util.matching.Regex.Match">m</a>.<a href="#696306" title="=&gt; Int">groupCount</a> <a href="../../collection/TraversableLike.scala.html#49041" title="(f: Int =&gt; String)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.IndexedSeq[Int],String,Seq[String]])Seq[String]">map</a> <a href="#932599" title="scala.util.matching.Regex.Match">m</a>.<a href="#696283" title="(i: Int)String">group</a><span class="delimiter">)</span> <span class="keyword">else</span> <a href="../../Option.scala.html#1737" title="object None">None</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** A class to step through a sequence of regex matches
+   */</span>
+  <span class="keyword">class</span> <a title="class MatchIterator extends java.lang.Object with Iterator[String] with scala.util.matching.Regex.MatchData with ScalaObject" id="529982">MatchIterator</a><a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">(</a><span class="keyword">val</span> <a title="java.lang.CharSequence" id="761395">source</a>: java.lang.<span title="java.lang.CharSequence">CharSequence</span>, <span class="keyword">val</span> <a title="scala.util.matching.Regex" id="761396">regex</a>: <a href="#44629" title="scala.util.matching.Regex">Regex</a>, <span class="keyword">val</span> <a title="Seq[String]" id="761397">groupNames</a>: <a href="../../collection/Seq.scala.html#8648" title="Seq[String]">Seq</a><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <a href="../../collection/Iterator.scala.html#8783" title="Iterator[String]">Iterator</a><span class="delimiter">[</span>String<span class="delimiter">]</span> <span class="keyword">with</span> <a href="#529976" title="scala.util.matching.Regex.MatchData">MatchData</a> <span class="delimiter">{</span> self =&gt;
+
+    <span class="keyword">protected</span> <span class="keyword">val</span> <a title="java.util.regex.Matcher" id="761380">matcher</a> = <a href="#761396" title="=&gt; scala.util.matching.Regex">regex</a>.<a href="#232197" title="=&gt; java.util.regex.Pattern">pattern</a>.<span title="(x$1: java.lang.CharSequence)java.util.regex.Matcher">matcher</span><span class="delimiter">(</span><a href="#761395" title="=&gt; java.lang.CharSequence">source</a><span class="delimiter">)</span>
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Boolean" id="761383">nextSeen</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+    <span class="comment">/** Is there another match? */</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="761385">hasNext</a>: <a href="../../Boolean.scala.html#65" title="Boolean">Boolean</a> = <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#761383" title="=&gt; Boolean">nextSeen</a><span class="delimiter">)</span> <a href="#761383" title="(x$1: Boolean)Unit">nextSeen</a> = <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="()Boolean">find</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#761383" title="=&gt; Boolean">nextSeen</a>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** The next matched substring of `source` */</span>
+    <span class="keyword">def</span> <a title="()String" id="761386">next</a>: <span title="String">String</span> = <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#55576" title="=&gt; Boolean">!</a><a href="#761385" title="=&gt; Boolean">hasNext</a><span class="delimiter">)</span> <span title="Nothing" class="keyword">throw</span> <span title="java.util.NoSuchElementException" class="keyword">new</span> <a href="../../package.scala.html#47510" title="java.util.NoSuchElementException">NoSuchElementException</a>
+      <a href="#761383" title="(x$1: Boolean)Unit">nextSeen</a> = <span title="Boolean(false)" class="keyword">false</span>
+      <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="()java.lang.String">group</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()java.lang.String" id="761387">toString</a> = <a href="#529982" title="scala.util.matching.Regex.MatchIterator" class="keyword">super</a><span class="delimiter">[</span>Iterator<span class="delimiter">]</span>.<a href="../../collection/Iterator.scala.html#59186" title="()java.lang.String">toString</a>
+
+    <span class="comment">/** The index of the first matched character */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="761388">start</a>: <a href="../../Int.scala.html#386" title="Int">Int</a> = <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="()Int">start</span>
+
+    <span class="comment">/** The index of the first matched character in group `i` */</span>
+    <span class="keyword">def</span> <a title="(i: Int)Int" id="761389">start</a><span class="delimiter">(</span><a title="Int" id="1021144">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span>: <a href="../../Int.scala.html#386" title="Int">Int</a> = <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="(x$1: Int)Int">start</span><span class="delimiter">(</span><a href="#1021144" title="Int">i</a><span class="delimiter">)</span>
+
+    <span class="comment">/** The index of the last matched character */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="761390">end</a>: <a href="../../Int.scala.html#386" title="Int">Int</a> = <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="()Int">end</span>
+
+    <span class="comment">/** The index following the last matched character in group `i` */</span>
+    <span class="keyword">def</span> <a title="(i: Int)Int" id="761391">end</a><span class="delimiter">(</span><a title="Int" id="1021155">i</a>: <a href="../../Int.scala.html#386" title="Int">Int</a><span class="delimiter">)</span>: <a href="../../Int.scala.html#386" title="Int">Int</a> = <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="(x$1: Int)Int">end</span><span class="delimiter">(</span><a href="#1021155" title="Int">i</a><span class="delimiter">)</span>
+
+    <span class="comment">/** The number of subgroups */</span>
+    <span class="keyword">def</span> <a title="=&gt; Int" id="761392">groupCount</a> = <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="()Int">groupCount</span>
+
+    <span class="comment">/** Convert to an iterator that yields MatchData elements instead of Strings */</span>
+    <span class="keyword">def</span> <a title="=&gt; java.lang.Object with Iterator[scala.util.matching.Regex.Match]" id="761393">matchData</a> = <a href="#932780" title="java.lang.Object with Iterator[scala.util.matching.Regex.Match]" class="keyword">new</a> <a title="anonymous class $anon extends java.lang.Object with Iterator[scala.util.matching.Regex.Match]" id="932780">Iterator</a><span class="delimiter">[</span>Match<span class="delimiter">]</span> <span class="delimiter">{</span>
+      <span class="keyword">def</span> <a title="=&gt; Boolean" id="932782">hasNext</a> = <a href="#529982" title="MatchIterator.this.type">self</a>.<a href="#761385" title="=&gt; Boolean">hasNext</a>
+      <span class="keyword">def</span> <a title="()scala.util.matching.Regex.Match" id="932783">next</a> = <span class="delimiter">{</span> <a href="#529982" title="MatchIterator.this.type">self</a>.<a href="#761386" title="()String">next</a>; <span title="scala.util.matching.Regex.Match" class="keyword">new</span> <a href="#529977" title="scala.util.matching.Regex.Match">Match</a><span class="delimiter">(</span><a href="#761395" title="=&gt; java.lang.CharSequence">source</a>, <a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>, <a href="#761397" title="=&gt; Seq[String]">groupNames</a><span class="delimiter">)</span>.<a href="#696313" title="=&gt; scala.util.matching.Regex.Match">force</a> <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Convert to an iterator that yields MatchData elements instead of Strings and has replacement support */</span>
+    <span class="keyword">private</span><span class="delimiter">[</span>matching<span class="delimiter">]</span> <span class="keyword">def</span> <a title="=&gt; java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement" id="761394">replacementData</a> = <a href="#1020182" title="java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement" class="keyword">new</a> <a title="anonymous class $anon extends java.lang.Object with Iterator[scala.util.matching.Regex.Match] with scala.util.matching.Regex.Replacement" id="1020182">Iterator</a><span class="delimiter">[</span>Match<span class="delimiter">]</span> <span class="keyword">with</span> <a href="#529983" title="scala.util.matching.Regex.Replacement">Replacement</a> <span class="delimiter">{</span>
+      <span class="keyword">def</span> <a title="=&gt; java.util.regex.Matcher" id="1020184">matcher</a> = <a href="#529982" title="MatchIterator.this.type">self</a>.<a href="#761380" title="=&gt; java.util.regex.Matcher">matcher</a>
+      <span class="keyword">def</span> <a title="=&gt; Boolean" id="1020185">hasNext</a> = <a href="#529982" title="MatchIterator.this.type">self</a>.<a href="#761385" title="=&gt; Boolean">hasNext</a>
+      <span class="keyword">def</span> <a title="()scala.util.matching.Regex.Match" id="1020186">next</a> = <span class="delimiter">{</span> <a href="#529982" title="MatchIterator.this.type">self</a>.<a href="#761386" title="()String">next</a>; <span title="scala.util.matching.Regex.Match" class="keyword">new</span> <a href="#529977" title="scala.util.matching.Regex.Match">Match</a><span class="delimiter">(</span><a href="#761395" title="=&gt; java.lang.CharSequence">source</a>, <a href="#1020184" title="=&gt; java.util.regex.Matcher">matcher</a>, <a href="#761397" title="=&gt; Seq[String]">groupNames</a><span class="delimiter">)</span>.<a href="#696313" title="=&gt; scala.util.matching.Regex.Match">force</a> <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * A trait able to build a string with replacements assuming it has a matcher.
+   * Meant to be mixed in with iterators.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>matching<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait Replacement extends java.lang.Object with ScalaObject" id="529983">Replacement</a> <a href="../../ScalaObject.scala.html#464" title="ScalaObject" class="delimiter">{</a>
+    <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; java.util.regex.Matcher" id="1020188">matcher</a>: <span title="java.util.regex.Matcher">Matcher</span>
+
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="java.lang.StringBuffer" id="1020190">sb</a> = <span title="java.lang.StringBuffer" class="keyword">new</span> java.lang.<span title="java.lang.StringBuffer">StringBuffer</span>
+
+    <span class="keyword">def</span> <a title="=&gt; java.lang.String" id="1020192">replaced</a> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="java.lang.StringBuffer" id="1020238">newsb</a> = <span title="(x$1: java.lang.CharSequence)java.lang.StringBuffer" class="keyword">new</span> java.lang.<span title="java.lang.StringBuffer">StringBuffer</span><span class="delimiter">(</span><a href="#1020190" title="=&gt; java.lang.StringBuffer">sb</a><span class="delimiter">)</span>
+      <a href="#1020188" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="(x$1: java.lang.StringBuffer)java.lang.StringBuffer">appendTail</span><span class="delimiter">(</span><a href="#1020238" title="java.lang.StringBuffer">newsb</a><span class="delimiter">)</span>
+      <a href="#1020238" title="java.lang.StringBuffer">newsb</a>.<span title="()java.lang.String">toString</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(rs: String)java.util.regex.Matcher" id="1020193">replace</a><span class="delimiter">(</span><a title="String" id="1020227">rs</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="#1020188" title="=&gt; java.util.regex.Matcher">matcher</a>.<span title="(x$1: java.lang.StringBuffer, x$2: java.lang.String)java.util.regex.Matcher">appendReplacement</span><span class="delimiter">(</span><a href="#1020190" title="=&gt; java.lang.StringBuffer">sb</a>, <a href="#1020227" title="String">rs</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Quotes replacement strings to be used in replacement methods.
+   *
+   *  Replacement methods give special meaning to backslashes (`\`) and
+   *  dollar signs (`$`) in replacement strings, so they are not treated
+   *  as literals. This method escapes these characters so the resulting
+   *  string can be used as a literal replacement representing the input
+   *  string.
+   *
+   *  @param text The string one wishes to use as literal replacement.
+   *  @return A string that can be used to replace matches with `text`.
+   *  @example {{{&quot;CURRENCY&quot;.r.replaceAllIn(input, Regex quoteReplacement &quot;US$&quot;)}}}
+   */</span>
+  <span class="keyword">def</span> <a title="(text: String)String" id="529984">quoteReplacement</a><span class="delimiter">(</span><a title="String" id="1021166">text</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="object java.util.regex.Matcher">Matcher</span> <span title="(x$1: java.lang.String)java.lang.String">quoteReplacement</span> <a href="#1021166" title="String">text</a>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
