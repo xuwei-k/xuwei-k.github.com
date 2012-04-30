@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/tools/nsc/interpreter/Line.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/* NSC -- new Scala compiler
+ * Copyright 2005-2011 LAMP/EPFL
+ * @author  Paul Phillips
+ */
+
+<span class="keyword">package</span> scala.tools.nsc
+<span class="keyword">package</span> interpreter
+
+<span class="keyword">import</span> java.util.concurrent.locks.ReentrantLock
+<span class="keyword">import</span> scala.tools.nsc.util.Exceptional
+<span class="keyword">import</span> <a href="../util/Exceptional.scala.html#52033" title="scala.tools.nsc.util.Exceptional.type">Exceptional</a>.unwrap
+<span class="keyword">import</span> <a href="#38287" title="scala.tools.nsc.interpreter.Line.type">Line</a>._
+
+/** Encapsulation of a single line in the repl.  The concurrency
+ *  infrastructure arose to deal with signals so SIGINT could be
+ *  trapped without losing the repl session, but it will be useful
+ *  in ways beyond that.  Each line obtains a thread and the repl
+ *  waits on a condition indicating that either the line has
+ *  completed or failed.
+ */
+<span class="keyword">class</span> <a title="class Line[+T] extends Object" id="38286">Line</a><span class="delimiter">[</span>+<a title="" id="40309">T</a><span class="delimiter">]</span><a href="#38286" title="scala.tools.nsc.interpreter.Line[T]" class="delimiter">(</a><span class="keyword">val</span> <a title="String" id="923805">code</a>: <span title="String">String</span>, <a title="ClassLoader" id="923806">classLoader</a>: <span title="ClassLoader">ClassLoader</span>, <a title="=&gt; T" id="923807">body</a>: =&gt; T<span class="delimiter">)</span> <span class="delimiter">{</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="scala.tools.nsc.interpreter.Line.State" id="907488">_state</a>: <a href="#907441" title="scala.tools.nsc.interpreter.Line.State">State</a>              = <a href="#936535" title="scala.tools.nsc.interpreter.Line.Running.type">Running</a>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Option[Any]" id="907491">_result</a>: <a href="../../../Option.scala.html#1510" title="Option[Any]">Option</a><span class="delimiter">[</span>Any<span class="delimiter">]</span>       = <a href="../../../Option.scala.html#2498" title="None.type">None</a>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Option[Throwable]" id="907494">_caught</a>: <a href="../../../Option.scala.html#1510" title="Option[Throwable]">Option</a><span class="delimiter">[</span>Throwable<span class="delimiter">]</span> = <a href="../../../Option.scala.html#2498" title="None.type">None</a>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.locks.ReentrantLock" id="907496">lock</a>                       = <span title="java.util.concurrent.locks.ReentrantLock" class="keyword">new</span> <span title="java.util.concurrent.locks.ReentrantLock">ReentrantLock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.locks.Condition" id="907498">finished</a>                   = <a href="#907496" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a>.<span title="()java.util.concurrent.locks.Condition">newCondition</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="[T](body: =&gt; T)T" id="907500">withLock</a><span class="delimiter">[</span><a title="" id="907502">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="914676">body</a>: =&gt; T<span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#907496" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a>.<span title="()Unit">lock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="keyword">try</span> <a href="#914676" title="=&gt; T">body</a>
+    <span class="keyword">finally</span> <a href="#907496" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a>.<span title="()Unit">unlock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(state: scala.tools.nsc.interpreter.Line.State)Unit" id="907503">setState</a><span class="delimiter">(</span><a title="scala.tools.nsc.interpreter.Line.State" id="914675">state</a>: <a href="#907441" title="scala.tools.nsc.interpreter.Line.State">State</a><span class="delimiter">)</span> = <a href="#907500" title="(body: =&gt; Unit)Unit">withLock</a> <span class="delimiter">{</span>
+    <a href="#907488" title="(x$1: scala.tools.nsc.interpreter.Line.State)Unit">_state</a> = <a href="#914675" title="scala.tools.nsc.interpreter.Line.State">state</a>
+    <a href="#907498" title="=&gt; java.util.concurrent.locks.Condition">finished</a>.<span title="()Unit">signal</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  // private because it should be called by the manager.
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="907504">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#907515" title="=&gt; Boolean">running</a><span class="delimiter">)</span> <a href="#907503" title="(state: scala.tools.nsc.interpreter.Line.State)Unit">setState</a><span class="delimiter">(</span><a href="#936573" title="scala.tools.nsc.interpreter.Line.Cancelled.type">Cancelled</a><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="[T](body: =&gt; T)Unit" id="907505">runAndSetState</a><span class="delimiter">[</span><a title="" id="907507">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="936498">body</a>: =&gt; T<span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">try</span>     <span class="delimiter">{</span>           <a href="#907491" title="(x$1: Option[Any])Unit">_result</a> = <a href="../../../Option.scala.html#64111" title="(x: T)Some[T]">Some</a><span class="delimiter">(</span><a href="#936498" title="=&gt; T">body</a><span class="delimiter">)</span> ; <a href="#907503" title="(state: scala.tools.nsc.interpreter.Line.State)Unit">setState</a><span class="delimiter">(</span><a href="#936592" title="scala.tools.nsc.interpreter.Line.Done.type">Done</a><span class="delimiter">)</span>  <span class="delimiter">}</span>
+    <span class="keyword">catch</span>   <span class="delimiter">{</span> <span class="keyword">case</span> <a title="Unit" id="936503">t</a> =&gt; <a href="#907494" title="(x$1: Option[Throwable])Unit">_caught</a> = <a href="../../../Option.scala.html#64111" title="(x: Throwable)Some[Throwable]">Some</a><span class="delimiter">(</span><a href="#936503" title="Throwable">t</a><span class="delimiter">)</span>    ; <a href="#907503" title="(state: scala.tools.nsc.interpreter.Line.State)Unit">setState</a><span class="delimiter">(</span><a href="#936554" title="scala.tools.nsc.interpreter.Line.Threw.type">Threw</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  // This is where the line thread is created and started.
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Thread" id="907508">_thread</a>: <span title="Thread">Thread</span> =
+    io.<a href="../io/package.scala.html#57283" title="(f: Thread =&gt; Unit)(body: =&gt; Unit)Thread">newThread</a><span class="delimiter">(</span><a href="#936511" title="Thread">_</a> <span title="(x$1: ClassLoader)Unit">setContextClassLoader</span> <a href="#923806" title="ClassLoader">classLoader</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#907505" title="(body: =&gt; T)Unit">runAndSetState</a><span class="delimiter">(</span><a href="#923807" title="=&gt; T">body</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">def</span> <a title="=&gt; scala.tools.nsc.interpreter.Line.State" id="907510">state</a>     = <a href="#907488" title="=&gt; scala.tools.nsc.interpreter.Line.State">_state</a>
+  <span class="keyword">def</span> <a title="=&gt; Thread" id="907511">thread</a>    = <a href="#907508" title="=&gt; Thread">_thread</a>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="907512">alive</a>     = <a href="#907511" title="=&gt; Thread">thread</a>.<span title="()Boolean">isAlive</span>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="907513">runaway</a>   = <a href="../../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#907514" title="=&gt; Boolean">success</a> <a href="../../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#907512" title="=&gt; Boolean">alive</a>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="907514">success</a>   = <a href="#907488" title="=&gt; scala.tools.nsc.interpreter.Line.State">_state</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#936592" title="scala.tools.nsc.interpreter.Line.Done.type">Done</a>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="907515">running</a>   = <a href="#907488" title="=&gt; scala.tools.nsc.interpreter.Line.State">_state</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#936535" title="scala.tools.nsc.interpreter.Line.Running.type">Running</a>
+
+  <span class="keyword">def</span> <a title="()Throwable" id="907516">caught</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span> <a href="#907518" title="()Unit">await</a><span class="delimiter">(</span><span class="delimiter">)</span> ; <a href="#907494" title="=&gt; Option[Throwable]">_caught</a>.<a href="../../../Option.scala.html#63817" title="(implicit ev: &lt;:&lt;[Null,Throwable])Throwable">orNull</a> <span class="delimiter">}</span>
+  <span class="keyword">def</span> <a title="()Any" id="907517">get</a><span class="delimiter">(</span><span class="delimiter">)</span>    = <span class="delimiter">{</span>
+    <a href="#907518" title="()Unit">await</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#907491" title="=&gt; Option[Any]">_result</a> <a href="../../../Option.scala.html#63814" title="(default: =&gt; Any)Any">getOrElse</a> sys.<a href="../../../sys/package.scala.html#57155" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="String(&quot;Called get with no result.  Code: &quot;)" class="string">&quot;Called get with no result.  Code: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#923805" title="=&gt; String">code</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">def</span> <a title="()Unit" id="907518">await</a><span class="delimiter">(</span><span class="delimiter">)</span>  = <a href="#907500" title="(body: =&gt; Unit)Unit">withLock</a> <span class="delimiter">{</span> <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#907515" title="=&gt; Boolean">running</a><span class="delimiter">)</span> <a href="#907498" title="=&gt; java.util.concurrent.locks.Condition">finished</a>.<span title="()Unit">await</span><a href="#923831" title="()Unit" class="delimiter">(</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span title="Object" class="keyword">object</span> <a title="scala.tools.nsc.interpreter.Line.type" id="38287">Line</a> <a href="#38288" title="scala.tools.nsc.interpreter.Line.type" class="delimiter">{</a>
+  // seconds to let a runaway thread live before calling stop()
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Int" id="907439">HUNTER_KILLER_DELAY</a> = <span title="Int(5)" class="int">5</span>
+
+  // A line opens in state Running, and will eventually
+  // transition to Threw (an exception was caught), Cancelled
+  // (the line was explicitly cancelled, presumably by SIGINT)
+  // or Done (success).
+  <span class="keyword">sealed</span> <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class State extends Object" id="907441">State</a>
+  case <span class="keyword">object</span> <a href="#936521" title="scala.tools.nsc.interpreter.Line.Running.type" id="936535">Running</a> <a href="../../../Product.scala.html#304" title="Product" class="keyword">extends</a> <a href="#907441" title="scala.tools.nsc.interpreter.Line.State">State</a>
+  case <span class="keyword">object</span> <a href="#936540" title="scala.tools.nsc.interpreter.Line.Threw.type" id="936554">Threw</a> <a href="../../../Product.scala.html#304" title="Product" class="keyword">extends</a> <a href="#907441" title="scala.tools.nsc.interpreter.Line.State">State</a>
+  case <span class="keyword">object</span> <a href="#936559" title="scala.tools.nsc.interpreter.Line.Cancelled.type" id="936573">Cancelled</a> <a href="../../../Product.scala.html#304" title="Product" class="keyword">extends</a> <a href="#907441" title="scala.tools.nsc.interpreter.Line.State">State</a>
+  case <span class="keyword">object</span> <a href="#936578" title="scala.tools.nsc.interpreter.Line.Done.type" id="936592">Done</a> <a href="../../../Product.scala.html#304" title="Product" class="keyword">extends</a> <a href="#907441" title="scala.tools.nsc.interpreter.Line.State">State</a>
+
+  <span class="keyword">class</span> <a title="class Manager extends Object" id="907450">Manager</a><a href="#907450" title="scala.tools.nsc.interpreter.Line.Manager" class="delimiter">(</a><a title="ClassLoader" id="907472">classLoader</a>: <span title="ClassLoader">ClassLoader</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    /** Override to add behavior for runaway lines.  This method will
+     *  be called if a line thread is still running five seconds after
+     *  it has been cancelled.
+     */
+    <span class="keyword">def</span> <a title="(line: scala.tools.nsc.interpreter.Line[_])Unit" id="907454">onRunaway</a><span class="delimiter">(</span><a title="scala.tools.nsc.interpreter.Line[_]" id="907474">line</a>: <a href="#38286" title="scala.tools.nsc.interpreter.Line[_]">Line</a><span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../../Unit.scala.html#2389" title="Unit">Unit</a> = <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Option[scala.tools.nsc.interpreter.Line[_]]" id="907456">_current</a>: <a href="../../../Option.scala.html#1510" title="Option[scala.tools.nsc.interpreter.Line[_]]">Option</a><span class="delimiter">[</span>Line<span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="../../../Option.scala.html#2498" title="None.type">None</a>
+    <span class="keyword">def</span> <a title="=&gt; Option[scala.tools.nsc.interpreter.Line[_]]" id="907458">current</a> = <a href="#907456" title="=&gt; Option[scala.tools.nsc.interpreter.Line[_]]">_current</a>
+
+    <span class="keyword">def</span> <a title="()Unit" id="907459">clear</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <a href="#907456" title="=&gt; Option[scala.tools.nsc.interpreter.Line[_]]">_current</a> <a href="../../../Option.scala.html#63839" title="(f: scala.tools.nsc.interpreter.Line[_] =&gt; Unit)Unit">foreach</a> <span class="delimiter">(</span><a href="#923905" title="scala.tools.nsc.interpreter.Line[_]">_</a>.<a href="#907504" title="()Unit">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#907456" title="(x$1: Option[scala.tools.nsc.interpreter.Line[_]])Unit">_current</a> = <a href="../../../Option.scala.html#2498" title="None.type">None</a>
+    <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="[T](code: String)(body: =&gt; T)scala.tools.nsc.interpreter.Line[T]" id="907460">set</a><span class="delimiter">[</span><a title="" id="907462">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="String" id="923801">code</a>: <span title="String">String</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; T" id="923802">body</a>: =&gt; T<span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="scala.tools.nsc.interpreter.Line[T]" id="923803">line</a> = <span title="scala.tools.nsc.interpreter.Line[T]" class="keyword">new</span> <a href="#38286" title="scala.tools.nsc.interpreter.Line[T]">Line</a><span class="delimiter">(</span><a href="#923801" title="String">code</a>, <a href="#907472" title="ClassLoader">classLoader</a>, <a href="#923802" title="=&gt; T">body</a><span class="delimiter">)</span>
+      <a href="#907456" title="(x$1: Option[scala.tools.nsc.interpreter.Line[_]])Unit">_current</a> = <a href="../../../Option.scala.html#64111" title="(x: scala.tools.nsc.interpreter.Line[T])Some[scala.tools.nsc.interpreter.Line[T]]">Some</a><span class="delimiter">(</span><a href="#923803" title="scala.tools.nsc.interpreter.Line[T]">line</a><span class="delimiter">)</span>
+      <a href="#923803" title="scala.tools.nsc.interpreter.Line[T]">line</a>
+    <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="907463">running</a> = <a href="#907456" title="=&gt; Option[scala.tools.nsc.interpreter.Line[_]]">_current</a>.<a href="../../../Option.scala.html#63812" title="=&gt; Boolean">isDefined</a>
+    <span class="keyword">def</span> <a title="()Unit" id="907464">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <a href="#907458" title="=&gt; Option[scala.tools.nsc.interpreter.Line[_]]">current</a> <a href="../../../Option.scala.html#63839" title="(f: scala.tools.nsc.interpreter.Line[_] =&gt; Any)Unit">foreach</a> <span class="delimiter">{</span> <a title="scala.tools.nsc.interpreter.Line[_]" id="914667">line</a> =&gt;
+        <a href="#914667" title="scala.tools.nsc.interpreter.Line[_]">line</a>.<a href="#907511" title="=&gt; Thread">thread</a>.<span title="()Unit">interrupt</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#914667" title="scala.tools.nsc.interpreter.Line[_]">line</a>.<a href="#907504" title="()Unit">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span title="Any" class="keyword">if</span> <span class="delimiter">(</span><a href="#914667" title="scala.tools.nsc.interpreter.Line[_]">line</a>.<a href="#907513" title="=&gt; Boolean">runaway</a><span class="delimiter">)</span>
+          io.<a href="../io/package.scala.html#57284" title="(seconds: Int)(body: =&gt; Unit)java.util.Timer">timer</a><span class="delimiter">(</span><a href="#907439" title="=&gt; Int">HUNTER_KILLER_DELAY</a><span class="delimiter">)</span> <span class="delimiter">{</span> <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#914667" title="scala.tools.nsc.interpreter.Line[_]">line</a>.<a href="#907512" title="=&gt; Boolean">alive</a><span class="delimiter">)</span> <a href="#907454" title="(line: scala.tools.nsc.interpreter.Line[_])Unit">onRunaway</a><span class="delimiter">(</span><a href="#914667" title="scala.tools.nsc.interpreter.Line[_]">line</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span title="Object" class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

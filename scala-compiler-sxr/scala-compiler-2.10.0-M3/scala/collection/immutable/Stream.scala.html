@@ -1,0 +1,1146 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/collection/immutable/Stream.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.collection
+<span class="keyword">package</span> immutable
+
+<span class="keyword">import</span> generic._
+<span class="keyword">import</span> mutable.<span class="delimiter">{</span>Builder, StringBuilder, LazyBuilder, ListBuffer<span class="delimiter">}</span>
+<span class="keyword">import</span> scala.annotation.tailrec
+<span class="keyword">import</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.cons
+<span class="keyword">import</span> <a href="../../language.scala.html#2216" title="language.type">language</a>.implicitConversions
+
+/** The class `Stream` implements lazy lists where elements
+ *  are only evaluated when they are needed. Here is an example:
+ *
+ *  {{{
+ *  import scala.math.BigInt
+ *  object Main extends App {
+ *
+ *    val fibs: Stream[BigInt] = BigInt(0) #:: BigInt(1) #:: fibs.zip(fibs.tail).map { n =&gt; n._1 + n._2 }
+ *
+ *    fibs take 5 foreach println
+ *  }
+ *
+ *  // prints
+ *  //
+ *  // 0
+ *  // 1
+ *  // 1
+ *  // 2
+ *  // 3
+ *  }}}
+ *
+ *  The `Stream` class also employs memoization such that previously computed
+ *  values are converted from `Stream` elements to concrete values of type `A`.
+ *  To illustrate, we will alter body of the `fibs` value above and take some
+ *  more values:
+ *
+ *  {{{
+ *  import scala.math.BigInt
+ *  object Main extends App {
+ *
+ *    val fibs: Stream[BigInt] = BigInt(0) #:: BigInt(1) #:: fibs.zip(
+ *      fibs.tail).map(n =&gt; {
+ *        println(&quot;Adding %d and %d&quot;.format(n._1, n._2))
+ *        n._1 + n._2
+ *      })
+ *
+ *    fibs take 5 foreach println
+ *    fibs take 6 foreach println
+ *  }
+ *
+ *  // prints
+ *  //
+ *  // 0
+ *  // 1
+ *  // Adding 0 and 1
+ *  // 1
+ *  // Adding 1 and 1
+ *  // 2
+ *  // Adding 1 and 2
+ *  // 3
+ *
+ *  // And then prints
+ *  //
+ *  // 0
+ *  // 1
+ *  // 1
+ *  // 2
+ *  // 3
+ *  // Adding 2 and 3
+ *  // 5
+ *  }}}
+ *
+ *  There are a number of subtle points to the above example.
+ *
+ *  - The definition of `fibs` is a `val` not a method.  The memoization of the
+ *  `Stream` requires us to have somewhere to store the information and a `val`
+ *  allows us to do that.
+ *
+ *  - While the `Stream` is actually being modified during access, this does not
+ *  change the notion of its immutability.  Once the values are memoized they do
+ *  not change and values that have yet to be memoized still &quot;exist&quot;, they
+ *  simply haven't been realized yet.
+ *
+ *  - One must be cautious of memoization; you can very quickly eat up large
+ *  amounts of memory if you're not careful.  The reason for this is that the
+ *  memoization of the `Stream` creates a structure much like
+ *  [[scala.collection.immutable.List]].  So long as something is holding on to
+ *  the head, the head holds on to the tail, and so it continues recursively.
+ *  If, on the other hand, there is nothing holding on to the head (e.g. we used
+ *  `def` to define the `Stream`) then once it is no longer being used directly,
+ *  it disappears.
+ *  {{{
+ *  // For example, let's build the natural numbers and do some silly iteration
+ *  // over them.
+ *
+ *  // We'll start with a silly iteration
+ *  def loop(s: String, i: Int, iter: Iterator[Int]): Unit = {
+ *    // Stop after 200,000
+ *    if (i &lt; 200001) {
+ *      if (i % 50000 == 0) println(s + i)
+ *      loop(s, iter.next, iter)
+ *    }
+ *  }
+ *
+ *  // Our first Stream definition will be a val definition
+ *  val stream1: Stream[Int] = {
+ *    def loop(v: Int): Stream[Int] = v #:: loop(v + 1)
+ *    loop(0)
+ *  }
+ *
+ *  // Because stream1 is a val, everything that the iterator produces is held
+ *  // by virtue of the fact that the head of the Stream is held in stream1
+ *  val it1 = stream1.iterator
+ *  loop(&quot;Iterator1: &quot;, it1.next, it1)
+ *
+ *  // We can redefine this Stream such that all we have is the Iterator left
+ *  // and allow the Stream to be garbage collected as required.  Using a def
+ *  // to provide the Stream ensures that no val is holding onto the head as
+ *  // is the case with stream1
+ *  def stream2: Stream[Int] = {
+ *    def loop(v: Int): Stream[Int] = v #:: loop(v + 1)
+ *    loop(0)
+ *  }
+ *  val it2 = stream2.iterator
+ *  loop(&quot;Iterator2: &quot;, it2.next, it2)
+ *
+ *  // And, of course, we don't actually need a Stream at all for such a simple
+ *  // problem.  There's no reason to use a Stream if you don't actually need
+ *  // one.
+ *  val it3 = new Iterator[Int] {
+ *    var i = -1
+ *    def hasNext = true
+ *    def next(): Int = { i += 1; i }
+ *  }
+ *  loop(&quot;Iterator3: &quot;, it3.next, it3)
+ *  }}}
+ *
+ *  - The fact that `tail` works at all is of interest.  In the definition of
+ *  `fibs` we have an initial `(0, 1, Stream(...))` so `tail` is deterministic.
+ *  If we deinfed `fibs` such that only `0` were concretely known then the act
+ *  of determining `tail` would require the evaluation of `tail` which would
+ *  cause an infinite recursion and stack overflow.  If we define a definition
+ *  where the tail is not initially computable then we're going to have an
+ *  infinite recursion:
+ *  {{{
+ *  // The first time we try to access the tail we're going to need more
+ *  // information which will require us to recurse, which will require us to
+ *  // recurse, which...
+ *  val sov: Stream[Vector[Int]] = Vector(0) #:: sov.zip(sov.tail).map { n =&gt; n._1 ++ n._2 }
+ *  }}}
+ *
+ *  The definition of `fibs` above creates a larger number of objects than
+ *  necessary depending on how you might want to implement it.  The following
+ *  implementation provides a more &quot;cost effective&quot; implementation due to the
+ *  fact that it has a more direct route to the numbers themselves:
+ *
+ *  {{{
+ *  lazy val fib: Stream[Int] = {
+ *    def loop(h: Int, n: Int): Stream[Int] = h #:: loop(n, h + n)
+ *    loop(1, 1)
+ *  }
+ *  }}}
+ *
+ *  @tparam A    the type of the elements contained in this stream.
+ *
+ *  @author Martin Odersky, Matthias Zenger
+ *  @version 1.1 08/08/03
+ *  @since   2.8
+ *  @see [[http://docs.scala-lang.org/overviews/collections/concrete-immutable-collection-classes.html#streams &quot;Scala's Collection Library overview&quot;]]
+ *  section on `Streams` for more information.
+
+ *  @define naturalsEx def naturalsFrom(i: Int): Stream[Int] = i #:: naturalsFrom(i + 1)
+ *  @define Coll Stream
+ *  @define coll stream
+ *  @define orderDependent
+ *  @define orderDependentFold
+ */
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class Stream[+A] extends scala.collection.AbstractSeq[A] with scala.collection.immutable.LinearSeq[A] with scala.collection.generic.GenericTraversableTemplate[A,scala.collection.immutable.Stream] with scala.collection.LinearSeqOptimized[A,scala.collection.immutable.Stream[A]]" id="11590">Stream</a><span class="delimiter">[</span>+<a title="" id="12706">A</a><span class="delimiter">]</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">extends</a> <a href="../Seq.scala.html#5062" title="scala.collection.AbstractSeq[A]">AbstractSeq</a><span class="delimiter">[</span>A<span class="delimiter">]</span>
+                             <span class="keyword">with</span> <a href="LinearSeq.scala.html#11872" title="scala.collection.immutable.LinearSeq[A]">LinearSeq</a><span class="delimiter">[</span>A<span class="delimiter">]</span>
+                             <span class="keyword">with</span> <a href="../generic/GenericTraversableTemplate.scala.html#11016" title="scala.collection.generic.GenericTraversableTemplate[A,scala.collection.immutable.Stream]">GenericTraversableTemplate</a><span class="delimiter">[</span>A, Stream<span class="delimiter">]</span>
+                             <span class="keyword">with</span> <a href="../LinearSeqOptimized.scala.html#5368" title="scala.collection.LinearSeqOptimized[A,scala.collection.immutable.Stream[A]]">LinearSeqOptimized</a><span class="delimiter">[</span>A, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span> <span class="delimiter">{</span>
+self =&gt;
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.generic.GenericCompanion[scala.collection.immutable.Stream]" id="114390">companion</a>: <a href="../generic/GenericCompanion.scala.html#11091" title="scala.collection.generic.GenericCompanion[scala.collection.immutable.Stream]">GenericCompanion</a><span class="delimiter">[</span>Stream<span class="delimiter">]</span> = <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>
+
+  <span class="keyword">import</span> scala.collection.<span class="delimiter">{</span>Traversable, Iterable, Seq, IndexedSeq<span class="delimiter">}</span>
+
+  /** Indicates whether or not the `Stream` is empty.
+   *
+   * @return `true` if the `Stream` is empty and `false` otherwise.
+   */
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="114392">isEmpty</a>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a>
+
+  /** Gives constant time access to the first element of this `Stream`.  Using
+   * the `fibs` example from earlier:
+   *
+   * {{{
+   * println(fibs head)
+   * // prints
+   * // 0
+   * }}}
+   *
+   *  @return The first element of the `Stream`.
+   *  @throws Predef.NoSuchElementException if the stream is empty.
+   */
+  <span class="keyword">def</span> <a title="=&gt; A" id="114393">head</a>: <a href="#12706" title="A">A</a>
+
+  /** A stream consisting of the remaining elements of this stream after the
+   *  first one.
+   *
+   *  Note that this method does not force evaluation of the `Stream` but merely
+   *  returns the lazy result.
+   *
+   *  @return The tail of the `Stream`.
+   *  @throws Predef.UnsupportedOperationException if the stream is empty.
+   */
+  <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="114394">tail</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span>
+
+  /** Is the tail of this stream defined? */
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; Boolean" id="114395">tailDefined</a>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a>
+
+  // Implementation of abstract method in Traversable
+
+  // New methods in Stream
+
+  /** The stream resulting from the concatenation of this stream with the argument stream.
+   *  @param rest   The stream that gets appended to this stream
+   *  @return       The stream containing elements of this stream and the traversable object.
+   */
+  <span class="keyword">def</span> <a title="[B &gt;: A](rest: =&gt; scala.collection.TraversableOnce[B])scala.collection.immutable.Stream[B]" id="114396">append</a><span class="delimiter">[</span><a title=" &gt;: A" id="114398">B</a> &gt;: A<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; scala.collection.TraversableOnce[B]" id="225042">rest</a>: =&gt; TraversableOnce<span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">[</span>B<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream[B]" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#225042" title="=&gt; scala.collection.TraversableOnce[B]">rest</a>.<a href="../GenTraversableOnce.scala.html#59280" title="=&gt; Stream[B]">toStream</a> <span class="keyword">else</span> <a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114396" title="(rest: =&gt; scala.collection.TraversableOnce[B])scala.collection.immutable.Stream[B]">append</a> <a href="#225042" title="=&gt; scala.collection.TraversableOnce[B]">rest</a><span class="delimiter">)</span>
+
+  /** Forces evaluation of the whole stream and returns it.
+   *
+   * @note Often we use `Stream`s to represent an infinite set or series.  If
+   * that's the case for your particular `Stream` then this function will never
+   * return and will probably crash the VM with an `OutOfMemory` exception.
+   *
+   *  @return The fully realized `Stream`.
+   */
+  <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="114399">force</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="225065">these</a> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#225065" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#225065" title="scala.collection.immutable.Stream[A]">these</a> = <a href="#225065" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+    <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+  <span class="delimiter">}</span>
+
+  /** Prints elements of this stream one by one, separated by commas. */
+  <span class="keyword">def</span> <a title="()Unit" id="114400">print</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#114401" title="(sep: String)Unit">print</a><span class="delimiter">(</span><span title="String(&quot;, &quot;)" class="string">&quot;, &quot;</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** Prints elements of this stream one by one, separated by `sep`.
+   *  @param sep   The separator string printed between consecutive elements.
+   */
+  <span class="keyword">def</span> <a title="(sep: String)Unit" id="114401">print</a><span class="delimiter">(</span><a title="String" id="225074">sep</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(these: scala.collection.immutable.Stream[A], start: String)Unit" id="225076">loop</a><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="225077">these</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="String" id="225078">start</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../../Console.scala.html#227" title="Console.type">Console</a>.<a href="../../Console.scala.html#64298" title="(obj: Any)Unit">print</a><span class="delimiter">(</span><a href="#225078" title="String">start</a><span class="delimiter">)</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#225077" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="../../Console.scala.html#227" title="Console.type">Console</a>.<a href="../../Console.scala.html#64298" title="(obj: Any)Unit">print</a><span class="delimiter">(</span><span title="String(&quot;empty&quot;)" class="string">&quot;empty&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <span class="delimiter">{</span>
+        <a href="../../Console.scala.html#227" title="Console.type">Console</a>.<a href="../../Console.scala.html#64298" title="(obj: Any)Unit">print</a><span class="delimiter">(</span><a href="#225077" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>
+        <a href="#225076" title="(these: scala.collection.immutable.Stream[A], start: String)Unit">loop</a><span class="delimiter">(</span><a href="#225077" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>, <a href="#225074" title="String">sep</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <a href="#225076" title="(these: scala.collection.immutable.Stream[A], start: String)Unit">loop</a><span class="delimiter">(</span><a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>, <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Returns the length of this `Stream`.
+   *
+   * @note In order to compute the length of the `Stream`, it must first be
+   * fully realized, which could cause the complete evaluation of an infinite
+   * series, assuming that's what your `Stream` represents.
+   *
+   * @return The length of this `Stream`.
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Int" id="114402">length</a>: <a href="../../Int.scala.html#508" title="Int">Int</a> = <span class="delimiter">{</span>
+    <span class="keyword">var</span> <a title="Int" id="225081">len</a> = <span title="Int(0)" class="int">0</span>
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="225082">left</a> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#225082" title="scala.collection.immutable.Stream[A]">left</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#225083" title="()Unit" class="delimiter">{</a>
+      <a href="#225081" title="Int">len</a> <a href="../../Int.scala.html#57948" title="(x: Int)Int">+=</a> <span title="Int(1)" class="int">1</span>
+      <a href="#225082" title="scala.collection.immutable.Stream[A]">left</a> = <a href="#225082" title="scala.collection.immutable.Stream[A]">left</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+    <span class="delimiter">}</span>
+    <a href="#225081" title="Int">len</a>
+  <span class="delimiter">}</span>
+
+  /** It's an imperfect world, but at least we can bottle up the
+   *  imperfection in a capsule.
+   */
+  @inline <span class="keyword">private</span> <span class="keyword">def</span> <a title="[That](x: AnyRef)That" id="114403">asThat</a><span class="delimiter">[</span><a title="" id="114405">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="AnyRef" id="225093">x</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>: <a href="#114405" title="That">That</a>     = <a href="#225093" title="AnyRef">x</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="That" class="delimiter">[</span><a href="#114405" title="That">That</a><span class="delimiter">]</span>
+  @inline <span class="keyword">private</span> <span class="keyword">def</span> <a title="[B](x: AnyRef)scala.collection.immutable.Stream[B]" id="114406">asStream</a><span class="delimiter">[</span><a title="" id="114408">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="AnyRef" id="225095">x</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">[</span>B<span class="delimiter">]</span> = <a href="#225095" title="AnyRef">x</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.collection.immutable.Stream[B]" class="delimiter">[</span><a href="#11590" title="scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">]</span>
+  @inline <span class="keyword">private</span> <span class="keyword">def</span> <a title="[B, That](bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean" id="114409">isStreamBuilder</a><span class="delimiter">[</span><a title="" id="114412">B</a>, <a title="" id="114413">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225097">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span> =
+    <a href="../generic/CanBuildFrom.scala.html#60758" title="(from: scala.collection.immutable.Stream[A])scala.collection.mutable.Builder[B,That]">bf</a><span class="delimiter">(</span><a href="../TraversableLike.scala.html#58941" title="=&gt; scala.collection.immutable.Stream[A]">repr</a><span class="delimiter">)</span>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span>Stream.<a href="#126001" title="scala.collection.immutable.Stream.StreamBuilder[_]">StreamBuilder</a><span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">]</span>
+
+  // Overridden methods from Traversable
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="114414">toStream</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Boolean" id="114415">hasDefiniteSize</a> = <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(s: scala.collection.immutable.Stream[A])Boolean" id="225127">loop</a><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="225128">s</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <a href="#225128" title="scala.collection.immutable.Stream[A]">s</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a> <a href="../../Boolean.scala.html#58724" title="(x: Boolean)Boolean">||</a> <a href="#225128" title="scala.collection.immutable.Stream[A]">s</a>.<a href="#114395" title="=&gt; Boolean">tailDefined</a> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#225127" title="(s: scala.collection.immutable.Stream[A])Boolean">loop</a><span class="delimiter">(</span><a href="#225128" title="scala.collection.immutable.Stream[A]">s</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a><span class="delimiter">)</span>
+    <a href="#225127" title="(s: scala.collection.immutable.Stream[A])Boolean">loop</a><span class="delimiter">(</span><a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Create a new stream which contains all elements of this stream followed by
+   * all elements of Traversable `that`.
+   *
+   * @note It's subtle why this works. We know that if the target type of the
+   * [[scala.collection.mutable.Builder]] `That` is either a `Stream`, or one of
+   * its supertypes, or undefined, then `StreamBuilder` will be chosen for the
+   * implicit.  We recognize that fact and optimize to get more laziness.
+   *
+   * @note This method doesn't cause the `Stream` to be fully realized but it
+   * should be noted that using the `++` operator from another collection type
+   * could cause infinite realization of a `Stream`.  For example, referring to
+   * the definition of `fibs` in the preamble, the following would never return:
+   * `List(BigInt(12)) ++ fibs`.
+   *
+   * @tparam B The element type of the returned collection.'''That'''
+   * @param that The [[scala.collection.GenTraversableOnce]] the be contatenated
+   * to this `Stream`.
+   * @return A new collection containing the result of concatenating `this` with
+   * `that`.
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[B &gt;: A, That](that: scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="114416">++</a><span class="delimiter">[</span><a title=" &gt;: A" id="114419">B</a> &gt;: A, <a title="" id="114420">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.GenTraversableOnce[B]" id="217298">that</a>: <a href="../GenTraversableOnce.scala.html#5134" title="scala.collection.GenTraversableOnce[B]">GenTraversableOnce</a><span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="217299">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114420" title="That">That</a> =
+    // we assume there is no other builder factory on streams and therefore know that That = Stream[A]
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#217299" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span>
+      <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#217298" title="scala.collection.GenTraversableOnce[B]">that</a>.<a href="../GenTraversableOnce.scala.html#59280" title="=&gt; Stream[B]">toStream</a>
+      <span class="keyword">else</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="#114406" title="[B](x: AnyRef)scala.collection.immutable.Stream[B]">asStream</a><span title="(x: AnyRef)scala.collection.immutable.Stream[A]" class="delimiter">[</span><a href="#12706" title="A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114416" title="(that: scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,AnyRef])AnyRef">++</a> <a href="#217298" title="scala.collection.GenTraversableOnce[B]">that</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableLike.scala.html#58951" title="(that: scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">++</a><span class="delimiter">(</span><a href="#217298" title="scala.collection.GenTraversableOnce[B]">that</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#217299" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[B &gt;: A, That](elem: B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="114421">+:</a><span class="delimiter">[</span><a title=" &gt;: A" id="114424">B</a> &gt;: A, <a title="" id="114425">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="B" id="225225">elem</a>: <a href="#114424" title="B">B</a><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225226">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114425" title="That">That</a> =
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#225226" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span><a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="#225225" title="B">elem</a>, <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../SeqLike.scala.html#59805" title="(elem: B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">+:</a><span class="delimiter">(</span><a href="#225225" title="B">elem</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225226" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+
+  /**
+   * Create a new stream which contains all intermediate results of applying the
+   * operator to subsequent elements left to right.  `scanLeft` is analogous to
+   * `foldLeft`.
+   *
+   * @note This works because the target type of the
+   * [[scala.collection.mutable.Builder]] `That` is a `Stream`.
+   *
+   * @param z The initial value for the scan.
+   * @param op A function that will apply operations to successive values in the
+   * `Stream` against previous accumulated results.
+   * @return A new collection containing the modifications from the application
+   * of `op`.
+   */
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[B, That](z: B)(op: (B, A) =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="114426">scanLeft</a><span class="delimiter">[</span><a title="" id="114429">B</a>, <a title="" id="114430">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="B" id="225299">z</a>: <a href="#114429" title="B">B</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="(B, A) =&gt; B" id="225300">op</a>: <span class="delimiter">(</span>B, A<span class="delimiter">)</span> =&gt; B<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225301">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114430" title="That">That</a> =
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#225301" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span>
+      <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#126008" title="(xs: B*)scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">(</span><a href="#225299" title="B">z</a><span class="delimiter">)</span>
+      <span class="keyword">else</span> <a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="#225299" title="B">z</a>, <a href="#114406" title="[B](x: AnyRef)scala.collection.immutable.Stream[B]">asStream</a><span title="(x: AnyRef)scala.collection.immutable.Stream[B]" class="delimiter">[</span><a href="#114429" title="B">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="#114426" title="(z: B)(op: (B, A) =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,AnyRef])AnyRef">scanLeft</a><span class="delimiter">(</span><a href="../../Function2.scala.html#65847" title="(v1: B, v2: A)B">op</a><span class="delimiter">(</span><a href="#225299" title="B">z</a>, <a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span><a href="#125994" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream.Coll,B,scala.collection.immutable.Stream[B]]" class="delimiter">(</a><a href="#225300" title="(B, A) =&gt; B">op</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableLike.scala.html#59000" title="(z: B)(op: (B, A) =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">scanLeft</a><span class="delimiter">(</span><a href="#225299" title="B">z</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225300" title="(B, A) =&gt; B">op</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225301" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+
+  /** Returns the stream resulting from applying the given function `f` to each
+   * element of this stream.  This returns a lazy `Stream` such that it does not
+   * need to be fully realized.
+   *
+   * @example {{{
+   * $naturalsEx
+   * naturalsFrom(1).map(_ + 10) take 5 mkString(&quot;, &quot;)
+   * // produces: &quot;11, 12, 13, 14, 15&quot;
+   * }}}
+   *
+   * @tparam B The element type of the returned collection '''That'''.
+   * @param f function to apply to each element.
+   * @return  `f(a,,0,,), ..., f(a,,n,,)` if this sequence is `a,,0,,, ..., a,,n,,`.
+   */
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[B, That](f: A =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="114431">map</a><span class="delimiter">[</span><a title="" id="114434">B</a>, <a title="" id="114435">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A =&gt; B" id="225430">f</a>: A =&gt; B<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225431">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114435" title="That">That</a> = <span class="delimiter">{</span>
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#225431" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span>
+      <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+      <span class="keyword">else</span> <a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)B">f</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>, <a href="#114406" title="[B](x: AnyRef)scala.collection.immutable.Stream[B]">asStream</a><span title="(x: AnyRef)scala.collection.immutable.Stream[B]" class="delimiter">[</span><a href="#114434" title="B">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114431" title="(f: A =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,AnyRef])AnyRef">map</a> <a href="#225430" title="A =&gt; B">f</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableLike.scala.html#58971" title="(f: A =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">map</a><span class="delimiter">(</span><a href="#225430" title="A =&gt; B">f</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225431" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[B, That](pf: PartialFunction[A,B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="114436">collect</a><span class="delimiter">[</span><a title="" id="114439">B</a>, <a title="" id="114440">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[A,B]" id="225542">pf</a>: <a href="../../PartialFunction.scala.html#217" title="PartialFunction[A,B]">PartialFunction</a><span class="delimiter">[</span>A, B<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225543">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114440" title="That">That</a> = <span class="delimiter">{</span>
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#225543" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableLike.scala.html#58983" title="(pf: PartialFunction[A,B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">collect</a><span class="delimiter">(</span><a href="#225542" title="PartialFunction[A,B]">pf</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225543" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <span class="delimiter">{</span>
+      // this implementation avoids:
+      // 1) stackoverflows (could be achieved with tailrec, too)
+      // 2) out of memory errors for big streams (`this` reference can be eliminated from the stack)
+      <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="225580">rest</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#225580" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../TraversableOnce.scala.html#59102" title="=&gt; Boolean">nonEmpty</a> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#225542" title="PartialFunction[A,B]">pf</a>.<a href="../../PartialFunction.scala.html#59566" title="(x: A)Boolean">isDefinedAt</a><span class="delimiter">(</span><a href="#225580" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#225580" title="scala.collection.immutable.Stream[A]">rest</a> = <a href="#225580" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+
+      //  without the call to the companion object, a thunk is created for the tail of the new stream,
+      //  and the closure of the thunk will reference `this`
+      <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#225580" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="That" class="delimiter">[</span><a href="#114440" title="That">That</a><span class="delimiter">]</span>
+      <span class="keyword">else</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126045" title="(stream: scala.collection.immutable.Stream[A], pf: PartialFunction[A,B], bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])scala.collection.immutable.Stream.Cons[B]">collectedTail</a><span class="delimiter">(</span><a href="#225580" title="scala.collection.immutable.Stream[A]">rest</a>, <a href="#225542" title="PartialFunction[A,B]">pf</a>, <a href="#225543" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="That" class="delimiter">[</span><a href="#114440" title="That">That</a><span class="delimiter">]</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Applies the given function `f` to each element of this stream, then
+   * concatenates the results.  As with `map` this function does not need to
+   * realize the entire `Stream` but continues to keep it as a lazy `Stream`.
+   *
+   * @example {{{
+   * // Let's create a Stream of Vectors, each of which contains the
+   * // collection of Fibonacci numbers up to the current value.  We
+   * // can then 'flatMap' that Stream.
+   *
+   * val fibVec: Stream[Vector[Int]] = Vector(0) #:: Vector(0, 1) #:: fibVec.zip(fibVec.tail).map(n =&gt; {
+   *   n._2 ++ Vector(n._1.last + n._2.last)
+   * })
+   *
+   * fibVec take 5 foreach println
+   * // prints
+   * // Vector(0)
+   * // Vector(0, 1)
+   * // Vector(0, 1, 1)
+   * // Vector(0, 1, 1, 2)
+   * // Vector(0, 1, 1, 2, 3)
+   *
+   * // If we now want to `flatMap` across that stream by adding 10
+   * // we can see what the series turns into:
+   *
+   * fibVec.flatMap(_.map(_ + 10)) take 15 mkString(&quot;, &quot;)
+   * // produces: 10, 10, 11, 10, 11, 11, 10, 11, 11, 12, 10, 11, 11, 12, 13
+   * }}}
+   *
+   * @tparam B The element type of the returned collection '''That'''.
+   * @param f  the function to apply on each element.
+   * @return  `f(a,,0,,) ::: ... ::: f(a,,n,,)` if
+   *           this stream is `[a,,0,,, ..., a,,n,,]`.
+   */
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[B, That](f: A =&gt; scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="114441">flatMap</a><span class="delimiter">[</span><a title="" id="114444">B</a>, <a title="" id="114445">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A =&gt; scala.collection.GenTraversableOnce[B]" id="225643">f</a>: A =&gt; GenTraversableOnce<span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225644">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114445" title="That">That</a> =
+    // we assume there is no other builder factory on streams and therefore know that That = Stream[B]
+    // optimisations are not for speed, but for functionality
+    // see tickets #153, #498, #2147, and corresponding tests in run/ (as well as run/stream_flatmap_odds.scala)
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#225644" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span>
+      <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+      <span class="keyword">else</span> <span class="delimiter">{</span>
+        // establish !prefix.isEmpty || nonEmptyPrefix.isEmpty
+        <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="225669">nonEmptyPrefix</a> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+        <span class="keyword">var</span> <a title="Stream[B]" id="225670">prefix</a> = <a href="../../Function1.scala.html#59555" title="(v1: A)scala.collection.GenTraversableOnce[B]">f</a><span class="delimiter">(</span><a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>.<a href="../GenTraversableOnce.scala.html#59280" title="=&gt; Stream[B]">toStream</a>
+        <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#225670" title="Stream[B]">prefix</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#225671" title="()Unit" class="delimiter">{</a>
+          <a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a> = <a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+          <span title="Unit" class="keyword">if</span><span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span>
+            <a href="#225670" title="Stream[B]">prefix</a> = <a href="../../Function1.scala.html#59555" title="(v1: A)scala.collection.GenTraversableOnce[B]">f</a><span class="delimiter">(</span><a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>.<a href="../GenTraversableOnce.scala.html#59280" title="=&gt; Stream[B]">toStream</a>
+        <span class="delimiter">}</span>
+
+        <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126005" title="scala.collection.immutable.Stream[Nothing]">empty</a>
+        <span class="keyword">else</span> <a href="#225670" title="Stream[B]">prefix</a> <a href="#114396" title="(rest: =&gt; scala.collection.TraversableOnce[B])scala.collection.immutable.Stream[B]">append</a> <a href="#114406" title="[B](x: AnyRef)scala.collection.immutable.Stream[B]">asStream</a><span title="(x: AnyRef)scala.collection.immutable.Stream[B]" class="delimiter">[</span><a href="#114444" title="B">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a href="#225669" title="scala.collection.immutable.Stream[A]">nonEmptyPrefix</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114441" title="(f: A =&gt; scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,AnyRef])AnyRef">flatMap</a> <a href="#225643" title="A =&gt; scala.collection.GenTraversableOnce[B]">f</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableLike.scala.html#58976" title="(f: A =&gt; scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">flatMap</a><span class="delimiter">(</span><a href="#225643" title="A =&gt; scala.collection.GenTraversableOnce[B]">f</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225644" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+
+  /** Returns all the elements of this `Stream` that satisfy the predicate `p`
+   * in a new `Stream` - i.e. it is still a lazy data structure. The order of
+   * the elements is preserved
+   *
+   *  @param p the predicate used to filter the stream.
+   *  @return the elements of this stream satisfying `p`.
+   *
+   * @example {{{
+   * $naturalsEx
+   * naturalsFrom(1)  10 } filter { _ % 5 == 0 } take 10 mkString(&quot;, &quot;)
+   * // produces
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]" id="114446">filter</a><span class="delimiter">(</span><a title="A =&gt; Boolean" id="225765">p</a>: A =&gt; Boolean<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    // optimization: drop leading prefix of elems for which f returns false
+    // var rest = this dropWhile (!p(_)) - forget DRY principle - GC can't collect otherwise
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="225770">rest</a> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#225770" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="#225770" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#225770" title="scala.collection.immutable.Stream[A]">rest</a> = <a href="#225770" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+    // private utility func to avoid `this` on stack (would be needed for the lazy arg)
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="#225770" title="scala.collection.immutable.Stream[A]">rest</a>.<a href="../TraversableOnce.scala.html#59102" title="=&gt; Boolean">nonEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126042" title="(stream: scala.collection.immutable.Stream[A], p: A =&gt; Boolean)scala.collection.immutable.Stream.Cons[A]">filteredTail</a><span class="delimiter">(</span><a href="#225770" title="scala.collection.immutable.Stream[A]">rest</a>, <a href="#225765" title="A =&gt; Boolean">p</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="(p: A =&gt; Boolean)Stream.this.StreamWithFilter" id="114447">withFilter</a><span class="delimiter">(</span><a title="A =&gt; Boolean" id="225804">p</a>: A =&gt; Boolean<span class="delimiter">)</span>: <a href="#114448" title="Stream.this.StreamWithFilter">StreamWithFilter</a> = <span title="Stream.this.StreamWithFilter" class="keyword">new</span> <a href="#114448" title="Stream.this.StreamWithFilter">StreamWithFilter</a><span class="delimiter">(</span><a href="#225804" title="A =&gt; Boolean">p</a><span class="delimiter">)</span>
+
+  /** A lazier implementation of WithFilter than TraversableLike's.
+   */
+  <span class="keyword">final</span> <span class="keyword">class</span> <a title="class StreamWithFilter extends Stream.this.WithFilter" id="114448">StreamWithFilter</a><a href="#114448" title="Stream.this.StreamWithFilter" class="delimiter">(</a><a title="A =&gt; Boolean" id="225826">p</a>: A =&gt; Boolean<span class="delimiter">)</span> <span class="keyword">extends</span> <a href="../TraversableLike.scala.html#59039" title="Stream.this.WithFilter">WithFilter</a><span class="delimiter">(</span><a href="#225826" title="A =&gt; Boolean">p</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="[B, That](f: A =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="225812">map</a><span class="delimiter">[</span><a title="" id="225815">B</a>, <a title="" id="225816">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A =&gt; B" id="225830">f</a>: A =&gt; B<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225831">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#225816" title="That">That</a> = <span class="delimiter">{</span>
+      <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[B]" id="225847">tailMap</a> = <a href="#114406" title="[B](x: AnyRef)scala.collection.immutable.Stream[B]">asStream</a><span title="(x: AnyRef)scala.collection.immutable.Stream[B]" class="delimiter">[</span><a href="#225815" title="B">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114447" title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]#StreamWithFilter">withFilter</a> <a href="#225826" title="A =&gt; Boolean">p</a> <a href="#225812" title="(f: A =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,AnyRef])AnyRef">map</a> <a href="#225830" title="A =&gt; B">f</a><span class="delimiter">)</span>
+      <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#225831" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span>
+        <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+        <span class="keyword">else</span> <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)B">f</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>, <a href="#225847" title="=&gt; scala.collection.immutable.Stream[B]">tailMap</a><span class="delimiter">)</span>
+        <span class="keyword">else</span> <a href="#225847" title="=&gt; scala.collection.immutable.Stream[B]">tailMap</a>
+      <span class="delimiter">)</span>
+      <span class="keyword">else</span> <a href="#114448" title="Stream.this.StreamWithFilter" class="keyword">super</a>.<a href="../TraversableLike.scala.html#163491" title="(f: A =&gt; B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">map</a><span class="delimiter">(</span><a href="#225830" title="A =&gt; B">f</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225831" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="[B, That](f: A =&gt; scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="225817">flatMap</a><span class="delimiter">[</span><a title="" id="225820">B</a>, <a title="" id="225821">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A =&gt; scala.collection.GenTraversableOnce[B]" id="225938">f</a>: A =&gt; GenTraversableOnce<span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225939">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#225821" title="That">That</a> = <span class="delimiter">{</span>
+      <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[B]" id="225955">tailFlatMap</a> = <a href="#114406" title="[B](x: AnyRef)scala.collection.immutable.Stream[B]">asStream</a><span title="(x: AnyRef)scala.collection.immutable.Stream[B]" class="delimiter">[</span><a href="#225820" title="B">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114447" title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]#StreamWithFilter">withFilter</a> <a href="#225826" title="A =&gt; Boolean">p</a> <a href="#225817" title="(f: A =&gt; scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,AnyRef])AnyRef">flatMap</a> <a href="#225938" title="A =&gt; scala.collection.GenTraversableOnce[B]">f</a><span class="delimiter">)</span>
+      <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#225939" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span>
+        <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+        <span class="keyword">else</span> <span title="scala.collection.immutable.Stream[B]" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="../../Function1.scala.html#59555" title="(v1: A)scala.collection.GenTraversableOnce[B]">f</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>.<a href="../GenTraversableOnce.scala.html#59280" title="=&gt; Stream[B]">toStream</a> <a href="#114396" title="(rest: =&gt; scala.collection.TraversableOnce[B])scala.collection.immutable.Stream[B]">append</a> <a href="#225955" title="=&gt; scala.collection.immutable.Stream[B]">tailFlatMap</a>
+        <span class="keyword">else</span> <a href="#225955" title="=&gt; scala.collection.immutable.Stream[B]">tailFlatMap</a>
+      <span class="delimiter">)</span>
+      <span class="keyword">else</span> <a href="#114448" title="Stream.this.StreamWithFilter" class="keyword">super</a>.<a href="../TraversableLike.scala.html#163496" title="(f: A =&gt; scala.collection.GenTraversableOnce[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">flatMap</a><span class="delimiter">(</span><a href="#225938" title="A =&gt; scala.collection.GenTraversableOnce[B]">f</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225939" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="[B](f: A =&gt; B)Unit" id="225822">foreach</a><span class="delimiter">[</span><a title="" id="225824">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A =&gt; B" id="226040">f</a>: A =&gt; B<span class="delimiter">)</span> =
+      <span class="keyword">for</span> <span class="delimiter">(</span><a title="A" id="226098">x</a> &lt;- <a href="#114450" title="(f: A =&gt; Any)Unit">self</a><span class="delimiter">)</span>
+        <span title="Any" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="#226098" title="A">x</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="../../Function1.scala.html#59555" title="(v1: A)B">f</a><span class="delimiter">(</span><a href="#226098" title="A">x</a><span class="delimiter">)</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="(q: A =&gt; Boolean)Stream.this.StreamWithFilter" id="225825">withFilter</a><span class="delimiter">(</span><a title="A =&gt; Boolean" id="226107">q</a>: A =&gt; Boolean<span class="delimiter">)</span>: <a href="#114448" title="Stream.this.StreamWithFilter">StreamWithFilter</a> =
+      <span title="Stream.this.StreamWithFilter" class="keyword">new</span> <a href="#114448" title="Stream.this.StreamWithFilter">StreamWithFilter</a><span class="delimiter">(</span><a title="A" id="226113">x</a> =&gt; <a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="#226113" title="A">x</a><span class="delimiter">)</span> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">q</a><span class="delimiter">(</span><a href="#226113" title="A">x</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** A lazier Iterator than LinearSeqLike's. */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Iterator[A]" id="114449">iterator</a>: <a href="../Iterator.scala.html#5383" title="Iterator[A]">Iterator</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#226117" title="(self: scala.collection.immutable.Stream[A])scala.collection.immutable.StreamIterator[A]" class="keyword">new</a> <a href="#12367" title="scala.collection.immutable.StreamIterator[A]">StreamIterator</a><span class="delimiter">(</span><a href="#11590" title="scala.collection.immutable.Stream[A]">self</a><span class="delimiter">)</span>
+
+  /** Apply the given function `f` to each element of this linear sequence
+   * (while respecting the order of the elements).
+   *
+   *  @param f The treatment to apply to each element.
+   *  @note  Overridden here as final to trigger tail-call optimization, which
+   *  replaces 'this' with 'tail' at each iteration. This is absolutely
+   *  necessary for allowing the GC to collect the underlying stream as elements
+   *  are consumed.
+   *  @note  This function will force the realization of the entire stream
+   *  unless the `f` throws an exception.
+   */
+  @tailrec
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[B](f: A =&gt; B)Unit" id="114450">foreach</a><span class="delimiter">[</span><a title="" id="114452">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A =&gt; B" id="226056">f</a>: A =&gt; B<span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../../Function1.scala.html#59555" title="(v1: A)B">f</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>
+      <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="#114450" title="(f: A =&gt; B)Unit">foreach</a><span class="delimiter">(</span><a href="#226056" title="A =&gt; B">f</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Stream specialization of foldLeft which allows GC to collect along the
+   * way.
+   *
+   * @tparam B The type of value being accumulated.
+   * @param z The initial value seeded into the function `op`.
+   * @param op The operation to perform on successive elements of the `Stream`.
+   * @return The accumulated value from successive applications of `op`.
+   */
+  @tailrec
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[B](z: B)(op: (B, A) =&gt; B)B" id="114453">foldLeft</a><span class="delimiter">[</span><a title="" id="114455">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="B" id="226156">z</a>: <a href="#114455" title="B">B</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="(B, A) =&gt; B" id="226157">op</a>: <span class="delimiter">(</span>B, A<span class="delimiter">)</span> =&gt; B<span class="delimiter">)</span>: <a href="#114455" title="B">B</a> = <span class="delimiter">{</span>
+    <span title="B" class="keyword">if</span> <span class="delimiter">(</span><a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#226156" title="B">z</a>
+    <span class="keyword">else</span> <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="#114453" title="(z: B)(op: (B, A) =&gt; B)B">foldLeft</a><span class="delimiter">(</span><a href="../../Function2.scala.html#65847" title="(v1: B, v2: A)B">op</a><span class="delimiter">(</span><a href="#226156" title="B">z</a>, <a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a href="#226157" title="(B, A) =&gt; B">op</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Stream specialization of reduceLeft which allows GC to collect
+   *  along the way.
+   *
+   * @tparam B The type of value being accumulated.
+   * @param f The operation to perform on successive elements of the `Stream`.
+   * @return The accumulated value from successive applications of `f`.
+   */
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[B &gt;: A](f: (B, A) =&gt; B)B" id="114456">reduceLeft</a><span class="delimiter">[</span><a title=" &gt;: A" id="114458">B</a> &gt;: A<span class="delimiter">]</span><span class="delimiter">(</span><a title="(B, A) =&gt; B" id="226198">f</a>: <span class="delimiter">(</span>B, A<span class="delimiter">)</span> =&gt; B<span class="delimiter">)</span>: <a href="#114458" title="B">B</a> = <span class="delimiter">{</span>
+    <span title="B" class="keyword">if</span> <span class="delimiter">(</span><a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)UnsupportedOperationException" class="keyword">new</span> <a href="../../package.scala.html#56966" title="UnsupportedOperationException">UnsupportedOperationException</a><span class="delimiter">(</span><span title="String(&quot;empty.reduceLeft&quot;)" class="string">&quot;empty.reduceLeft&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">else</span> <span class="delimiter">{</span>
+      <span class="keyword">var</span> <a title="B" id="226217">reducedRes</a>: <a href="#114458" title="B">B</a> = <a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>
+      <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="226218">left</a> = <a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+      <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#226218" title="scala.collection.immutable.Stream[A]">left</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#226219" title="()Unit" class="delimiter">{</a>
+        <a href="#226217" title="B">reducedRes</a> = <a href="../../Function2.scala.html#65847" title="(v1: B, v2: A)B">f</a><span class="delimiter">(</span><a href="#226217" title="B">reducedRes</a>, <a href="#226218" title="scala.collection.immutable.Stream[A]">left</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>
+        <a href="#226218" title="scala.collection.immutable.Stream[A]">left</a> = <a href="#226218" title="scala.collection.immutable.Stream[A]">left</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+      <span class="delimiter">}</span>
+      <a href="#226217" title="B">reducedRes</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Returns all the elements of this stream that satisfy the predicate `p`
+   * returning of [[scala.Tuple2]] of `Stream`s obeying the partition predicate
+   * `p`. The order of the elements is preserved.
+   *
+   * @param p the predicate used to filter the stream.
+   * @return the elements of this stream satisfying `p`.
+   *
+   * @example {{{
+   * $naturalsEx
+   * val parts = naturalsFrom(1) partition { _ % 2 == 0 }
+   * parts._1 take 10 mkString &quot;, &quot;
+   * // produces: &quot;2, 4, 6, 8, 10, 12, 14, 16, 18, 20&quot;
+   * parts._2 take 10 mkString &quot;, &quot;
+   * // produces: &quot;1, 3, 5, 7, 9, 11, 13, 15, 17, 19&quot;
+   * }}}
+   *
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(p: A =&gt; Boolean)(scala.collection.immutable.Stream[A], scala.collection.immutable.Stream[A])" id="114459">partition</a><span class="delimiter">(</span><a title="A =&gt; Boolean" id="226225">p</a>: A =&gt; Boolean<span class="delimiter">)</span>: <a href="../../Tuple2.scala.html#1222" title="(scala.collection.immutable.Stream[A], scala.collection.immutable.Stream[A])" class="delimiter">(</a>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="../../Tuple2.scala.html#63804" title="(_1: scala.collection.immutable.Stream[A], _2: scala.collection.immutable.Stream[A])(scala.collection.immutable.Stream[A], scala.collection.immutable.Stream[A])" class="delimiter">(</a><a href="#114446" title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]">filter</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="#226237" title="A">_</a><span class="delimiter">)</span><span class="delimiter">)</span>, <a href="../TraversableLike.scala.html#58982" title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]">filterNot</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="#226242" title="A">_</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Returns a stream formed from this stream and the specified stream `that`
+   * by associating each element of the former with the element at the same
+   * position in the latter.
+   *
+   * If one of the two streams is longer than the other, its remaining elements
+   * are ignored.
+   *
+   * The return type of this function may not be obvious.  The lazy aspect of
+   * the returned value is different than that of `partition`.  In `partition`
+   * we get back a [[scala.Tuple2]] of two lazy `Stream`s whereas here we get
+   * back a single lazy `Stream` of [[scala.Tuple2]]s where the
+   * [[scala.Tuple2]]'s type signature is `(A1, B)`.
+   *
+   * @tparam A1 The type of the first parameter of the zipped tuple
+   * @tparam B The type of the second parameter of the zipped tuple
+   * @tparam That The type of the returned `Stream`.
+   * @return `Stream({a,,0,,,b,,0,,}, ...,
+   *         {a,,min(m,n),,,b,,min(m,n),,)}` when
+   *         `Stream(a,,0,,, ..., a,,m,,)
+   *         zip Stream(b,,0,,, ..., b,,n,,)` is invoked.
+   *
+   * @example {{{
+   * $naturalsEx
+   * naturalsFrom(1) zip naturalsFrom(2) zip take 5 foreach println
+   * // prints
+   * // (1,2)
+   * // (2,3)
+   * // (3,4)
+   * // (4,5)
+   * // (5,6)
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A1 &gt;: A, B, That](that: scala.collection.GenIterable[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, B),That])That" id="114460">zip</a><span class="delimiter">[</span><a title=" &gt;: A" id="114464">A1</a> &gt;: A, <a title="" id="114465">B</a>, <a title="" id="114466">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.GenIterable[B]" id="226245">that</a>: collection.<a href="../GenIterable.scala.html#5023" title="scala.collection.GenIterable[B]">GenIterable</a><span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, B),That]" id="226246">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, B),That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, <span class="delimiter">(</span>A1, B<span class="delimiter">)</span>, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114466" title="That">That</a> =
+    // we assume there is no other builder factory on streams and therefore know that That = Stream[(A1, B)]
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, B),That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#226246" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, B),That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span>
+      <span title="AnyRef" class="keyword">if</span> <span class="delimiter">(</span><a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a> <a href="../../Boolean.scala.html#58724" title="(x: Boolean)Boolean">||</a> <a href="#226245" title="scala.collection.GenIterable[B]">that</a>.<a href="../GenIterableLike.scala.html#59442" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+      <span class="keyword">else</span> <a href="#131883" title="(hd: (A1, B), tl: =&gt; scala.collection.immutable.Stream[(A1, B)])scala.collection.immutable.Stream.Cons[(A1, B)]">cons</a><span class="delimiter">(</span><a href="../../Tuple2.scala.html#63804" title="(_1: A, _2: B)(A, B)" class="delimiter">(</a><a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="#226245" title="scala.collection.GenIterable[B]">that</a>.<a href="../GenIterableLike.scala.html#59443" title="=&gt; B">head</a><span class="delimiter">)</span>, <a href="#114406" title="[B](x: AnyRef)scala.collection.immutable.Stream[B]">asStream</a><span title="(x: AnyRef)scala.collection.immutable.Stream[(A1, B)]" class="delimiter">[</span><a href="../../Tuple2.scala.html#1222" title="(A1, B)" class="delimiter">(</a>A1, B<span class="delimiter">)</span><span class="delimiter">]</span><span class="delimiter">(</span><a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114460" title="(that: scala.collection.GenIterable[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A, B),AnyRef])AnyRef">zip</a> <a href="#226245" title="scala.collection.GenIterable[B]">that</a>.<a href="../GenTraversableLike.scala.html#59301" title="=&gt; scala.collection.GenIterable[B]">tail</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../IterableLike.scala.html#59486" title="(that: scala.collection.GenIterable[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A, B),That])That">zip</a><span class="delimiter">(</span><a href="#226245" title="scala.collection.GenIterable[B]">that</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#226246" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, B),That]">bf</a><span class="delimiter">)</span>
+
+  /** Zips this iterable with its indices. `s.zipWithIndex` is equivalent to `s
+   * zip s.indices`.
+   *
+   * This method is much like `zip` in that it returns a single lazy `Stream` of
+   * [[scala.Tuple2]].
+   *
+   * @tparam A1 The type of the first element of the [[scala.Tuple2]] in the
+   * resulting stream.
+   * @tparam That The type of the resulting `Stream`.
+   * @return `Stream({a,,0,,,0}, ..., {a,,n,,,n)}`
+   *
+   * @example {{{
+   * $naturalsEx
+   * (naturalsFrom(1) zipWithIndex) take 5 foreach println
+   * // prints
+   * // (1,0)
+   * // (2,1)
+   * // (3,2)
+   * // (4,3)
+   * // (5,4)
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[A1 &gt;: A, That](implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, Int),That])That" id="114467">zipWithIndex</a><span class="delimiter">[</span><a title=" &gt;: A" id="114470">A1</a> &gt;: A, <a title="" id="114471">That</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, Int),That]" id="226415">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, Int),That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, <span class="delimiter">(</span>A1, Int<span class="delimiter">)</span>, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114471" title="That">That</a> =
+    <a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="#114460" title="[A1 &gt;: A, B, That](that: scala.collection.GenIterable[B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, B),That])That">zip</a><span title="(that: scala.collection.GenIterable[Int])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, Int),That])That" class="delimiter">[</span><a href="#114470" title="A1">A1</a>, <a href="../../Int.scala.html#508" title="Int">Int</a>, <a href="#114471" title="That">That</a><span class="delimiter">]</span><a href="#226415" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],(A1, Int),That]" class="delimiter">(</a><a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126029" title="(start: Int)scala.collection.immutable.Stream[Int]">from</a><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Write all defined elements of this iterable into given string builder.
+   *  The written text begins with the string `start` and is finished by the string
+   *  `end`. Inside, the string representations of defined elements (w.r.t.
+   *  the method `toString()`) are separated by the string `sep`. The method will
+   *  not force evaluation of undefined elements. A tail of such elements will be
+   * represented by a `&quot;?&quot;` instead.
+   *
+   * @param b The [[collection.mutable.StringBuilder]] factory to which we need
+   * to add the string elements.
+   * @param start The prefix of the resulting string (e.g. &quot;Stream(&quot;)
+   * @param sep The separator between elements of the resulting string (e.g. &quot;,&quot;)
+   * @param end The end of the resulting string (e.g. &quot;)&quot;)
+   * @return The original [[collection.mutable.StringBuilder]] containing the
+   * resulting string.
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(b: StringBuilder, start: String, sep: String, end: String)StringBuilder" id="114472">addString</a><span class="delimiter">(</span><a title="StringBuilder" id="226449">b</a>: <a href="../mutable/StringBuilder.scala.html#13495" title="StringBuilder">StringBuilder</a>, <a title="String" id="226450">start</a>: <span title="String">String</span>, <a title="String" id="226451">sep</a>: <span title="String">String</span>, <a title="String" id="226452">end</a>: <span title="String">String</span><span class="delimiter">)</span>: <a href="../mutable/StringBuilder.scala.html#13495" title="StringBuilder">StringBuilder</a> = <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(pre: String, these: scala.collection.immutable.Stream[A])Unit" id="226455">loop</a><span class="delimiter">(</span><a title="String" id="226456">pre</a>: <span title="String">String</span>, <a title="scala.collection.immutable.Stream[A]" id="226457">these</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#226457" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#226449" title="StringBuilder">b</a> <a href="../mutable/StringBuilder.scala.html#66570" title="(s: String)StringBuilder">append</a> <a href="#226452" title="String">end</a>
+      <span class="keyword">else</span> <span class="delimiter">{</span>
+        <a href="#226449" title="StringBuilder">b</a> <a href="../mutable/StringBuilder.scala.html#66570" title="(s: String)StringBuilder">append</a> <a href="#226456" title="String">pre</a> <a href="../mutable/StringBuilder.scala.html#66569" title="(x: Any)StringBuilder">append</a> <a href="#226457" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#226457" title="scala.collection.immutable.Stream[A]">these</a>.<a href="#114395" title="=&gt; Boolean">tailDefined</a><span class="delimiter">)</span> <a href="#226455" title="(pre: String, these: scala.collection.immutable.Stream[A])Unit">loop</a><span class="delimiter">(</span><a href="#226451" title="String">sep</a>, <a href="#226457" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a><span class="delimiter">)</span>
+        <span class="keyword">else</span> <a href="#226449" title="StringBuilder">b</a> <a href="../mutable/StringBuilder.scala.html#66570" title="(s: String)StringBuilder">append</a> <a href="#226451" title="String">sep</a> <a href="../mutable/StringBuilder.scala.html#66570" title="(s: String)StringBuilder">append</a> <span title="String(&quot;?&quot;)" class="string">&quot;?&quot;</span> <a href="../mutable/StringBuilder.scala.html#66570" title="(s: String)StringBuilder">append</a> <a href="#226452" title="String">end</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <a href="#226449" title="StringBuilder">b</a> <a href="../mutable/StringBuilder.scala.html#66570" title="(s: String)StringBuilder">append</a> <a href="#226450" title="String">start</a>
+    <a href="#226455" title="(pre: String, these: scala.collection.immutable.Stream[A])Unit">loop</a><span class="delimiter">(</span><span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>, <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a><span class="delimiter">)</span>
+    <a href="#226449" title="StringBuilder">b</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(sep: String)String" id="114473">mkString</a><span class="delimiter">(</span><a title="String" id="226486">sep</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> = <a href="#114475" title="(start: String, sep: String, end: String)String">mkString</a><span class="delimiter">(</span><span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>, <a href="#226486" title="String">sep</a>, <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; String" id="114474">mkString</a>: <span title="String">String</span> = <a href="#114473" title="(sep: String)String">mkString</a><span class="delimiter">(</span><span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(start: String, sep: String, end: String)String" id="114475">mkString</a><span class="delimiter">(</span><a title="String" id="226493">start</a>: <span title="String">String</span>, <a title="String" id="226494">sep</a>: <span title="String">String</span>, <a title="String" id="226495">end</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span>
+    <a href="#11590" title="Stream.this.type" class="keyword">this</a>.<a href="#114399" title="=&gt; scala.collection.immutable.Stream[A]">force</a>
+    <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableOnce.scala.html#59189" title="(start: String, sep: String, end: String)String">mkString</a><span class="delimiter">(</span><a href="#226493" title="String">start</a>, <a href="#226494" title="String">sep</a>, <a href="#226495" title="String">end</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="114476">toString</a> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableOnce.scala.html#59189" title="(start: String, sep: String, end: String)String">mkString</a><span class="delimiter">(</span><a href="#114496" title="=&gt; String">stringPrefix</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;(&quot;)" class="string">&quot;(&quot;</span>, <span title="String(&quot;, &quot;)" class="string">&quot;, &quot;</span>, <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(n: Int)(scala.collection.immutable.Stream[A], scala.collection.immutable.Stream[A])" id="114477">splitAt</a><span class="delimiter">(</span><a title="Int" id="226519">n</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="../../Tuple2.scala.html#1222" title="(scala.collection.immutable.Stream[A], scala.collection.immutable.Stream[A])" class="delimiter">(</a>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="../../Tuple2.scala.html#63804" title="(_1: scala.collection.immutable.Stream[A], _2: scala.collection.immutable.Stream[A])(scala.collection.immutable.Stream[A], scala.collection.immutable.Stream[A])" class="delimiter">(</a><a href="#114478" title="(n: Int)scala.collection.immutable.Stream[A]">take</a><span class="delimiter">(</span><a href="#226519" title="Int">n</a><span class="delimiter">)</span>, <a href="#114479" title="(n: Int)scala.collection.immutable.Stream[A]">drop</a><span class="delimiter">(</span><a href="#226519" title="Int">n</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Returns the `n` first elements of this `Stream` as another `Stream`, or
+   * else the whole `Stream`, if it has less than `n` elements.
+   *
+   * The result of `take` is, again, a `Stream` meaning that it also does not
+   * make any needless evaluations of the `Stream` itself, delaying that until
+   * the usage of the resulting `Stream`.
+   *
+   * @param n the number of elements to take.
+   * @return the `n` first elements of this stream.
+   *
+   * @example {{{
+   * $naturalsEx
+   * scala&gt; naturalsFrom(5) take 5
+   * res1: scala.collection.immutable.Stream[Int] = Stream(5, ?)
+   *
+   * scala&gt; naturalsFrom(5) take 5 mkString &quot;, &quot;
+   * // produces: &quot;5, 6, 7, 8, 9&quot;
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(n: Int)scala.collection.immutable.Stream[A]" id="114478">take</a><span class="delimiter">(</span><a title="Int" id="226525">n</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="#226525" title="Int">n</a> <a href="../../Int.scala.html#57912" title="(x: Int)Boolean">&lt;=</a> <span title="Int(0)" class="int">0</span> <a href="../../Boolean.scala.html#58724" title="(x: Boolean)Boolean">||</a> <a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126005" title="scala.collection.immutable.Stream[Nothing]">empty</a>
+    <span class="keyword">else</span> <span title="scala.collection.immutable.Stream.Cons[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="#226525" title="Int">n</a> <a href="../../Int.scala.html#57891" title="(x: Int)Boolean">==</a> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126005" title="scala.collection.immutable.Stream[Nothing]">empty</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114478" title="(n: Int)scala.collection.immutable.Stream[A]">take</a> <a href="#226525" title="Int">n</a><a href="../../Int.scala.html#57955" title="(x: Int)Int">-</a><span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+
+  @tailrec <span class="keyword">final</span> <span class="keyword">override</span> <span class="keyword">def</span> <a title="(n: Int)scala.collection.immutable.Stream[A]" id="114479">drop</a><span class="delimiter">(</span><a title="Int" id="226527">n</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="#226527" title="Int">n</a> <a href="../../Int.scala.html#57912" title="(x: Int)Boolean">&lt;=</a> <span title="Int(0)" class="int">0</span> <a href="../../Boolean.scala.html#58724" title="(x: Boolean)Boolean">||</a> <a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span class="keyword">else</span> <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114479" title="(n: Int)scala.collection.immutable.Stream[A]">drop</a> <a href="#226527" title="Int">n</a><a href="../../Int.scala.html#57955" title="(x: Int)Int">-</a><span title="Int(1)" class="int">1</span>
+
+  /** A substream starting at index `from` and extending up to (but not including)
+   *  index `until`.  This returns a `Stream` that is lazily evaluated.
+   *
+   * @param start   The index of the first element of the returned subsequence
+   * @param end     The index of the element following the returned subsequence
+   * @return A new string containing the elements requested from `start` until
+   * `end`.
+   *
+   * @example {{{
+   * naturalsFrom(0) slice(50, 60) mkString &quot;, &quot;
+   * // produces: &quot;50, 51, 52, 53, 54, 55, 56, 57, 58, 59&quot;
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(from: Int, until: Int)scala.collection.immutable.Stream[A]" id="114480">slice</a><span class="delimiter">(</span><a title="Int" id="226573">from</a>: <a href="../../Int.scala.html#508" title="Int">Int</a>, <a title="Int" id="226574">until</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="Int" id="226576">lo</a> = <a href="../../LowPriorityImplicits.scala.html#8333" title="implicit scala.LowPriorityImplicits.intWrapper : (x: Int)scala.runtime.RichInt">from</a> <a href="../../runtime/RichInt.scala.html#57859" title="(that: Int)Int">max</a> <span title="Int(0)" class="int">0</span>
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="#226574" title="Int">until</a> <a href="../../Int.scala.html#57912" title="(x: Int)Boolean">&lt;=</a> <a href="#226576" title="Int">lo</a> <a href="../../Boolean.scala.html#58724" title="(x: Boolean)Boolean">||</a> <a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126005" title="scala.collection.immutable.Stream[Nothing]">empty</a>
+    <span class="keyword">else</span> <a href="#11590" title="Stream.this.type" class="keyword">this</a> <a href="#114479" title="(n: Int)scala.collection.immutable.Stream[A]">drop</a> <a href="#226576" title="Int">lo</a> <a href="#114478" title="(n: Int)scala.collection.immutable.Stream[A]">take</a> <span class="delimiter">(</span><a href="#226574" title="Int">until</a> <a href="../../Int.scala.html#57955" title="(x: Int)Int">-</a> <a href="#226576" title="Int">lo</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** The stream without its last element.
+   *
+   * @return A new `Stream` containing everything but the last element.  If your
+   * `Stream` represents an infinite series, this method will not return.
+   *
+   *  @throws `Predef.UnsupportedOperationException` if the stream is empty.
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="114481">init</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../TraversableLike.scala.html#59015" title="=&gt; scala.collection.immutable.Stream[A]">init</a>
+    <span class="keyword">else</span> <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+    <span class="keyword">else</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="#114481" title="=&gt; scala.collection.immutable.Stream[A]">init</a><span class="delimiter">)</span>
+
+  /** Returns the rightmost `n` elements from this iterable.
+   *
+   * @note Take serious caution here.  If the `Stream` represents an infinite
+   * series then this function ''will not return''.  The right most elements of
+   * an infinite series takes an infinite amount of time to produce.
+   *
+   *  @param n the number of elements to take
+   *  @return The last `n` elements from this `Stream`.
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(n: Int)scala.collection.immutable.Stream[A]" id="114482">takeRight</a><span class="delimiter">(</span><a title="Int" id="226675">n</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="226677">these</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="226678">lead</a> = <a href="#11590" title="Stream.this.type" class="keyword">this</a> <a href="#114479" title="(n: Int)scala.collection.immutable.Stream[A]">drop</a> <a href="#226675" title="Int">n</a>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#226678" title="scala.collection.immutable.Stream[A]">lead</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#226679" title="()Unit" class="delimiter">{</a>
+      <a href="#226677" title="scala.collection.immutable.Stream[A]">these</a> = <a href="#226677" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+      <a href="#226678" title="scala.collection.immutable.Stream[A]">lead</a> = <a href="#226678" title="scala.collection.immutable.Stream[A]">lead</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+    <span class="delimiter">}</span>
+    <a href="#226677" title="scala.collection.immutable.Stream[A]">these</a>
+  <span class="delimiter">}</span>
+
+  // there's nothing we can do about dropRight, so we just keep the definition
+  // in LinearSeq
+
+  /** Returns the longest prefix of this `Stream` whose elements satisfy the
+   * predicate `p`.
+   *
+   * @param p the test predicate.
+   * @return A new `Stream` representing the values that satisfy the predicate
+   * `p`.
+   *
+   * @example {{{
+   + naturalsFrom(0) takeWhile { _ &lt; 5 } mkString &quot;, &quot;
+   * produces: &quot;0, 1, 2, 3, 4&quot;
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]" id="114483">takeWhile</a><span class="delimiter">(</span><a title="A =&gt; Boolean" id="226683">p</a>: A =&gt; Boolean<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114483" title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]">takeWhile</a> <a href="#226683" title="A =&gt; Boolean">p</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+
+  /** Returns the a `Stream` representing the longest suffix of this iterable
+   * whose first element does not satisfy the predicate `p`.
+   *
+   * @note This method realizes the entire `Stream` beyond the truth value of
+   * the predicate `p`.
+   *
+   * @param p the test predicate.
+   * @return A new `Stream` representing the results of applying `p` to the
+   * oringal `Stream`.
+   *
+   * @example {{{
+   * // Assume we have a Stream that takes the first 20 natural numbers
+   * def naturalsLt50(i: Int): Stream[Int] = i #:: { if (i &lt; 20) naturalsLt50(i * + 1) else Stream.Empty }
+   * naturalsLt50(0) dropWhile { _ &lt; 10 }
+   * // produces: &quot;10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20&quot;
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]" id="114484">dropWhile</a><span class="delimiter">(</span><a title="A =&gt; Boolean" id="226703">p</a>: A =&gt; Boolean<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="226708">these</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#226708" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Function1.scala.html#59555" title="(v1: A)Boolean">p</a><span class="delimiter">(</span><a href="#226708" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#226708" title="scala.collection.immutable.Stream[A]">these</a> = <a href="#226708" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+    <a href="#226708" title="scala.collection.immutable.Stream[A]">these</a>
+  <span class="delimiter">}</span>
+
+  /** Builds a new stream from this stream in which any duplicates (wrt to ==)
+   * have been removed.  Among duplicate elements, only the first one is
+   * retained in the resulting `Stream`.
+   *
+   * @return A new `Stream` representing the result of applying distinctness to
+   * the original `Stream`.
+   * @example {{{
+   * // Creates a Stream where every element is duplicated
+   * def naturalsFrom(i: Int): Stream[Int] = i #:: { i #:: naturalsFrom(i + 1) }
+   * naturalsFrom(1) take 6 mkString &quot;, &quot;
+   * // produces: &quot;1, 1, 2, 2, 3, 3&quot;
+   * (naturalsFrom(1) distinct) take 6 mkString &quot;, &quot;
+   * // produces: &quot;1, 2, 3, 4, 5, 6&quot;
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="114485">distinct</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span class="keyword">else</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="#114446" title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]">filter</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a> <span title="(x$1: Any)Boolean">!=</span> <a href="#226723" title="A">_</a><span class="delimiter">)</span>.<a href="#114485" title="=&gt; scala.collection.immutable.Stream[A]">distinct</a><span class="delimiter">)</span>
+
+  /** Returns a new sequence of given length containing the elements of this
+   * sequence followed by zero or more occurrences of given elements.
+   *
+   * @tparam B The type of the value to pad with.
+   * @tparam That The type contained within the resulting `Stream`.
+   * @param len The number of elements to pad into the `Stream`.
+   * @param elem The value of the type `B` to use for padding.
+   * @return A new `Stream` representing the collection with values padding off
+   * to the end. If your `Stream` represents an infinite series, this method will
+   * not return.
+   * @example {{{
+   * def naturalsFrom(i: Int): Stream[Int] = i #:: { if (i &lt; 5) naturalsFrom(i + 1) else Stream.Empty }
+   * naturalsFrom(1) padTo(10, 0) foreach println
+   * // prints
+   * // 1
+   * // 2
+   * // 3
+   * // 4
+   * // 5
+   * // 0
+   * // 0
+   * // 0
+   * // 0
+   * // 0
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[B &gt;: A, That](len: Int, elem: B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That" id="114486">padTo</a><span class="delimiter">[</span><a title=" &gt;: A" id="114489">B</a> &gt;: A, <a title="" id="114490">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Int" id="226729">len</a>: <a href="../../Int.scala.html#508" title="Int">Int</a>, <a title="B" id="226730">elem</a>: <a href="#114489" title="B">B</a><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="226731">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#114490" title="That">That</a> = <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(len: Int, these: scala.collection.immutable.Stream[A])scala.collection.immutable.Stream[B]" id="226763">loop</a><span class="delimiter">(</span><a title="Int" id="226764">len</a>: <a href="../../Int.scala.html#508" title="Int">Int</a>, <a title="scala.collection.immutable.Stream[A]" id="226765">these</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">[</span>B<span class="delimiter">]</span> =
+      <span title="scala.collection.immutable.Stream[B]" class="keyword">if</span> <span class="delimiter">(</span><a href="#226765" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126033" title="(n: Int)(elem: =&gt; B)scala.collection.immutable.Stream[B]">fill</a><span class="delimiter">(</span><a href="#226764" title="Int">len</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#226730" title="B">elem</a><span class="delimiter">)</span>
+      <span class="keyword">else</span> <a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="#226765" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="#226763" title="(len: Int, these: scala.collection.immutable.Stream[A])scala.collection.immutable.Stream[B]">loop</a><span class="delimiter">(</span><a href="#226764" title="Int">len</a> <a href="../../Int.scala.html#57955" title="(x: Int)Int">-</a> <span title="Int(1)" class="int">1</span>, <a href="#226765" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <span title="That" class="keyword">if</span> <span class="delimiter">(</span><a href="#114409" title="(bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])Boolean">isStreamBuilder</a><span class="delimiter">(</span><a href="#226731" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#114403" title="(x: AnyRef)Nothing">asThat</a><span class="delimiter">(</span><a href="#226763" title="(len: Int, these: scala.collection.immutable.Stream[A])scala.collection.immutable.Stream[B]">loop</a><span class="delimiter">(</span><a href="#226729" title="Int">len</a>, <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">super</a>.<a href="../SeqLike.scala.html#59815" title="(len: Int, elem: B)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">padTo</a><span class="delimiter">(</span><a href="#226729" title="Int">len</a>, <a href="#226730" title="B">elem</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#226731" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** A list consisting of all elements of this list in reverse order.
+   *
+   * @note This function must realize the entire `Stream` in order to perform
+   * this operation so if your `Stream` represents an infinite sequence then
+   * this function will never return.
+   *
+   * @return A new `Stream` containing the representing of the original `Stream`
+   * in reverse order.
+   *
+   * @example {{{
+   * def naturalsFrom(i: Int): Stream[Int] = i #:: { if (i &lt; 5) naturalsFrom(i + 1) else Stream.Empty }
+   * (naturalsFrom(1) reverse) foreach println
+   * // prints
+   * // 5
+   * // 4
+   * // 3
+   * // 2
+   * // 1
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="114491">reverse</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="226853">result</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+    <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="226854">these</a> = <a href="#11590" title="scala.collection.immutable.Stream[A]" class="keyword">this</a>
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#226854" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#226855" title="()Unit" class="delimiter">{</a>
+      <span class="keyword">val</span> <a title="scala.collection.immutable.Stream[A]" id="226857">r</a> = <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126013" title="(stream: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.ConsWrapper[A]">consWrapper</a><span class="delimiter">(</span><a href="#226853" title="scala.collection.immutable.Stream[A]">result</a><span class="delimiter">)</span>.<a href="#226866" title="(hd: A)scala.collection.immutable.Stream[A]">#::</a><span class="delimiter">(</span><a href="#226854" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>
+      <a href="#226857" title="scala.collection.immutable.Stream[A]">r</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> // force it!
+      <a href="#226853" title="scala.collection.immutable.Stream[A]">result</a> = <a href="#226857" title="scala.collection.immutable.Stream[A]">r</a>
+      <a href="#226854" title="scala.collection.immutable.Stream[A]">these</a> = <a href="#226854" title="scala.collection.immutable.Stream[A]">these</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>
+    <span class="delimiter">}</span>
+    <a href="#226853" title="scala.collection.immutable.Stream[A]">result</a>
+  <span class="delimiter">}</span>
+
+  /** Evaluates and concatenates all elements within the `Stream` into a new
+   * flattened `Stream`.
+   *
+   * @tparam B The type of the elements of the resulting `Stream`.
+   * @return A new `Stream` of type `B` of the flattened elements of `this`
+   * `Stream`.
+   * @example {{{
+   * val sov: Stream[Vector[Int]] = Vector(0) #:: Vector(0, 0) #:: sov.zip(sov.tail).map { n =&gt; n._1 ++ n._2 }
+   * sov flatten take 10 mkString &quot;, &quot;
+   * // produces: &quot;0, 0, 0, 0, 0, 0, 0, 0, 0, 0&quot;
+   * }}}
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[B](implicit asTraversable: A =&gt; scala.collection.GenTraversableOnce[B])scala.collection.immutable.Stream[B]" id="114492">flatten</a><span class="delimiter">[</span><a title="" id="114494">B</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="A =&gt; scala.collection.GenTraversableOnce[B]" id="226872">asTraversable</a>: A =&gt; /*&lt;:&lt;!!!*/ GenTraversableOnce<span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">[</span>B<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(t: Traversable[B])scala.collection.immutable.Stream[B]" id="226878">flatten1</a><span class="delimiter">(</span><a title="Traversable[B]" id="226879">t</a>: <a href="../Traversable.scala.html#5662" title="Traversable[B]">Traversable</a><span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">[</span>B<span class="delimiter">]</span> =
+      <span title="scala.collection.immutable.Stream[B]" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#226879" title="Traversable[B]">t</a>.<a href="../TraversableLike.scala.html#58949" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span>
+        <a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="#226879" title="Traversable[B]">t</a>.<a href="../TraversableLike.scala.html#59010" title="=&gt; B">head</a>, <a href="#226878" title="(t: Traversable[B])scala.collection.immutable.Stream[B]">flatten1</a><span class="delimiter">(</span><a href="#226879" title="Traversable[B]">t</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; Traversable[B]">tail</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">else</span>
+        <a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="#114492" title="(implicit asTraversable: A =&gt; scala.collection.GenTraversableOnce[B])scala.collection.immutable.Stream[B]">flatten</a>
+
+    <span title="scala.collection.immutable.Stream[B]" class="keyword">if</span> <span class="delimiter">(</span><a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126005" title="scala.collection.immutable.Stream[Nothing]">empty</a>
+    <span class="keyword">else</span> <a href="#226878" title="(t: Traversable[B])scala.collection.immutable.Stream[B]">flatten1</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)scala.collection.GenTraversableOnce[B]">asTraversable</a><span class="delimiter">(</span><a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>.<a href="../GenTraversableOnce.scala.html#59200" title="=&gt; scala.collection.TraversableOnce[B]">seq</a>.<a href="../TraversableOnce.scala.html#59173" title="=&gt; Traversable[B]">toTraversable</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.StreamView[A,scala.collection.immutable.Stream[A]]" id="114495">view</a> = <a href="#226958" title="scala.collection.immutable.StreamView[A,scala.collection.immutable.Stream[A]]{}" class="keyword">new</a> <a title="anonymous class $anon extends Object with scala.collection.immutable.StreamView[A,scala.collection.immutable.Stream[A]]" id="226958">StreamView</a><span class="delimiter">[</span>A, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">protected</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="scala.collection.immutable.Stream[A]" id="227027">underlying</a> = <a href="#11590" title="Stream.this.type">self</a>.<a href="../TraversableLike.scala.html#58941" title="=&gt; scala.collection.immutable.Stream[A]">repr</a>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Iterator[A]" id="227028">iterator</a> = <a href="#11590" title="Stream.this.type">self</a>.<a href="#114449" title="=&gt; Iterator[A]">iterator</a>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Int" id="227029">length</a> = <a href="#11590" title="Stream.this.type">self</a>.<a href="#114402" title="=&gt; Int">length</a>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="(idx: Int)A" id="227030">apply</a><span class="delimiter">(</span><a title="Int" id="228019">idx</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span> = <a href="#11590" title="Stream.this.type">self</a>.<a href="../LinearSeqOptimized.scala.html#76165" title="(n: Int)A">apply</a><span class="delimiter">(</span><a href="#228019" title="Int">idx</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Defines the prefix of this object's `toString` representation as `Stream`.
+   */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; String" id="114496">stringPrefix</a> = <span title="String(&quot;Stream&quot;)" class="string">&quot;Stream&quot;</span>
+
+<span class="delimiter">}</span>
+
+/** A specialized, extra-lazy implementation of a stream iterator, so it can
+ *  iterate as lazily as it traverses the tail.
+ */
+<span class="keyword">final</span> <span class="keyword">class</span> <a title="class StreamIterator[+A] extends scala.collection.AbstractIterator[A] with Iterator[A]" id="12367">StreamIterator</a><span class="delimiter">[</span>+<a title="" id="12707">A</a><span class="delimiter">]</span> <a href="#12367" title="scala.collection.immutable.StreamIterator[A]" class="keyword">private</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="../Iterator.scala.html#4801" title="scala.collection.AbstractIterator[A]">AbstractIterator</a><span class="delimiter">[</span>A<span class="delimiter">]</span> <span class="keyword">with</span> <a href="../Iterator.scala.html#5383" title="Iterator[A]">Iterator</a><span class="delimiter">[</span>A<span class="delimiter">]</span> <span class="delimiter">{</span>
+  <span class="keyword">def</span> <a title="(self: scala.collection.immutable.Stream[A])scala.collection.immutable.StreamIterator[A]" id="226117" class="keyword">this</a><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="226128">self</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+    <a href="#12367" title="StreamIterator.this.type" class="keyword">this</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#226120" title="(x$1: StreamIterator.this.LazyCell)Unit">these</a> = <span title="StreamIterator.this.LazyCell" class="keyword">new</span> <a href="#226118" title="StreamIterator.this.LazyCell">LazyCell</a><span class="delimiter">(</span><a href="#226128" title="scala.collection.immutable.Stream[A]">self</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  // A call-by-need cell.
+  <span class="keyword">class</span> <a title="class LazyCell extends Object" id="226118">LazyCell</a><a href="#226118" title="StreamIterator.this.LazyCell" class="delimiter">(</a><a title="=&gt; scala.collection.immutable.Stream[A]" id="228063">st</a>: =&gt; Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="scala.collection.immutable.Stream[A]" id="228062">v</a> = <a href="#228063" title="=&gt; scala.collection.immutable.Stream[A]">st</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="StreamIterator.this.LazyCell" id="226120">these</a>: <a href="#226118" title="StreamIterator.this.LazyCell">LazyCell</a> = _
+
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="226122">hasNext</a>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <a href="#226120" title="=&gt; StreamIterator.this.LazyCell">these</a>.<a href="#228061" title="=&gt; scala.collection.immutable.Stream[A]">v</a>.<a href="../TraversableOnce.scala.html#59102" title="=&gt; Boolean">nonEmpty</a>
+  <span class="keyword">def</span> <a title="()A" id="226123">next</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="#12707" title="A">A</a> =
+    <span title="A" class="keyword">if</span> <span class="delimiter">(</span><a href="../Iterator.scala.html#65195" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="../Iterator.scala.html#5384" title="scala.collection.Iterator.type">Iterator</a>.<a href="../Iterator.scala.html#89020" title="=&gt; Iterator[Nothing]">empty</a>.<a href="../Iterator.scala.html#65194" title="()Nothing">next</a>
+    <span class="keyword">else</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="scala.collection.immutable.Stream[A]" id="228071">cur</a>    = <a href="#226120" title="=&gt; StreamIterator.this.LazyCell">these</a>.<a href="#228061" title="=&gt; scala.collection.immutable.Stream[A]">v</a>
+      <span class="keyword">val</span> <a title="A" id="228072">result</a> = <a href="#228071" title="scala.collection.immutable.Stream[A]">cur</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>
+      <a href="#226120" title="(x$1: StreamIterator.this.LazyCell)Unit">these</a> = <span title="StreamIterator.this.LazyCell" class="keyword">new</span> <a href="#226118" title="StreamIterator.this.LazyCell">LazyCell</a><span class="delimiter">(</span><a href="#228071" title="scala.collection.immutable.Stream[A]">cur</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a><span class="delimiter">)</span>
+      <a href="#228072" title="A">result</a>
+    <span class="delimiter">}</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="226124">toStream</a> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.collection.immutable.Stream[A]" id="228076">result</a> = <a href="#226120" title="=&gt; StreamIterator.this.LazyCell">these</a>.<a href="#228061" title="=&gt; scala.collection.immutable.Stream[A]">v</a>
+    <a href="#226120" title="(x$1: StreamIterator.this.LazyCell)Unit">these</a> = <span title="StreamIterator.this.LazyCell" class="keyword">new</span> <a href="#226118" title="StreamIterator.this.LazyCell">LazyCell</a><span class="delimiter">(</span><a href="#11591" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#126005" title="scala.collection.immutable.Stream[Nothing]">empty</a><span class="delimiter">)</span>
+    <a href="#228076" title="scala.collection.immutable.Stream[A]">result</a>
+  <span class="delimiter">}</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; List[A]" id="226125">toList</a>   = <a href="#226124" title="=&gt; scala.collection.immutable.Stream[A]">toStream</a>.<a href="../TraversableOnce.scala.html#59174" title="=&gt; List[A]">toList</a>
+<span class="delimiter">}</span>
+
+/**
+ * The object `Stream` provides helper functions to manipulate streams.
+ *
+ * @author Martin Odersky, Matthias Zenger
+ * @version 1.1 08/08/03
+ * @since   2.8
+ */
+<span class="keyword">object</span> <a title="scala.collection.immutable.Stream.type" id="11591">Stream</a> <a href="#11592" title="scala.collection.immutable.Stream.type" class="keyword">extends</a> <a href="../generic/SeqFactory.scala.html#11187" title="scala.collection.generic.SeqFactory[scala.collection.immutable.Stream]">SeqFactory</a><span class="delimiter">[</span>Stream<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+  /** The factory for streams.
+   *  @note Methods such as map/flatMap will not invoke the `Builder` factory,
+   *        but will return a new stream directly, to preserve laziness.
+   *        The new stream is then cast to the factory's result type.
+   *        This means that every CanBuildFrom that takes a
+   *        Stream as its From type parameter must yield a stream as its result parameter.
+   *        If that assumption is broken, cast errors might result.
+   */
+  <span class="keyword">class</span> <a title="class StreamCanBuildFrom[A] extends scala.collection.immutable.Stream.GenericCanBuildFrom[A]" id="125992">StreamCanBuildFrom</a><span class="delimiter">[</span><a title="" id="125993">A</a><span class="delimiter">]</span> <a href="#125992" title="scala.collection.immutable.Stream.StreamCanBuildFrom[A]" class="keyword">extends</a> <a href="../generic/GenTraversableFactory.scala.html#60789" title="scala.collection.immutable.Stream.GenericCanBuildFrom[A]">GenericCanBuildFrom</a><span class="delimiter">[</span>A<span class="delimiter">]</span>
+
+  <span class="keyword">implicit</span> <span class="keyword">def</span> <a title="[A]=&gt; scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream.Coll,A,scala.collection.immutable.Stream[A]]" id="125994">canBuildFrom</a><span class="delimiter">[</span><a title="" id="125996">A</a><span class="delimiter">]</span>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream.Coll,A,scala.collection.immutable.Stream[A]]">CanBuildFrom</a><span class="delimiter">[</span>Coll, A, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span> = <span title="scala.collection.immutable.Stream.StreamCanBuildFrom[A]" class="keyword">new</span> <a href="#125992" title="scala.collection.immutable.Stream.StreamCanBuildFrom[A]">StreamCanBuildFrom</a><span class="delimiter">[</span>A<span class="delimiter">]</span>
+
+  /** Creates a new builder for a stream */
+  <span class="keyword">def</span> <a title="[A]=&gt; scala.collection.mutable.Builder[A,scala.collection.immutable.Stream[A]]" id="125997">newBuilder</a><span class="delimiter">[</span><a title="" id="125999">A</a><span class="delimiter">]</span>: <a href="../mutable/Builder.scala.html#13525" title="scala.collection.mutable.Builder[A,scala.collection.immutable.Stream[A]]">Builder</a><span class="delimiter">[</span>A, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span> = <span title="scala.collection.immutable.Stream.StreamBuilder[A]" class="keyword">new</span> <a href="#126001" title="scala.collection.immutable.Stream.StreamBuilder[A]">StreamBuilder</a><span class="delimiter">[</span>A<span class="delimiter">]</span>
+
+  <span class="keyword">import</span> scala.collection.<span class="delimiter">{</span>Iterable, Seq, IndexedSeq<span class="delimiter">}</span>
+
+  /** A builder for streams
+   *  @note This builder is lazy only in the sense that it does not go downs the spine
+   *        of traversables that are added as a whole. If more laziness can be achieved,
+   *        this builder should be bypassed.
+   */
+  <span class="keyword">class</span> <a title="class StreamBuilder[A] extends scala.collection.mutable.LazyBuilder[A,scala.collection.immutable.Stream[A]]" id="126001">StreamBuilder</a><span class="delimiter">[</span><a title="" id="126002">A</a><span class="delimiter">]</span> <a href="#126001" title="scala.collection.immutable.Stream.StreamBuilder[A]" class="keyword">extends</a> scala.collection.mutable.<a href="../mutable/LazyBuilder.scala.html#13675" title="scala.collection.mutable.LazyBuilder[A,scala.collection.immutable.Stream[A]]">LazyBuilder</a><span class="delimiter">[</span>A, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="()scala.collection.immutable.Stream[A]" id="225118">result</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="../mutable/LazyBuilder.scala.html#225110" title="=&gt; scala.collection.mutable.ListBuffer[scala.collection.TraversableOnce[A]]">parts</a>.<a href="../generic/TraversableForwarder.scala.html#68121" title="=&gt; scala.collection.immutable.Stream[scala.collection.TraversableOnce[A]]">toStream</a> <a href="#114441" title="(f: scala.collection.TraversableOnce[A] =&gt; scala.collection.GenTraversableOnce[A])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[scala.collection.TraversableOnce[A]],A,scala.collection.immutable.Stream[A]])scala.collection.immutable.Stream[A]">flatMap</a> <span class="delimiter">(</span><a href="#228141" title="scala.collection.TraversableOnce[A]">_</a>.<a href="../GenTraversableOnce.scala.html#59280" title="=&gt; Stream[A]">toStream</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">object</span> <a title="scala.collection.immutable.Stream.Empty.type" id="228257">Empty</a> <a href="#126004" title="scala.collection.immutable.Stream.Empty.type" class="keyword">extends</a> <a href="#11590" title="scala.collection.immutable.Stream[Nothing]">Stream</a><span class="delimiter">[</span>Nothing<span class="delimiter">]</span> <span class="keyword">with</span> <a href="../../Serializable.scala.html#1369" title="Serializable">Serializable</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Boolean" id="199797">isEmpty</a> = <span title="Boolean(true)" class="keyword">true</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Nothing" id="199798">head</a> = <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)java.util.NoSuchElementException" class="keyword">new</span> <a href="../../package.scala.html#56968" title="java.util.NoSuchElementException">NoSuchElementException</a><span class="delimiter">(</span><span title="String(&quot;head of empty stream&quot;)" class="string">&quot;head of empty stream&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Nothing" id="199799">tail</a> = <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)UnsupportedOperationException" class="keyword">new</span> <a href="../../package.scala.html#56966" title="UnsupportedOperationException">UnsupportedOperationException</a><span class="delimiter">(</span><span title="String(&quot;tail of empty stream&quot;)" class="string">&quot;tail of empty stream&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="199800">tailDefined</a> = <span title="Boolean(false)" class="keyword">false</span>
+  <span class="delimiter">}</span>
+
+  /** The empty stream */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[A]=&gt; scala.collection.immutable.Stream[A]" id="126005">empty</a><span class="delimiter">[</span><a title="" id="126007">A</a><span class="delimiter">]</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+
+  /** A stream consisting of given elements */
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[A](xs: A*)scala.collection.immutable.Stream[A]" id="126008">apply</a><span class="delimiter">[</span><a title="" id="126010">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A*" id="217373">xs</a>: <span title="A*">A</span>*<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#217373" title="A*">xs</a>.<a href="../IterableLike.scala.html#59525" title="=&gt; scala.collection.immutable.Stream[A]">toStream</a>
+
+  /** A wrapper class that adds `#::` for cons and `#:::` for concat as operations
+   *  to streams.
+   */
+  <span class="keyword">class</span> <a title="class ConsWrapper[A] extends Object" id="126011">ConsWrapper</a><span class="delimiter">[</span><a title="" id="126012">A</a><span class="delimiter">]</span><a href="#126011" title="scala.collection.immutable.Stream.ConsWrapper[A]" class="delimiter">(</a><a title="=&gt; scala.collection.immutable.Stream[A]" id="228260">tl</a>: =&gt; Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(hd: A)scala.collection.immutable.Stream[A]" id="226866">#::</a><span class="delimiter">(</span><a title="A" id="226868">hd</a>: <a href="#126012" title="A">A</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="#226868" title="A">hd</a>, <a href="#228260" title="=&gt; scala.collection.immutable.Stream[A]">tl</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(prefix: scala.collection.immutable.Stream[A])scala.collection.immutable.Stream[A]" id="226867">#:::</a><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="228270">prefix</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#228270" title="scala.collection.immutable.Stream[A]">prefix</a> <a href="#114396" title="(rest: =&gt; scala.collection.TraversableOnce[A])scala.collection.immutable.Stream[A]">append</a> <a href="#228260" title="=&gt; scala.collection.immutable.Stream[A]">tl</a>
+  <span class="delimiter">}</span>
+
+  /** A wrapper method that adds `#::` for cons and `#::: for concat as operations
+   *  to streams.
+   */
+  <span class="keyword">implicit</span> <span class="keyword">def</span> <a title="[A](stream: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.ConsWrapper[A]" id="126013">consWrapper</a><span class="delimiter">[</span><a title="" id="126015">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; scala.collection.immutable.Stream[A]" id="217407">stream</a>: =&gt; Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#126011" title="scala.collection.immutable.Stream.ConsWrapper[A]">ConsWrapper</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream.ConsWrapper[A]" class="keyword">new</span> <a href="#126011" title="scala.collection.immutable.Stream.ConsWrapper[A]">ConsWrapper</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">(</span><a href="#217407" title="=&gt; scala.collection.immutable.Stream[A]">stream</a><span class="delimiter">)</span>
+
+  /** An extractor that allows to pattern match streams with `#::`.
+   */
+  <span class="keyword">object</span> <a title="scala.collection.immutable.Stream.#::.type" id="126016">#::</a> <a href="#126017" title="scala.collection.immutable.Stream.#::.type" class="delimiter">{</a>
+    <span class="keyword">def</span> <a title="[A](xs: scala.collection.immutable.Stream[A])Option[(A, scala.collection.immutable.Stream[A])]" id="228278">unapply</a><span class="delimiter">[</span><a title="" id="228280">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="228282">xs</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../Option.scala.html#1510" title="Option[(A, scala.collection.immutable.Stream[A])]">Option</a><span class="delimiter">[</span><span class="delimiter">(</span>A, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">]</span> =
+      <span title="Option[(A, scala.collection.immutable.Stream[A])]" class="keyword">if</span> <span class="delimiter">(</span><a href="#228282" title="scala.collection.immutable.Stream[A]">xs</a>.<a href="../IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="../../Option.scala.html#2498" title="None.type">None</a>
+      <span class="keyword">else</span> <a href="../../Option.scala.html#64111" title="(x: (A, scala.collection.immutable.Stream[A]))Some[(A, scala.collection.immutable.Stream[A])]">Some</a><span class="delimiter">(</span><a href="../../Tuple2.scala.html#63804" title="(_1: A, _2: scala.collection.immutable.Stream[A])(A, scala.collection.immutable.Stream[A])" class="delimiter">(</a><a href="#228282" title="scala.collection.immutable.Stream[A]">xs</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="#228282" title="scala.collection.immutable.Stream[A]">xs</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** An alternative way of building and matching Streams using Stream.cons(hd, tl).
+   */
+  <span class="keyword">object</span> <a title="scala.collection.immutable.Stream.cons.type" id="126018">cons</a> <a href="#126019" title="scala.collection.immutable.Stream.cons.type" class="delimiter">{</a>
+
+    /** A stream consisting of a given first element and remaining elements
+     *  @param hd   The first element of the result stream
+     *  @param tl   The remaining elements of the result stream
+     */
+    <span class="keyword">def</span> <a title="[A](hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]" id="131883">apply</a><span class="delimiter">[</span><a title="" id="131885">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="131889">hd</a>: <a href="#131885" title="A">A</a>, <a title="=&gt; scala.collection.immutable.Stream[A]" id="131890">tl</a>: =&gt; Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> = <span title="scala.collection.immutable.Stream.Cons[A]" class="keyword">new</span> <a href="#126020" title="scala.collection.immutable.Stream.Cons[A]">Cons</a><span class="delimiter">(</span><a href="#131889" title="A">hd</a>, <a href="#131890" title="=&gt; scala.collection.immutable.Stream[A]">tl</a><span class="delimiter">)</span>
+
+    /** Maps a stream to its head and tail */
+    <span class="keyword">def</span> <a title="[A](xs: scala.collection.immutable.Stream[A])Option[(A, scala.collection.immutable.Stream[A])]" id="131886">unapply</a><span class="delimiter">[</span><a title="" id="131888">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="228296">xs</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../Option.scala.html#1510" title="Option[(A, scala.collection.immutable.Stream[A])]">Option</a><span class="delimiter">[</span><span class="delimiter">(</span>A, Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">]</span> = <a href="#126016" title="scala.collection.immutable.Stream.#::.type">#::</a>.<a href="#228278" title="(xs: scala.collection.immutable.Stream[A])Option[(A, scala.collection.immutable.Stream[A])]">unapply</a><span class="delimiter">(</span><a href="#228296" title="scala.collection.immutable.Stream[A]">xs</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** A lazy cons cell, from which streams are built. */
+  @SerialVersionUID<span class="delimiter">(</span>-<span class="long">602202424901551803L</span><span class="delimiter">)</span>
+  <span class="keyword">final</span> <span class="keyword">class</span> <a title="class Cons[+A] extends scala.collection.immutable.Stream[A] with Serializable" id="126020">Cons</a><span class="delimiter">[</span>+<a title="" id="126021">A</a><span class="delimiter">]</span><a href="#126020" title="scala.collection.immutable.Stream.Cons[A]" class="delimiter">(</a><a title="A" id="131913">hd</a>: <a href="#126021" title="A">A</a>, <a title="=&gt; scala.collection.immutable.Stream[A]" id="131914">tl</a>: =&gt; Stream<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> <span class="keyword">with</span> <a href="../../Serializable.scala.html#1369" title="Serializable">Serializable</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Boolean" id="131896">isEmpty</a> = <span title="Boolean(false)" class="keyword">false</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; A" id="131897">head</a> = <a href="#131913" title="A">hd</a>
+    @volatile <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">var</span> <a title="scala.collection.immutable.Stream[A]" id="131898">tlVal</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = _
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="131899">tailDefined</a>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <a href="#131898" title="scala.collection.immutable.Stream[A]">tlVal</a> <span title="(x$1: AnyRef)Boolean">ne</span> <span title="Null(null)" class="keyword">null</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Stream[A]" id="131900">tail</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#131899" title="=&gt; Boolean">tailDefined</a><span class="delimiter">)</span>
+        <a href="#126020" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+          <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#131899" title="=&gt; Boolean">tailDefined</a><span class="delimiter">)</span> <a href="#131898" title="scala.collection.immutable.Stream[A]">tlVal</a> = <a href="#131914" title="=&gt; scala.collection.immutable.Stream[A]">tl</a>
+        <span class="delimiter">}</span>
+
+      <a href="#131898" title="scala.collection.immutable.Stream[A]">tlVal</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** An infinite stream that repeatedly applies a given function to a start value.
+   *
+   *  @param start the start value of the stream
+   *  @param f     the function that's repeatedly applied
+   *  @return      the stream returning the infinite sequence of values `start, f(start), f(f(start)), ...`
+   */
+  <span class="keyword">def</span> <a title="[A](start: A)(f: A =&gt; A)scala.collection.immutable.Stream[A]" id="126022">iterate</a><span class="delimiter">[</span><a title="" id="126024">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="228402">start</a>: <a href="#126024" title="A">A</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; A" id="228403">f</a>: A =&gt; A<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="#228402" title="A">start</a>, <a href="#126022" title="(start: A)(f: A =&gt; A)scala.collection.immutable.Stream[A]">iterate</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)A">f</a><span class="delimiter">(</span><a href="#228402" title="A">start</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a href="#228403" title="A =&gt; A">f</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[A](start: A, len: Int)(f: A =&gt; A)scala.collection.immutable.Stream[A]" id="126025">iterate</a><span class="delimiter">[</span><a title="" id="126027">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="228416">start</a>: <a href="#126027" title="A">A</a>, <a title="Int" id="228417">len</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; A" id="228418">f</a>: A =&gt; A<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <a href="#126022" title="(start: A)(f: A =&gt; A)scala.collection.immutable.Stream[A]">iterate</a><span class="delimiter">(</span><a href="#228416" title="A">start</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#228418" title="A =&gt; A">f</a><span class="delimiter">)</span> <a href="#114478" title="(n: Int)scala.collection.immutable.Stream[A]">take</a> <a href="#228417" title="Int">len</a>
+
+  /**
+   * Create an infinite stream starting at `start` and incrementing by
+   * step `step`.
+   *
+   * @param start the start value of the stream
+   * @param step the increment value of the stream
+   * @return the stream starting at value `start`.
+   */
+  <span class="keyword">def</span> <a title="(start: Int, step: Int)scala.collection.immutable.Stream[Int]" id="126028">from</a><span class="delimiter">(</span><a title="Int" id="126087">start</a>: <a href="../../Int.scala.html#508" title="Int">Int</a>, <a title="Int" id="126088">step</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[Int]">Stream</a><span class="delimiter">[</span>Int<span class="delimiter">]</span> =
+    <a href="#131883" title="(hd: Int, tl: =&gt; scala.collection.immutable.Stream[Int])scala.collection.immutable.Stream.Cons[Int]">cons</a><span class="delimiter">(</span><a href="#126087" title="Int">start</a>, <a href="#126028" title="(start: Int, step: Int)scala.collection.immutable.Stream[Int]">from</a><span class="delimiter">(</span><a href="#126087" title="Int">start</a><a href="../../Int.scala.html#57948" title="(x: Int)Int">+</a><a href="#126088" title="Int">step</a>, <a href="#126088" title="Int">step</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /**
+   * Create an infinite stream starting at `start` and incrementing by `1`.
+   *
+   * @param start the start value of the stream
+   * @return the stream starting at value `start`.
+   */
+  <span class="keyword">def</span> <a title="(start: Int)scala.collection.immutable.Stream[Int]" id="126029">from</a><span class="delimiter">(</span><a title="Int" id="126054">start</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[Int]">Stream</a><span class="delimiter">[</span>Int<span class="delimiter">]</span> = <a href="#126028" title="(start: Int, step: Int)scala.collection.immutable.Stream[Int]">from</a><span class="delimiter">(</span><a href="#126054" title="Int">start</a>, <span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+
+  /**
+   * Create an infinite stream containing the given element expression (which
+   * is computed for each occurrence).
+   *
+   * @param elem the element composing the resulting stream
+   * @return the stream containing an infinite number of elem
+   */
+  <span class="keyword">def</span> <a title="[A](elem: =&gt; A)scala.collection.immutable.Stream[A]" id="126030">continually</a><span class="delimiter">[</span><a title="" id="126032">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; A" id="228510">elem</a>: =&gt; A<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="#228510" title="=&gt; A">elem</a>, <a href="#126030" title="(elem: =&gt; A)scala.collection.immutable.Stream[A]">continually</a><span class="delimiter">(</span><a href="#228510" title="=&gt; A">elem</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[A](n: Int)(elem: =&gt; A)scala.collection.immutable.Stream[A]" id="126033">fill</a><span class="delimiter">[</span><a title="" id="126035">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Int" id="226766">n</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; A" id="226767">elem</a>: =&gt; A<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+    <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="#226766" title="Int">n</a> <a href="../../Int.scala.html#57912" title="(x: Int)Boolean">&lt;=</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a> <span class="keyword">else</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="#226767" title="=&gt; A">elem</a>, <a href="#126033" title="(n: Int)(elem: =&gt; A)scala.collection.immutable.Stream[A]">fill</a><span class="delimiter">(</span><a href="#226766" title="Int">n</a><a href="../../Int.scala.html#57955" title="(x: Int)Int">-</a><span title="Int(1)" class="int">1</span><span class="delimiter">)</span><span class="delimiter">(</span><a href="#226767" title="=&gt; A">elem</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[A](n: Int)(f: Int =&gt; A)scala.collection.immutable.Stream[A]" id="126036">tabulate</a><span class="delimiter">[</span><a title="" id="126038">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Int" id="228568">n</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="Int =&gt; A" id="228569">f</a>: Int =&gt; A<span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(i: Int)scala.collection.immutable.Stream[A]" id="228582">loop</a><span class="delimiter">(</span><a title="Int" id="228583">i</a>: <a href="../../Int.scala.html#508" title="Int">Int</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span> =
+      <span title="scala.collection.immutable.Stream[A]" class="keyword">if</span> <span class="delimiter">(</span><a href="#228583" title="Int">i</a> <a href="../../Int.scala.html#57926" title="(x: Int)Boolean">&gt;=</a> <a href="#228568" title="Int">n</a><span class="delimiter">)</span> <a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a> <span class="keyword">else</span> <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: Int)A">f</a><span class="delimiter">(</span><a href="#228583" title="Int">i</a><span class="delimiter">)</span>, <a href="#228582" title="(i: Int)scala.collection.immutable.Stream[A]">loop</a><span class="delimiter">(</span><a href="#228583" title="Int">i</a><a href="../../Int.scala.html#57948" title="(x: Int)Int">+</a><span title="Int(1)" class="int">1</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#228582" title="(i: Int)scala.collection.immutable.Stream[A]">loop</a><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="[T](start: T, end: T, step: T)(implicit evidence$1: Integral[T])scala.collection.immutable.Stream[T]" id="228605">range</a><span class="delimiter">[</span><a title="" id="126041">T</a>: Integral<span class="delimiter">]</span><span class="delimiter">(</span><a title="T" id="228602">start</a>: <a href="#126041" title="T">T</a>, <a title="T" id="228603">end</a>: <a href="#126041" title="T">T</a>, <a title="T" id="228604">step</a>: <a href="#126041" title="T">T</a><span class="delimiter">)</span>: <a href="#11590" title="scala.collection.immutable.Stream[T]">Stream</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="Integral[T]" id="228627">num</a> = <a href="../../Predef.scala.html#8447" title="[T](implicit e: T)T">implicitly</a><a href="#228605" title="(implicit e: Integral[T])Integral[T]" class="delimiter">[</a><a href="../../math/Integral.scala.html#17506" title="Integral[T]">Integral</a><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span>
+    <span class="keyword">import</span> <a href="#228627" title="Integral[T]">num</a>._
+
+    <span title="scala.collection.immutable.Stream[T]" class="keyword">if</span> <span class="delimiter">(</span><span title="Boolean" class="keyword">if</span> <span class="delimiter">(</span><a href="../../math/Ordering.scala.html#72349" title="implicit scala.math.Ordering.mkOrderingOps : (lhs: T)num.Ops">step</a> <a href="../../math/Ordering.scala.html#185059" title="(rhs: T)Boolean">&lt;</a> <a href="../../math/Numeric.scala.html#72360" title="=&gt; T">zero</a><span class="delimiter">)</span> <a href="../../math/Ordering.scala.html#72349" title="implicit scala.math.Ordering.mkOrderingOps : (lhs: T)num.Ops">start</a> <a href="../../math/Ordering.scala.html#185060" title="(rhs: T)Boolean">&lt;=</a> <a href="#228603" title="T">end</a> <span class="keyword">else</span> <a href="../../math/Ordering.scala.html#72349" title="implicit scala.math.Ordering.mkOrderingOps : (lhs: T)num.Ops">end</a> <a href="../../math/Ordering.scala.html#185060" title="(rhs: T)Boolean">&lt;=</a> <a href="#228602" title="T">start</a><span class="delimiter">)</span> <a href="#228257" title="scala.collection.immutable.Stream.Empty.type">Empty</a>
+    <span class="keyword">else</span> <a href="#131883" title="(hd: T, tl: =&gt; scala.collection.immutable.Stream[T])scala.collection.immutable.Stream.Cons[T]">cons</a><span class="delimiter">(</span><a href="#228602" title="T">start</a>, <a href="#228605" title="(start: T, end: T, step: T)(implicit evidence$1: Integral[T])scala.collection.immutable.Stream[T]">range</a><a href="#228605" title="Integral[T]" class="delimiter">(</a><a href="../../math/Integral.scala.html#72747" title="implicit scala.math.Integral.mkNumericOps : (lhs: T)num.IntegralOps">start</a> <a href="../../math/Numeric.scala.html#185040" title="(rhs: T)T">+</a> <a href="#228604" title="T">step</a>, <a href="#228603" title="T">end</a>, <a href="#228604" title="T">step</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>immutable<span class="delimiter">]</span> <span class="keyword">def</span> <a title="[A](stream: scala.collection.immutable.Stream[A], p: A =&gt; Boolean)scala.collection.immutable.Stream.Cons[A]" id="126042">filteredTail</a><span class="delimiter">[</span><a title="" id="126044">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="225777">stream</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="A =&gt; Boolean" id="225778">p</a>: A =&gt; Boolean<span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#131883" title="(hd: A, tl: =&gt; scala.collection.immutable.Stream[A])scala.collection.immutable.Stream.Cons[A]">cons</a><span class="delimiter">(</span><a href="#225777" title="scala.collection.immutable.Stream[A]">stream</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a>, <a href="#225777" title="scala.collection.immutable.Stream[A]">stream</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a> <a href="#114446" title="(p: A =&gt; Boolean)scala.collection.immutable.Stream[A]">filter</a> <a href="#225778" title="A =&gt; Boolean">p</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>immutable<span class="delimiter">]</span> <span class="keyword">def</span> <a title="[A, B, That](stream: scala.collection.immutable.Stream[A], pf: PartialFunction[A,B], bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])scala.collection.immutable.Stream.Cons[B]" id="126045">collectedTail</a><span class="delimiter">[</span><a title="" id="126049">A</a>, <a title="" id="126050">B</a>, <a title="" id="126051">That</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.immutable.Stream[A]" id="225587">stream</a>: <a href="#11590" title="scala.collection.immutable.Stream[A]">Stream</a><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="PartialFunction[A,B]" id="225588">pf</a>: <a href="../../PartialFunction.scala.html#217" title="PartialFunction[A,B]">PartialFunction</a><span class="delimiter">[</span>A, B<span class="delimiter">]</span>, <a title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]" id="225589">bf</a>: <a href="../generic/CanBuildFrom.scala.html#11076" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">CanBuildFrom</a><span class="delimiter">[</span>Stream<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, That<span class="delimiter">]</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#131883" title="(hd: B, tl: =&gt; scala.collection.immutable.Stream[B])scala.collection.immutable.Stream.Cons[B]">cons</a><span class="delimiter">(</span><a href="../../Function1.scala.html#59555" title="(v1: A)B">pf</a><span class="delimiter">(</span><a href="#225587" title="scala.collection.immutable.Stream[A]">stream</a>.<a href="../IterableLike.scala.html#59473" title="=&gt; A">head</a><span class="delimiter">)</span>, <a href="#225587" title="scala.collection.immutable.Stream[A]">stream</a>.<a href="../TraversableLike.scala.html#59012" title="=&gt; scala.collection.immutable.Stream[A]">tail</a>.<a href="#114436" title="(pf: PartialFunction[A,B])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That])That">collect</a><span class="delimiter">(</span><a href="#225588" title="PartialFunction[A,B]">pf</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#225589" title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Stream[A],B,That]">bf</a><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.collection.immutable.Stream[B]" class="delimiter">[</span><a href="#11590" title="scala.collection.immutable.Stream[B]">Stream</a><span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+
+
+        </pre>
+    </body>
+</html>

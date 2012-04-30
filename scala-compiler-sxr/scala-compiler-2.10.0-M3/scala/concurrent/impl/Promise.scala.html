@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/concurrent/impl/Promise.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.concurrent.impl
+
+
+
+<span class="keyword">import</span> java.util.concurrent.<span title="java.util.concurrent.TimeUnit.type">TimeUnit</span>.<span class="delimiter">{</span> NANOSECONDS, MILLISECONDS <span class="delimiter">}</span>
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicReferenceFieldUpdater
+<span class="keyword">import</span> scala.concurrent.<span class="delimiter">{</span>Awaitable, ExecutionContext, resolveEither, resolver, blocking, CanAwait, TimeoutException<span class="delimiter">}</span>
+//import scala.util.continuations._
+<span class="keyword">import</span> scala.concurrent.util.Duration
+<span class="keyword">import</span> scala.util
+<span class="keyword">import</span> scala.annotation.tailrec
+//import scala.concurrent.NonDeterministic
+
+
+
+<span class="keyword">private</span><span class="delimiter">[</span>concurrent<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait Promise[T] extends Object with scala.concurrent.Promise[T] with scala.concurrent.impl.Future[T]" id="16982">Promise</a><span class="delimiter">[</span><a title="" id="17033">T</a><span class="delimiter">]</span> <a href="../../Unit.scala.html#2389" title="Unit" class="keyword">extends</a> scala.concurrent.<a href="../Promise.scala.html#16689" title="scala.concurrent.Promise[T]">Promise</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="keyword">with</span> <a href="Future.scala.html#16988" title="scala.concurrent.impl.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+  <span class="keyword">def</span> <a title="=&gt; scala.concurrent.impl.Promise[T]" id="407632">future</a> = <a href="#16982" title="scala.concurrent.impl.Promise[T]" class="keyword">this</a>
+
+  <span class="keyword">def</span> <a title="[S]=&gt; scala.concurrent.Promise[S]" id="407633">newPromise</a><span class="delimiter">[</span><a title="" id="407635">S</a><span class="delimiter">]</span>: scala.concurrent.<a href="../Promise.scala.html#16689" title="scala.concurrent.Promise[S]">Promise</a><span class="delimiter">[</span>S<span class="delimiter">]</span> = <a href="Future.scala.html#407053" title="scala.concurrent.impl.Promise.DefaultPromise[S]" class="keyword">new</a> Promise.<a href="#407606" title="scala.concurrent.impl.Promise.DefaultPromise[S]">DefaultPromise</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  // TODO refine answer and return types here from Any to type parameters
+  // then move this up in the hierarchy
+  /*
+  final def &lt;&lt;(value: T): Future[T] @cps[Future[Any]] = shift {
+    cont: (Future[T] =&gt; Future[Any]) =&gt;
+    cont(complete(Right(value)))
+  }
+
+  final def &lt;&lt;(other: Future[T]): Future[T] @cps[Future[Any]] = shift {
+    cont: (Future[T] =&gt; Future[Any]) =&gt;
+    val p = executor.promise[Any]
+    val thisPromise = this
+
+    thisPromise completeWith other
+    thisPromise onComplete { v =&gt;
+      try {
+        p completeWith cont(thisPromise)
+      } catch {
+        case e =&gt; p complete resolver(e)
+      }
+    }
+
+    p.future
+  }
+  */
+  // TODO finish this once we introduce something like dataflow streams
+
+  /*
+  final def &lt;&lt;(stream: PromiseStreamOut[T]): Future[T] @cps[Future[Any]] = shift { cont: (Future[T] =&gt; Future[Any]) =&gt;
+    val fr = executor.promise[Any]
+    val f = stream.dequeue(this)
+    f.onComplete { _ =&gt;
+      try {
+        fr completeWith cont(f)
+      } catch {
+        case e =&gt;
+          fr failure e
+      }
+    }
+    fr
+  }
+  */
+
+<span class="delimiter">}</span>
+
+
+<span class="keyword">object</span> <a title="scala.concurrent.impl.Promise.type" id="16983">Promise</a> <a href="#16984" title="scala.concurrent.impl.Promise.type" class="delimiter">{</a>
+  /** Default promise implementation.
+   */
+  <span class="keyword">class</span> <a title="class DefaultPromise[T] extends scala.concurrent.impl.AbstractPromise with scala.concurrent.impl.Promise[T]" id="407606">DefaultPromise</a><span class="delimiter">[</span><a title="" id="407607">T</a><span class="delimiter">]</span><a href="#407606" title="scala.concurrent.impl.Promise.DefaultPromise[T]" class="delimiter">(</a><span class="keyword">implicit</span> <span class="keyword">val</span> <a title="scala.concurrent.ExecutionContext" id="407636">executor</a>: <a href="../ExecutionContext.scala.html#16554" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="AbstractPromise.java.html#16973" title="scala.concurrent.impl.AbstractPromise">AbstractPromise</a> <span class="keyword">with</span> <a href="#16982" title="scala.concurrent.impl.Promise[T]">Promise</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span> self =&gt;
+    <a href="#407623" title="=&gt; java.util.concurrent.atomic.AtomicReferenceFieldUpdater[scala.concurrent.impl.AbstractPromise,AnyRef]">updater</a>.<span title="(x$1: scala.concurrent.impl.AbstractPromise, x$2: AnyRef)Unit">set</span><span class="delimiter">(</span><a href="#407606" title="scala.concurrent.impl.Promise.DefaultPromise[T]" class="keyword">this</a>, <a href="../../collection/immutable/List.scala.html#11552" title="scala.collection.immutable.Nil.type">Nil</a><span class="delimiter">)</span> // Start at &quot;No callbacks&quot; //FIXME switch to Unsafe instead of ARFU
+
+    <span class="keyword">protected</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="(atMost: scala.concurrent.util.Duration)Boolean" id="407618">tryAwait</a><span class="delimiter">(</span><a title="scala.concurrent.util.Duration" id="408811">atMost</a>: <a href="../util/Duration.scala.html#17076" title="scala.concurrent.util.Duration">Duration</a><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <span class="delimiter">{</span>
+      @tailrec
+      <span class="keyword">def</span> <a title="(waitTimeNanos: Long)Boolean" id="408813">awaitUnsafe</a><span class="delimiter">(</span><a title="Long" id="408814">waitTimeNanos</a>: <a href="../../Long.scala.html#1993" title="Long">Long</a><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <span class="delimiter">{</span>
+        <span title="Boolean" class="keyword">if</span> <span class="delimiter">(</span><a href="#407621" title="=&gt; Option[Either[Throwable,T]]">value</a>.<a href="../../Option.scala.html#63811" title="=&gt; Boolean">isEmpty</a> <a href="../../Boolean.scala.html#58725" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#408814" title="Long">waitTimeNanos</a> <a href="../../Long.scala.html#58281" title="(x: Int)Boolean">&gt;</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span class="keyword">val</span> <a title="Long" id="408821">ms</a> = <span title="java.util.concurrent.TimeUnit(value NANOSECONDS)">NANOSECONDS</span>.<span title="(x$1: Long)Long">toMillis</span><span class="delimiter">(</span><a href="#408814" title="Long">waitTimeNanos</a><span class="delimiter">)</span>
+          <span class="keyword">val</span> <a title="Int" id="408822">ns</a> = <span class="delimiter">(</span><a href="#408814" title="Long">waitTimeNanos</a> <a href="../../Long.scala.html#58339" title="(x: Long)Long">%</a> <span title="Long(1000000L)" class="long">1000000l</span><span class="delimiter">)</span>.<a href="../../Long.scala.html#58236" title="=&gt; Int">toInt</a> // as per object.wait spec
+          <span class="keyword">val</span> <a title="Long" id="408823">start</a> = <span title="System.type">System</span>.<span title="()Long">nanoTime</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <span class="keyword">try</span> <span class="delimiter">{</span>
+            <a href="#407606" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+              <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../Boolean.scala.html#58721" title="=&gt; Boolean">!</a><a href="#407622" title="()Boolean">isCompleted</a><span class="delimiter">)</span> <a href="#407606" title="(x$1: Long, x$2: Int)Unit">wait</a><a href="#408830" title="()Unit" class="delimiter">(</a><a href="#408821" title="Long">ms</a>, <a href="#408822" title="Int">ns</a><span class="delimiter">)</span>
+            <span class="delimiter">}</span>
+          <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+            <span class="keyword">case</span> <a title="Unit" id="408837">e</a>: <span title="InterruptedException">InterruptedException</span> =&gt;
+          <span class="delimiter">}</span>
+
+          <a href="#408813" title="(waitTimeNanos: Long)Boolean">awaitUnsafe</a><span class="delimiter">(</span><a href="#408814" title="Long">waitTimeNanos</a> <a href="../../Long.scala.html#58318" title="(x: Long)Long">-</a> <span class="delimiter">(</span><span title="System.type">System</span>.<span title="()Long">nanoTime</span><span class="delimiter">(</span><span class="delimiter">)</span> <a href="../../Long.scala.html#58318" title="(x: Long)Long">-</a> <a href="#408823" title="Long">start</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">else</span>
+          <a href="#407622" title="()Boolean">isCompleted</a>
+      <span class="delimiter">}</span>
+      //FIXME do not do this if there'll be no waiting
+      <a href="../ConcurrentPackageObject.scala.html#56872" title="(awaitable: scala.concurrent.Awaitable[Boolean], atMost: scala.concurrent.util.Duration)Boolean">blocking</a><span class="delimiter">(</span><a href="Future.scala.html#16989" title="scala.concurrent.impl.Future.type">Future</a>.<a href="Future.scala.html#405675" title="(body: =&gt; Boolean)scala.concurrent.Awaitable[Boolean]">body2awaitable</a><span class="delimiter">(</span><a href="#408813" title="(waitTimeNanos: Long)Boolean">awaitUnsafe</a><span class="delimiter">(</span><span title="Long" class="keyword">if</span> <span class="delimiter">(</span><a href="#408811" title="scala.concurrent.util.Duration">atMost</a>.<a href="../util/Duration.scala.html#405225" title="()Boolean">isFinite</a><span class="delimiter">)</span> <a href="#408811" title="scala.concurrent.util.Duration">atMost</a>.<a href="../util/Duration.scala.html#405197" title="=&gt; Long">toNanos</a> <span class="keyword">else</span> Long.<span title="Long(9223372036854775807L)">MaxValue</span><span class="delimiter">)</span><span class="delimiter">)</span>, <a href="#408811" title="scala.concurrent.util.Duration">atMost</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    @throws<span class="delimiter">(</span>classOf<span class="delimiter">[</span>TimeoutException<span class="delimiter">]</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(atMost: scala.concurrent.util.Duration)(implicit permit: scala.concurrent.CanAwait)DefaultPromise.this.type" id="407619">ready</a><span class="delimiter">(</span><a title="scala.concurrent.util.Duration" id="408874">atMost</a>: <a href="../util/Duration.scala.html#17076" title="scala.concurrent.util.Duration">Duration</a><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.CanAwait" id="408875">permit</a>: <a href="../package.scala.html#16599" title="scala.concurrent.CanAwait">CanAwait</a><span class="delimiter">)</span>: <span class="keyword">this</span>.<span class="keyword">type</span> =
+      <span title="DefaultPromise.this.type" class="keyword">if</span> <span class="delimiter">(</span><a href="#407622" title="()Boolean">isCompleted</a> <a href="../../Boolean.scala.html#58724" title="(x: Boolean)Boolean">||</a> <a href="#407618" title="(atMost: scala.concurrent.util.Duration)Boolean">tryAwait</a><span class="delimiter">(</span><a href="#408874" title="scala.concurrent.util.Duration">atMost</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#407606" title="DefaultPromise.this.type" class="keyword">this</a>
+      <span class="keyword">else</span> <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)java.util.concurrent.TimeoutException" class="keyword">new</span> <a href="../package.scala.html#56879" title="java.util.concurrent.TimeoutException">TimeoutException</a><span class="delimiter">(</span><span title="String(&quot;Futures timed out after [&quot;)" class="string">&quot;Futures timed out after [&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#408874" title="scala.concurrent.util.Duration">atMost</a>.<a href="../util/Duration.scala.html#405199" title="=&gt; Long">toMillis</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;] milliseconds&quot;)" class="string">&quot;] milliseconds&quot;</span><span class="delimiter">)</span>
+
+    @throws<span class="delimiter">(</span>classOf<span class="delimiter">[</span>Exception<span class="delimiter">]</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="(atMost: scala.concurrent.util.Duration)(implicit permit: scala.concurrent.CanAwait)T" id="407620">result</a><span class="delimiter">(</span><a title="scala.concurrent.util.Duration" id="408881">atMost</a>: <a href="../util/Duration.scala.html#17076" title="scala.concurrent.util.Duration">Duration</a><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.CanAwait" id="408882">permit</a>: <a href="../package.scala.html#16599" title="scala.concurrent.CanAwait">CanAwait</a><span class="delimiter">)</span>: <a href="#407607" title="T">T</a> =
+      <a href="#407619" title="(atMost: scala.concurrent.util.Duration)(implicit permit: scala.concurrent.CanAwait)DefaultPromise.this.type">ready</a><a href="#408882" title="scala.concurrent.CanAwait" class="delimiter">(</a><a href="#408881" title="scala.concurrent.util.Duration">atMost</a><span class="delimiter">)</span>.<a href="#407621" title="=&gt; Option[Either[Throwable,T]]">value</a>.<a href="../../Option.scala.html#63813" title="=&gt; Either[Throwable,T]">get</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> Left<a href="#408889" title="T" id="408890" class="delimiter">(</a>e<span class="delimiter">)</span>  =&gt; <a href="#408892" title="(x: T)T" class="keyword">throw</a> e
+        <span class="keyword">case</span> Right<a href="#408889" title="T" id="408891" class="delimiter">(</a>r<span class="delimiter">)</span> =&gt; <a href="#408892" title="(x: T)T">r</a>
+      <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="=&gt; Option[Either[Throwable,T]]" id="407621">value</a>: <a href="../../Option.scala.html#1510" title="Option[Either[Throwable,T]]">Option</a><span class="delimiter">[</span>Either<span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="#407625" title="=&gt; AnyRef">getState</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a href="#408906" title="Option[Either[Throwable,T]]" id="408907">c</a>: Either<span class="delimiter">[</span>_, _<span class="delimiter">]</span> =&gt; <a href="../../Option.scala.html#64111" title="(x: Either[Throwable,T])Some[Either[Throwable,T]]">Some</a><a href="#408908" title="(x: Option[Either[Throwable,T]])Option[Either[Throwable,T]]" class="delimiter">(</a>c.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Either[Throwable,T]" class="delimiter">[</span><a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> _               =&gt; <a href="#408908" title="(x: Option[Either[Throwable,T]])Option[Either[Throwable,T]]">None</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Boolean" id="407622">isCompleted</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <a href="#407625" title="=&gt; AnyRef">getState</a> <span class="keyword">match</span> <span class="delimiter">{</span> // Cheaper than boxing result into Option due to &quot;def value&quot;
+      <span class="keyword">case</span> _: Either<span class="delimiter">[</span>_, _<span class="delimiter">]</span> =&gt; <a href="#408918" title="(x: Boolean)Boolean" class="keyword">true</a>
+      <span class="keyword">case</span> _               =&gt; <a href="#408918" title="(x: Boolean)Boolean" class="keyword">false</a>
+    <span class="delimiter">}</span>
+
+    @inline
+    <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="=&gt; java.util.concurrent.atomic.AtomicReferenceFieldUpdater[scala.concurrent.impl.AbstractPromise,AnyRef]" id="407623">updater</a> = <a href="AbstractPromise.java.html#16974" title="scala.concurrent.impl.AbstractPromise.type">AbstractPromise</a>.<a href="AbstractPromise.java.html#408808" title="java.util.concurrent.atomic.AtomicReferenceFieldUpdater[scala.concurrent.impl.AbstractPromise,Object]">updater</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="java.util.concurrent.atomic.AtomicReferenceFieldUpdater[scala.concurrent.impl.AbstractPromise,AnyRef]" class="delimiter">[</span><span title="java.util.concurrent.atomic.AtomicReferenceFieldUpdater[scala.concurrent.impl.AbstractPromise,AnyRef]">AtomicReferenceFieldUpdater</span><span class="delimiter">[</span>AbstractPromise, AnyRef<span class="delimiter">]</span><span class="delimiter">]</span>
+
+    @inline
+    <span class="keyword">protected</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="(oldState: AnyRef, newState: AnyRef)Boolean" id="407624">updateState</a><span class="delimiter">(</span><a title="AnyRef" id="408923">oldState</a>: <span title="AnyRef">AnyRef</span>, <a title="AnyRef" id="408924">newState</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <a href="#407623" title="=&gt; java.util.concurrent.atomic.AtomicReferenceFieldUpdater[scala.concurrent.impl.AbstractPromise,AnyRef]">updater</a>.<span title="(x$1: scala.concurrent.impl.AbstractPromise, x$2: AnyRef, x$3: AnyRef)Boolean">compareAndSet</span><span class="delimiter">(</span><a href="#407606" title="scala.concurrent.impl.Promise.DefaultPromise[T]" class="keyword">this</a>, <a href="#408923" title="AnyRef">oldState</a>, <a href="#408924" title="AnyRef">newState</a><span class="delimiter">)</span>
+
+    @inline
+    <span class="keyword">protected</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="=&gt; AnyRef" id="407625">getState</a>: <span title="AnyRef">AnyRef</span> = <a href="#407623" title="=&gt; java.util.concurrent.atomic.AtomicReferenceFieldUpdater[scala.concurrent.impl.AbstractPromise,AnyRef]">updater</a>.<span title="(x$1: scala.concurrent.impl.AbstractPromise)AnyRef">get</span><span class="delimiter">(</span><a href="#407606" title="scala.concurrent.impl.Promise.DefaultPromise[T]" class="keyword">this</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="(value: Either[Throwable,T])Boolean" id="407626">tryComplete</a><span class="delimiter">(</span><a title="Either[Throwable,T]" id="408930">value</a>: <a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="List[Either[Throwable,T] =&gt; Unit]" id="408933">callbacks</a>: <a href="../../collection/immutable/List.scala.html#12322" title="List[Either[Throwable,T] =&gt; Unit]">List</a><span class="delimiter">[</span>Either<span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span> =&gt; Unit<span class="delimiter">]</span> = <span class="delimiter">{</span>
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+          @tailrec
+          <span class="keyword">def</span> <a title="(v: Either[Throwable,T])List[Either[Throwable,T] =&gt; Unit]" id="408934">tryComplete</a><span class="delimiter">(</span><a title="Either[Throwable,T]" id="408935">v</a>: <a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../collection/immutable/List.scala.html#12322" title="List[Either[Throwable,T] =&gt; Unit]">List</a><span class="delimiter">[</span>Either<span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span> =&gt; Unit<span class="delimiter">]</span> = <span class="delimiter">{</span>
+            <a href="#407625" title="=&gt; AnyRef">getState</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+              <span class="keyword">case</span> <a href="#408940" title="List[Either[Throwable,T] =&gt; Unit]" id="408941">raw</a>: List<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt;
+                <span class="keyword">val</span> <a title="List[Either[Throwable,T] =&gt; Unit]" id="408938">cur</a> = raw.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="List[Either[Throwable,T] =&gt; Unit]" class="delimiter">[</span><a href="../../collection/immutable/List.scala.html#12322" title="List[Either[Throwable,T] =&gt; Unit]">List</a><span class="delimiter">[</span>Either<span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span> =&gt; Unit<span class="delimiter">]</span><span class="delimiter">]</span>
+                <span title="List[Either[Throwable,T] =&gt; Unit]" class="keyword">if</span> <span class="delimiter">(</span><a href="#407624" title="(oldState: AnyRef, newState: AnyRef)Boolean">updateState</a><span class="delimiter">(</span><a href="#408938" title="List[Either[Throwable,T] =&gt; Unit]">cur</a>, <a href="#408935" title="Either[Throwable,T]">v</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#408938" title="List[Either[Throwable,T] =&gt; Unit]">cur</a> <span class="keyword">else</span> <a href="#408934" title="(v: Either[Throwable,T])List[Either[Throwable,T] =&gt; Unit]">tryComplete</a><span class="delimiter">(</span><a href="#408935" title="Either[Throwable,T]">v</a><span class="delimiter">)</span>
+              <span class="keyword">case</span> _ =&gt; <a href="#408942" title="(x: List[Either[Throwable,T] =&gt; Unit])List[Either[Throwable,T] =&gt; Unit]" class="keyword">null</a>
+            <span class="delimiter">}</span>
+          <span class="delimiter">}</span>
+          <a href="#408934" title="(v: Either[Throwable,T])List[Either[Throwable,T] =&gt; Unit]">tryComplete</a><span class="delimiter">(</span><a href="../ConcurrentPackageObject.scala.html#56857" title="(source: Either[Throwable,T])Either[Throwable,T]">resolveEither</a><span class="delimiter">(</span><a href="#408930" title="Either[Throwable,T]">value</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+          <a href="#407606" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span> <a href="#407606" title="()Unit">notifyAll</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span> //Notify any evil blockers
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+
+      <a href="#408933" title="List[Either[Throwable,T] =&gt; Unit]">callbacks</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a href="#408982" title="Boolean" id="408985" class="keyword">null</a>             =&gt; <a href="#408986" title="(x: Boolean)Boolean" class="keyword">false</a>
+        <span class="keyword">case</span> cs <span class="keyword">if</span> cs.<a href="../../collection/IterableLike.scala.html#59464" title="=&gt; Boolean">isEmpty</a> =&gt; <a href="#408986" title="(x: Boolean)Boolean" class="keyword">true</a>
+        <span class="keyword">case</span> cs               =&gt; <a href="Future.scala.html#16989" title="scala.concurrent.impl.Future.type">Future</a>.<a href="Future.scala.html#405684" title="(executor: scala.concurrent.ExecutionContext, task: () =&gt; Unit, force: Boolean)Unit">dispatchFuture</a><span class="delimiter">(</span><a href="#407636" title="=&gt; scala.concurrent.ExecutionContext">executor</a>, <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; cs.<a href="../../collection/LinearSeqOptimized.scala.html#76166" title="(f: (Either[Throwable,T] =&gt; Unit) =&gt; Unit)Unit">foreach</a><span class="delimiter">(</span><a title="Either[Throwable,T] =&gt; Unit" id="408976">f</a> =&gt; <a href="#407630" title="(func: Either[Throwable,T] =&gt; Any, result: Either[Throwable,T])Unit">notifyCompleted</a><span class="delimiter">(</span><a href="#408976" title="Either[Throwable,T] =&gt; Unit">f</a>, <a href="#408930" title="Either[Throwable,T]">value</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>; <span title="Boolean(true)" class="keyword">true</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="[U](func: Either[Throwable,T] =&gt; U)DefaultPromise.this.type" id="407627">onComplete</a><span class="delimiter">[</span><a title="" id="407629">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Either[Throwable,T] =&gt; U" id="408995">func</a>: Either<span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span> =&gt; U<span class="delimiter">)</span>: <span class="keyword">this</span>.<span class="keyword">type</span> = <span class="delimiter">{</span>
+      @tailrec //Returns the future's results if it has already been completed, or null otherwise. 
+      <span class="keyword">def</span> <a title="()Either[Throwable,T]" id="409004">tryAddCallback</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="AnyRef" id="409005">cur</a> = <a href="#407625" title="=&gt; AnyRef">getState</a>
+        <a href="#409005" title="AnyRef">cur</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="#409022" title="Either[Throwable,T]" id="409023">r</a>: Either<span class="delimiter">[</span>_, _<span class="delimiter">]</span>    =&gt; r.<span title="[T0]=&gt; T0">asInstanceOf</span><a href="#409025" title="(x: Either[Throwable,T])Either[Throwable,T]" class="delimiter">[</a><a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">]</span>
+          <span class="keyword">case</span> <a href="#409022" title="Either[Throwable,T]" id="409024">listeners</a>: List<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#409025" title="(x: Either[Throwable,T])Either[Throwable,T]" class="keyword">if</a> <span class="delimiter">(</span><a href="#407624" title="(oldState: AnyRef, newState: AnyRef)Boolean">updateState</a><span class="delimiter">(</span>listeners, <a href="#408995" title="Either[Throwable,T] =&gt; U">func</a> <a href="../../collection/immutable/List.scala.html#63643" title="(x: Any)List[Any]">::</a> listeners<span class="delimiter">)</span><span class="delimiter">)</span> <span title="Null(null)" class="keyword">null</span> <span class="keyword">else</span> <a href="#409004" title="()Either[Throwable,T]">tryAddCallback</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+
+      <a href="#409004" title="()Either[Throwable,T]">tryAddCallback</a><a href="#409033" title="Either[Throwable,T]" class="delimiter">(</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a href="#409033" title="DefaultPromise.this.type" id="409036" class="keyword">null</a> =&gt; <a href="#409037" title="(x: DefaultPromise.this.type)DefaultPromise.this.type" class="keyword">this</a>
+        <span class="keyword">case</span> completed =&gt;
+          <a href="Future.scala.html#16989" title="scala.concurrent.impl.Future.type">Future</a>.<a href="Future.scala.html#405684" title="(executor: scala.concurrent.ExecutionContext, task: () =&gt; Unit, force: Boolean)Unit">dispatchFuture</a><span class="delimiter">(</span><a href="#407636" title="=&gt; scala.concurrent.ExecutionContext">executor</a>, <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="#407630" title="(func: Either[Throwable,T] =&gt; Any, result: Either[Throwable,T])Unit">notifyCompleted</a><span class="delimiter">(</span><a href="#408995" title="Either[Throwable,T] =&gt; U">func</a>, completed<span class="delimiter">)</span><span class="delimiter">)</span>
+          <a href="#407606" title="DefaultPromise.this.type" class="keyword">this</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="(func: Either[Throwable,T] =&gt; Any, result: Either[Throwable,T])Unit" id="407630">notifyCompleted</a><span class="delimiter">(</span><a title="Either[Throwable,T] =&gt; Any" id="408977">func</a>: Either<span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span> =&gt; Any, <a title="Either[Throwable,T]" id="408978">result</a>: <a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#409054" title="Unit" id="409051" class="keyword">try</a> <span class="delimiter">{</span>
+        <a href="../../Function1.scala.html#59555" title="(v1: Either[Throwable,T])Any">func</a><span title="Unit" class="delimiter">(</span><a href="#408978" title="Either[Throwable,T]">result</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a href="NonFatal.scala.html#406065" title="Option[Throwable]" id="409058">NonFatal</a><span class="delimiter">(</span>e<span class="delimiter">)</span> =&gt; <a href="#407636" title="=&gt; scala.concurrent.ExecutionContext">executor</a> <a href="#409054" title="(x: Unit)Unit">reportFailure</a> e
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** An already completed Future is given its result at creation.
+   *
+   *  Useful in Future-composition when a value to contribute is already available.
+   */
+  <span class="keyword">final</span> <span class="keyword">class</span> <a title="class KeptPromise[T] extends Object with scala.concurrent.impl.Promise[T]" id="407608">KeptPromise</a><span class="delimiter">[</span><a title="" id="407609">T</a><span class="delimiter">]</span><a href="#407608" title="scala.concurrent.impl.Promise.KeptPromise[T]" class="delimiter">(</a><a title="Either[Throwable,T]" id="407657">suppliedValue</a>: <a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <span class="keyword">val</span> <a title="scala.concurrent.ExecutionContext" id="407658">executor</a>: <a href="../ExecutionContext.scala.html#16554" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#16982" title="scala.concurrent.impl.Promise[T]">Promise</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+    <span class="keyword">val</span> <a title="Some[Either[Throwable,T]]" id="407648">value</a> = <a href="../../Option.scala.html#64111" title="(x: Either[Throwable,T])Some[Either[Throwable,T]]">Some</a><span class="delimiter">(</span><a href="../ConcurrentPackageObject.scala.html#56857" title="(source: Either[Throwable,T])Either[Throwable,T]">resolveEither</a><span class="delimiter">(</span><a href="#407657" title="Either[Throwable,T]">suppliedValue</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Boolean" id="407650">isCompleted</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <span title="Boolean(true)" class="keyword">true</span>
+
+    <span class="keyword">def</span> <a title="(value: Either[Throwable,T])Boolean" id="407651">tryComplete</a><span class="delimiter">(</span><a title="Either[Throwable,T]" id="409069">value</a>: <a href="../../Either.scala.html#2035" title="Either[Throwable,T]">Either</a><span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../Boolean.scala.html#2218" title="Boolean">Boolean</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+    <span class="keyword">def</span> <a title="[U](func: Either[Throwable,T] =&gt; U)KeptPromise.this.type" id="407652">onComplete</a><span class="delimiter">[</span><a title="" id="407654">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Either[Throwable,T] =&gt; U" id="409072">func</a>: Either<span class="delimiter">[</span>Throwable, T<span class="delimiter">]</span> =&gt; U<span class="delimiter">)</span>: <span class="keyword">this</span>.<span class="keyword">type</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Either[Throwable,T]" id="409081">completedAs</a> = <a href="#407648" title="=&gt; Some[Either[Throwable,T]]">value</a>.<a href="../../Option.scala.html#64119" title="=&gt; Either[Throwable,T]">get</a>
+      <a href="Future.scala.html#16989" title="scala.concurrent.impl.Future.type">Future</a>.<a href="Future.scala.html#405684" title="(executor: scala.concurrent.ExecutionContext, task: () =&gt; Unit, force: Boolean)Unit">dispatchFuture</a><span class="delimiter">(</span><a href="#407658" title="=&gt; scala.concurrent.ExecutionContext">executor</a>, <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="../../Function1.scala.html#59555" title="(v1: Either[Throwable,T])U">func</a><span title="Unit" class="delimiter">(</span><a href="#409081" title="Either[Throwable,T]">completedAs</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#407608" title="KeptPromise.this.type" class="keyword">this</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(atMost: scala.concurrent.util.Duration)(implicit permit: scala.concurrent.CanAwait)KeptPromise.this.type" id="407655">ready</a><span class="delimiter">(</span><a title="scala.concurrent.util.Duration" id="409084">atMost</a>: <a href="../util/Duration.scala.html#17076" title="scala.concurrent.util.Duration">Duration</a><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.CanAwait" id="409085">permit</a>: <a href="../package.scala.html#16599" title="scala.concurrent.CanAwait">CanAwait</a><span class="delimiter">)</span>: <span class="keyword">this</span>.<span class="keyword">type</span> = <a href="#407608" title="KeptPromise.this.type" class="keyword">this</a>
+
+    <span class="keyword">def</span> <a title="(atMost: scala.concurrent.util.Duration)(implicit permit: scala.concurrent.CanAwait)T" id="407656">result</a><span class="delimiter">(</span><a title="scala.concurrent.util.Duration" id="409087">atMost</a>: <a href="../util/Duration.scala.html#17076" title="scala.concurrent.util.Duration">Duration</a><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.CanAwait" id="409088">permit</a>: <a href="../package.scala.html#16599" title="scala.concurrent.CanAwait">CanAwait</a><span class="delimiter">)</span>: <a href="#407609" title="T">T</a> = <a href="#407648" title="=&gt; Some[Either[Throwable,T]]">value</a>.<a href="../../Option.scala.html#64119" title="=&gt; Either[Throwable,T]">get</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Left<a href="#409095" title="T" id="409096" class="delimiter">(</a>e<span class="delimiter">)</span>  =&gt; <a href="#409098" title="(x: T)T" class="keyword">throw</a> e
+      <span class="keyword">case</span> Right<a href="#409095" title="T" id="409097" class="delimiter">(</a>r<span class="delimiter">)</span> =&gt; <a href="#409098" title="(x: T)T">r</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
