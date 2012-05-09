@@ -1,8 +1,8 @@
 import java.io._
 import scala.xml._
 
-object GenerateIndeces extends Application {
-  val root = new File("maven")
+object GenerateIndeces extends App {
+  val root = new File("mvn")
   recurse(root)
 
   def recurse(file: File): Unit = {
@@ -29,7 +29,7 @@ object GenerateIndeces extends Application {
     </html>
   }
 
-  def path(dir: File): String = if (dir == root) "maven" else path(dir.getParentFile) + "/" + dir.getName
+  def path(dir: File): String = if (dir == root) "mvn" else path(dir.getParentFile) + "/" + dir.getName
 
   def rootLink(dir: File): String = {
     if (dir == root) ".." else rootLink(dir.getParentFile) + "/.."
@@ -43,3 +43,4 @@ object GenerateIndeces extends Application {
   }
 }
 
+GenerateIndeces main Array()
