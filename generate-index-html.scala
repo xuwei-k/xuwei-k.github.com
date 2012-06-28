@@ -1,31 +1,30 @@
-import scala.io.Source
-import scala.util.parsing.json.JSON.parseFull
+#!/usr/bin/env scalas
+!#
 
-def getJson[T](url:String):T = {
-  val str  = Source.fromURL(url,"UTF-8").mkString  
-  parseFull(str).get.asInstanceOf[T]
-}
+/***
+scalaVersion := "2.9.2"
 
-def getRepositories(user:String):List[String] = {
-  type JsonType = Map[String,List[Map[String,String]]]
-  val json = getJson[JsonType]("https://github.com/api/v2/json/repos/show/" + user)  
-  json("repositories").map{_.apply("url").replace("https://github.com/" + user + "/","")}
-}
+resolvers += "xuwei-k" at "http://xuwei-k.github.com/mvn"
 
-def hasGithubPage(user:String,repository:String):Boolean = {
-  val json = getJson[Map[String,Map[String,String]]]("https://github.com/api/v2/json/repos/show/"+user+"/"+repository+"/branches") 
-  json("branches").contains("gh-pages")
-}
+libraryDependencies ++= Seq(
+  "com.github.xuwei-k" %% "ghscala" % "0.1"
+)
+*/
+
+import com.github.xuwei_k.ghscala.GhScala
+
+val client = new GhScala(false)
 
 def githubPageList(user:String) = {
-  getRepositories(user).filter{ r => hasGithubPage(user,r) }
-}
-
-def html(user:String) = {
-  <ul>{
-    githubPageList(user).map{ r =>
-      <li><a href={ r }>{r}</a></li>
+  client.repos(user).map{ repo =>
+    repo -> client.refs(user,repo.name)
+  }.filter{ case (repo,refs) =>
+    refs.exists{ ref =>
+      ref.isBranch && (ref.name == "gh-pages")
     }
-  }</ul>
+  }
 }
 
+githubPageList("xuwei-k").map{case (repo,_) =>
+  repo.name
+}.foreach(println)
