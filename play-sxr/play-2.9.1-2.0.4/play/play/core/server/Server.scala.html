@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>play/play/core/server/Server.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="keyword">package</span> play.core.server
+
+<span class="keyword">import</span> play.api._
+<span class="keyword">import</span> play.core._
+<span class="keyword">import</span> play.api.mvc._
+<span class="keyword">import</span> play.api.libs.iteratee._
+<span class="keyword">import</span> play.api.libs.iteratee._
+<span class="keyword">import</span> play.api.libs.iteratee.<a href="../../api/libs/iteratee/Iteratee.scala.html#14415" title="object play.api.libs.iteratee.Input">Input</a>._
+<span class="keyword">import</span> play.api.libs.concurrent._
+
+<span class="keyword">import</span> akka.actor._
+<span class="keyword">import</span> akka.actor.<span title="object akka.actor.Actor">Actor</span>._
+<span class="keyword">import</span> akka.routing._
+<span class="keyword">import</span> akka.config._
+<span class="keyword">import</span> akka.pattern.<span title="object akka.pattern.Patterns">Patterns</span>.ask
+<span class="keyword">import</span> akka.util.duration._
+<span class="keyword">import</span> akka.util.Timeout
+
+<span class="keyword">trait</span> <a title="trait WebSocketable extends java.lang.Object" id="20293">WebSocketable</a> <span title="java.lang.Object" class="delimiter">{</span>
+  <span class="keyword">def</span> <a title="(header: String)String" id="326817">getHeader</a><span class="delimiter">(</span><a title="String" id="326820">header</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="326818">check</a>: <span title="Boolean">Boolean</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * provides generic server behaviour for Play applications
+ */</span>
+<span class="keyword">trait</span> <a title="trait Server extends java.lang.Object with ScalaObject" id="20338">Server</a> <span title="ScalaObject" class="delimiter">{</span>
+
+  <span class="comment">// First delete the default log file for a fresh start</span>
+  <span class="keyword">try</span> <span class="delimiter">{</span>
+    scalax.file.<span title="(jfile: java.io.File)scalax.file.defaultfs.DefaultPath">Path</span><a title="scalax.file.defaultfs.DefaultPath" id="327257" class="delimiter">(</a><span title="(x$1: java.io.File, x$2: java.lang.String)java.io.File" class="keyword">new</span> java.io.<span title="java.io.File">File</span><span class="delimiter">(</span><a href="#79721" title="=&gt; play.core.ApplicationProvider">applicationProvider</a>.<a href="../system/ApplicationProvider.scala.html#81261" title="=&gt; java.io.File">path</a>, <span title="java.lang.String(&quot;logs/application.log&quot;)" class="string">&quot;logs/application.log&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="#327257" title="Boolean" id="327258">delete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> <span title="Unit">_</span> =&gt;
+  <span class="delimiter">}</span>
+
+  <span class="comment">// Configure the logger for the first time</span>
+  <a href="../../api/Logger.scala.html#10653" title="object play.api.Logger">Logger</a>.<a href="../../api/Logger.scala.html#82411" title="Map[String,ch.qos.logback.classic.Level]" id="327291">configure</a><span class="delimiter">(</span>
+    <span title="(elems: (java.lang.String, java.lang.String)*)scala.collection.immutable.Map[java.lang.String,java.lang.String]">Map</span><a title="scala.collection.immutable.Map[java.lang.String,java.lang.String]" id="327289" class="delimiter">(</a><span title="(x: java.lang.String)ArrowAssoc[java.lang.String]" class="string">&quot;application.home&quot;</span> <span title="(y: java.lang.String)(java.lang.String, java.lang.String)">-&gt;</span> <a href="#79721" title="=&gt; play.core.ApplicationProvider">applicationProvider</a>.<a href="../system/ApplicationProvider.scala.html#81261" title="=&gt; java.io.File">path</a>.<span title="()java.lang.String">getAbsolutePath</span><span class="delimiter">)</span>,
+    mode = <a href="#79713" title="play.api.Mode.Mode" id="327290">mode</a><span class="delimiter">)</span>
+
+  <span class="comment">// Start the main Invoker</span>
+  <span class="keyword">val</span> <a title="play.core.Invoker" id="79709">invoker</a> = <a href="../system/Invoker.scala.html#79774" title="(applicationProvider: play.core.ApplicationProvider)play.core.Invoker">Invoker</a><span class="delimiter">(</span><a href="#79721" title="=&gt; play.core.ApplicationProvider">applicationProvider</a><span class="delimiter">)</span>
+
+  <span class="comment">// store the invoker in a global variable</span>
+  <a href="../system/Invoker.scala.html#17864" title="object play.core.Invoker">Invoker</a>.<a href="../system/Invoker.scala.html#79775" title="(invoker: play.core.Invoker)Unit">init</a><span class="delimiter">(</span><a href="#79709" title="=&gt; play.core.Invoker">invoker</a><span class="delimiter">)</span>
+
+  <span class="keyword">val</span> <a title="akka.util.FiniteDuration" id="79711">bodyParserTimeout</a> = <span class="delimiter">{</span>
+    <a href="../../api/Configuration.scala.html#68357" title="(underlying: com.typesafe.config.Config)play.api.Configuration">Configuration</a><span class="delimiter">(</span><a href="../system/Invoker.scala.html#17864" title="object play.core.Invoker">Invoker</a>.<a href="../system/Invoker.scala.html#79777" title="=&gt; akka.actor.ActorSystem">system</a>.<span title="=&gt; akka.actor.ActorSystem.Settings">settings</span>.<span title="=&gt; com.typesafe.config.Config">config</span><span class="delimiter">)</span>.<a href="../../api/Configuration.scala.html#68341" title="(path: String)Option[Long]">getMilliseconds</a><span class="delimiter">(</span><span title="java.lang.String(&quot;akka.actor.retrieveBodyParserTimeout&quot;)" class="string">&quot;akka.actor.retrieveBodyParserTimeout&quot;</span><span class="delimiter">)</span>.<span title="(f: Long =&gt; akka.util.FiniteDuration)Option[akka.util.FiniteDuration]">map</span><span class="delimiter">(</span><a href="#326828" title="implicit akka.util.duration.package.longToDurationLong : (n: Long)akka.util.DurationLong">_</a> <span title="=&gt; akka.util.FiniteDuration">milliseconds</span><span class="delimiter">)</span>.<span title="(default: =&gt; akka.util.FiniteDuration)akka.util.FiniteDuration">getOrElse</span><span class="delimiter">(</span><span title="implicit akka.util.duration.package.intToDurationInt : (n: Int)akka.util.DurationInt" class="int">1</span> <span title="=&gt; akka.util.FiniteDuration">second</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; play.api.Mode.Mode" id="79713">mode</a>: Mode.<span title="play.api.Mode.Mode">Mode</span>
+
+  <span class="keyword">def</span> <a title="(request: play.api.mvc.RequestHeader)Either[play.api.mvc.Result,(play.api.mvc.Handler, play.api.Application)]" id="79714">getHandlerFor</a><span class="delimiter">(</span><a title="play.api.mvc.RequestHeader" id="327294">request</a>: <a href="../../api/mvc/Http.scala.html#16454" title="play.api.mvc.RequestHeader">RequestHeader</a><span class="delimiter">)</span>: <span title="Either[play.api.mvc.Result,(play.api.mvc.Handler, play.api.Application)]">Either</span><span class="delimiter">[</span>Result, <span class="delimiter">(</span>Handler, Application<span class="delimiter">)</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+
+    <span class="keyword">import</span> scala.util.control.Exception
+
+    <span class="keyword">def</span> <a title="=&gt; Either[Throwable,(play.api.mvc.Handler, play.api.Application)]" id="327297">sendHandler</a>: <span title="Either[Throwable,(play.api.mvc.Handler, play.api.Application)]">Either</span><span class="delimiter">[</span>Throwable, <span class="delimiter">(</span>Handler, Application<span class="delimiter">)</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <span class="keyword">try</span> <span class="delimiter">{</span>
+        <a href="#79721" title="=&gt; play.core.ApplicationProvider">applicationProvider</a>.<a href="../system/ApplicationProvider.scala.html#81262" title="=&gt; Either[Throwable,play.api.Application]">get</a>.<span title="=&gt; Either.RightProjection[Throwable,play.api.Application]">right</span>.<span title="(f: play.api.Application =&gt; (play.api.mvc.Handler, play.api.Application))Product with Either[Throwable,(play.api.mvc.Handler, play.api.Application)] with Serializable">map</span> <span class="delimiter">{</span> <a title="play.api.Application" id="327308">application</a> =&gt;
+          <span class="keyword">val</span> <a title="Option[play.api.mvc.Handler]" id="327309">maybeAction</a> = <a href="#327308" title="play.api.Application">application</a>.<a href="../../api/Application.scala.html#68056" title="=&gt; play.api.GlobalSettings">global</a>.<a href="../../api/Global.scala.html#82024" title="(request: play.api.mvc.RequestHeader)Option[play.api.mvc.Handler]">onRouteRequest</a><span class="delimiter">(</span><a href="#327294" title="play.api.mvc.RequestHeader">request</a><span class="delimiter">)</span>
+          <span title="(_1: play.api.mvc.Handler, _2: play.api.Application)(play.api.mvc.Handler, play.api.Application)" class="delimiter">(</span><a href="#327309" title="Option[play.api.mvc.Handler]">maybeAction</a>.<span title="(default: =&gt; play.api.mvc.Handler)play.api.mvc.Handler">getOrElse</span><span class="delimiter">(</span><a href="../../api/mvc/Action.scala.html#101781" title="(bodyParser: play.api.mvc.BodyParser[Option[Any]])(block: play.api.mvc.Request[Option[Any]] =&gt; play.api.mvc.Result)play.api.mvc.Action[Option[Any]]">Action</a><span class="delimiter">(</span><a href="../../api/mvc/ContentTypes.scala.html#15912" title="object play.api.mvc.BodyParsers">BodyParsers</a>.<a href="../../api/mvc/ContentTypes.scala.html#100895" title="object play.api.mvc.BodyParsers.parse">parse</a>.<a href="../../api/mvc/ContentTypes.scala.html#217755" title="=&gt; play.api.mvc.BodyParser[Option[Any]]">empty</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="play.api.mvc.Request[Option[Any]]" id="327344">_</a> =&gt; <a href="#327308" title="play.api.Application">application</a>.<a href="../../api/Application.scala.html#68056" title="=&gt; play.api.GlobalSettings">global</a>.<a href="../../api/Global.scala.html#82026" title="(request: play.api.mvc.RequestHeader)play.api.mvc.Result">onHandlerNotFound</a><span class="delimiter">(</span><a href="#327294" title="play.api.mvc.RequestHeader">request</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>, <a href="#327308" title="play.api.Application">application</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a title="Left[java.lang.Throwable,Nothing]" id="327351">e</a> =&gt; <span title="(a: java.lang.Throwable)Left[java.lang.Throwable,Nothing]">Left</span><span class="delimiter">(</span><a href="#327351" title="java.lang.Throwable">e</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(e: Throwable)play.api.mvc.Result" id="327298">logExceptionAndGetResult</a><span class="delimiter">(</span><a title="Throwable" id="327356">e</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+
+      <a href="../../api/Logger.scala.html#10653" title="object play.api.Logger">Logger</a>.<a href="../../api/Logger.scala.html#82391" title="(message: =&gt; String, error: =&gt; Throwable)Unit">error</a><span class="delimiter">(</span>
+        <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;&quot;&quot;
+        |
+        |! %sInternal server error, for request [%s] -&gt;
+        |&quot;&quot;&quot;</span>.<span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">stripMargin</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#327356" title="Throwable">e</a> <span title="Any" class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a title="java.lang.String" id="327372">p</a>: <a href="../../api/Exceptions.scala.html#10664" title="play.api.PlayException">PlayException</a> =&gt; <span title="java.lang.String(&quot;@&quot;)" class="string">&quot;@&quot;</span> <span title="(x$1: Any)java.lang.String">+</span> <a href="#327372" title="play.api.PlayException">p</a>.<a href="../../api/Exceptions.scala.html#81999" title="=&gt; java.lang.String">id</a> <span title="(x$1: Any)java.lang.String">+</span> <span title="java.lang.String(&quot; - &quot;)" class="string">&quot; - &quot;</span>
+          <span class="keyword">case</span> <span title="java.lang.String(&quot;&quot;)">_</span> =&gt; <span title="java.lang.String(&quot;&quot;)" class="string">&quot;&quot;</span>
+        <span class="delimiter">}</span>, <a href="#327294" title="play.api.mvc.RequestHeader">request</a><span class="delimiter">)</span>,
+        <a href="#327356" title="Throwable">e</a><span class="delimiter">)</span>
+
+      <a href="../../api/Global.scala.html#10416" title="object play.api.DefaultGlobal">DefaultGlobal</a>.<a href="../../api/Global.scala.html#82025" title="(request: play.api.mvc.RequestHeader, ex: Throwable)play.api.mvc.Result">onError</a><span class="delimiter">(</span><a href="#327294" title="play.api.mvc.RequestHeader">request</a>, <a href="#327356" title="Throwable">e</a><span class="delimiter">)</span>
+
+    <span class="delimiter">}</span>
+
+    <span title="object scala.util.control.Exception">Exception</span>
+      .<span title="[T]=&gt; scala.util.control.Exception.Catch[T]">allCatch</span><span title="scala.util.control.Exception.Catch[Option[play.api.mvc.Result]]" class="delimiter">[</span><span title="Option[play.api.mvc.Result]">Option</span><span class="delimiter">[</span>Result<span class="delimiter">]</span><span class="delimiter">]</span>
+      .<span title="(body: =&gt; Option[play.api.mvc.Result])Either[Throwable,Option[play.api.mvc.Result]]">either</span><span class="delimiter">(</span><a href="#79721" title="=&gt; play.core.ApplicationProvider">applicationProvider</a>.<a href="../system/ApplicationProvider.scala.html#81263" title="(requestHeader: play.api.mvc.RequestHeader)Option[play.api.mvc.Result]">handleWebCommand</a><span class="delimiter">(</span><a href="#327294" title="play.api.mvc.RequestHeader">request</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      .<span title="=&gt; Either.LeftProjection[Throwable,Option[play.api.mvc.Result]]">left</span>.<span title="(f: Throwable =&gt; play.api.mvc.Result)Product with Either[play.api.mvc.Result,Option[play.api.mvc.Result]] with Serializable">map</span><span class="delimiter">(</span><a href="#327298" title="(e: Throwable)play.api.mvc.Result">logExceptionAndGetResult</a><span class="delimiter">)</span>
+      .<span title="=&gt; Either.RightProjection[play.api.mvc.Result,Option[play.api.mvc.Result]]">right</span>.<span title="(f: Option[play.api.mvc.Result] =&gt; Either[play.api.mvc.Result,Unit])Either[play.api.mvc.Result,Unit]">flatMap</span><span class="delimiter">(</span><a title="Option[play.api.mvc.Result]" id="327399">maybeResult</a> =&gt; <a href="#327399" title="Option[play.api.mvc.Result]">maybeResult</a>.<span title="(right: =&gt; Unit)Product with Either[play.api.mvc.Result,Unit] with Serializable">toLeft</span><span class="delimiter">(</span><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>.<span title="=&gt; Either.RightProjection[play.api.mvc.Result,Unit]">right</span>.<span title="(f: Unit =&gt; Either[play.api.mvc.Result,(play.api.mvc.Handler, play.api.Application)])Either[play.api.mvc.Result,(play.api.mvc.Handler, play.api.Application)]">flatMap</span> <span class="delimiter">{</span> <a title="Unit" id="327417">_</a> =&gt;
+        <a href="#327297" title="=&gt; Either[Throwable,(play.api.mvc.Handler, play.api.Application)]">sendHandler</a>.<span title="=&gt; Either.LeftProjection[Throwable,(play.api.mvc.Handler, play.api.Application)]">left</span>.<span title="(f: Throwable =&gt; play.api.mvc.Result)Product with Either[play.api.mvc.Result,(play.api.mvc.Handler, play.api.Application)] with Serializable">map</span><span class="delimiter">(</span><a href="#327298" title="(e: Throwable)play.api.mvc.Result">logExceptionAndGetResult</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[A](request: play.api.mvc.Request[A], response: play.api.mvc.Response, action: play.api.mvc.Action[A], app: play.api.Application)Unit" id="79715">invoke</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="79717">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="play.api.mvc.Request[A]" id="327430">request</a>: <a href="../../api/mvc/Http.scala.html#16352" title="play.api.mvc.Request[A]">Request</a><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="play.api.mvc.Response" id="327431">response</a>: <a href="../../api/mvc/Http.scala.html#16676" title="play.api.mvc.Response">Response</a>, <a title="play.api.mvc.Action[A]" id="327432">action</a>: <a href="../../api/mvc/Action.scala.html#16109" title="play.api.mvc.Action[A]">Action</a><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="play.api.Application" id="327433">app</a>: <a href="../../api/Application.scala.html#10388" title="play.api.Application">Application</a><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#79709" title="=&gt; play.core.Invoker">invoker</a>.<a href="../system/Invoker.scala.html#176169" title="akka.actor.ScalaActorRef" id="327694">actionInvoker</a> <a href="#327694" title="akka.actor.ActorRef" id="327696">!</a> <a href="../system/Invoker.scala.html#17864" title="object play.core.Invoker">Invoker</a>.<a href="../system/Invoker.scala.html#327654" title="(request: play.api.mvc.Request[A], response: play.api.mvc.Response, action: play.api.mvc.Action[A], app: play.api.Application)play.core.Invoker.HandleAction[A]">HandleAction</a><a title="play.core.Invoker.HandleAction[A]" id="327695" class="delimiter">(</a><a href="#327430" title="play.api.mvc.Request[A]">request</a>, <a href="#327431" title="play.api.mvc.Response">response</a>, <a href="#327432" title="play.api.mvc.Action[A]">action</a>, <a href="#327433" title="play.api.Application">app</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[A](requestHeaders: play.api.mvc.RequestHeader, bodyFunction: play.api.mvc.BodyParser[A])play.api.libs.concurrent.Promise[play.api.libs.iteratee.Iteratee[Array[Byte],Either[play.api.mvc.Result,A]]]" id="79718">getBodyParser</a><span class="delimiter">[</span><a title="&gt;: Nothing &lt;: Any" id="79720">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="play.api.mvc.RequestHeader" id="327701">requestHeaders</a>: <a href="../../api/mvc/Http.scala.html#16454" title="play.api.mvc.RequestHeader">RequestHeader</a>, <a title="play.api.mvc.BodyParser[A]" id="327702">bodyFunction</a>: <a href="../../api/mvc/Action.scala.html#15923" title="play.api.mvc.BodyParser[A]">BodyParser</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../../api/libs/concurrent/Promise.scala.html#13304" title="play.api.libs.concurrent.Promise[play.api.libs.iteratee.Iteratee[Array[Byte],Either[play.api.mvc.Result,A]]]">Promise</a><span class="delimiter">[</span>Iteratee<span class="delimiter">[</span>Array<span class="delimiter">[</span>Byte<span class="delimiter">]</span>, Either<span class="delimiter">[</span>Result, A<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="akka.dispatch.Future[AnyRef]" id="327706">future</a> = <span title="(actor: akka.actor.ActorRef, message: Any, timeout: akka.util.Timeout)akka.dispatch.Future[AnyRef]">ask</span><span class="delimiter">(</span><a href="#79709" title="=&gt; play.core.Invoker">invoker</a>.<a href="../system/Invoker.scala.html#176169" title="=&gt; akka.actor.ActorRef">actionInvoker</a>, <a href="../system/Invoker.scala.html#17864" title="object play.core.Invoker">Invoker</a>.<a href="../system/Invoker.scala.html#327758" title="(request: play.api.mvc.RequestHeader, bodyParser: play.api.mvc.BodyParser[_])play.core.Invoker.GetBodyParser">GetBodyParser</a><span class="delimiter">(</span><a href="#327701" title="play.api.mvc.RequestHeader">requestHeaders</a>, <a href="#327702" title="play.api.mvc.BodyParser[A]">bodyFunction</a><span class="delimiter">)</span>, <a href="#79711" title="implicit akka.util.Timeout.durationToTimeout : (duration: akka.util.Duration)akka.util.Timeout">bodyParserTimeout</a><span class="delimiter">)</span>
+    <a href="../../api/libs/concurrent/package.scala.html#23373" title="(future: akka.dispatch.Future[AnyRef])play.api.libs.concurrent.AkkaFuture[AnyRef]">future</a>.<a href="../../api/libs/concurrent/Akka.scala.html#75713" title="=&gt; play.api.libs.concurrent.Promise[AnyRef]">asPromise</a>.<a href="../../api/libs/concurrent/Promise.scala.html#77017" title="(f: AnyRef =&gt; play.api.libs.iteratee.Iteratee[Array[Byte],Either[play.api.mvc.Result,A]])play.api.libs.concurrent.Promise[play.api.libs.iteratee.Iteratee[Array[Byte],Either[play.api.mvc.Result,A]]]">map</a><span class="delimiter">(</span><a href="#327796" title="AnyRef">_</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="play.api.libs.iteratee.Iteratee[Array[Byte],Either[play.api.mvc.Result,A]]" class="delimiter">[</span><a href="../../api/libs/iteratee/Iteratee.scala.html#14381" title="play.api.libs.iteratee.Iteratee[Array[Byte],Either[play.api.mvc.Result,A]]">Iteratee</a><span class="delimiter">[</span>Array<span class="delimiter">[</span>Byte<span class="delimiter">]</span>, Either<span class="delimiter">[</span>Result, A<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="=&gt; play.core.ApplicationProvider" id="79721">applicationProvider</a>: <a href="../system/ApplicationProvider.scala.html#18682" title="play.core.ApplicationProvider">ApplicationProvider</a>
+
+  <span class="keyword">def</span> <a title="()Unit" id="79722">stop</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../system/Invoker.scala.html#17864" title="object play.core.Invoker">Invoker</a>.<a href="../system/Invoker.scala.html#79776" title="()Unit">uninit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#79709" title="=&gt; play.core.Invoker">invoker</a>.<a href="../system/Invoker.scala.html#176171" title="()Unit">stop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="../../api/Logger.scala.html#10653" title="object play.api.Logger">Logger</a>.<a href="../../api/Logger.scala.html#82401" title="()Unit">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
