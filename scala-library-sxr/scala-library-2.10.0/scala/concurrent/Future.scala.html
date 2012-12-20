@@ -1,0 +1,711 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/concurrent/Future.scala</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.concurrent
+
+<span class="keyword">import</span> scala.<a href="../language.scala.html#1423" title="language.type">language</a>.higherKinds
+
+<span class="keyword">import</span> java.util.concurrent.<span class="delimiter">{</span> ConcurrentLinkedQueue, TimeUnit, Callable <span class="delimiter">}</span>
+<span class="keyword">import</span> java.util.concurrent.<span title="java.util.concurrent.TimeUnit.type">TimeUnit</span>.<span class="delimiter">{</span> NANOSECONDS =&gt; NANOS, MILLISECONDS ⇒ MILLIS <span class="delimiter">}</span>
+<span class="keyword">import</span> java.lang.<span class="delimiter">{</span> Iterable =&gt; JIterable <span class="delimiter">}</span>
+<span class="keyword">import</span> java.util.<span class="delimiter">{</span> LinkedList =&gt; JLinkedList <span class="delimiter">}</span>
+<span class="keyword">import</span> java.util.concurrent.atomic.<span class="delimiter">{</span> AtomicReferenceFieldUpdater, AtomicInteger, AtomicBoolean <span class="delimiter">}</span>
+
+<span class="keyword">import</span> scala.util.control.NonFatal
+<span class="keyword">import</span> scala.Option
+<span class="keyword">import</span> scala.util.<span class="delimiter">{</span>Try, Success, Failure<span class="delimiter">}</span>
+
+<span class="keyword">import</span> scala.annotation.tailrec
+<span class="keyword">import</span> scala.collection.mutable.Builder
+<span class="keyword">import</span> scala.collection.generic.CanBuildFrom
+<span class="keyword">import</span> scala.reflect.ClassTag
+
+
+
+/** The trait that represents futures.
+ *
+ *  Asynchronous computations that yield futures are created with the `future` call:
+ *
+ *  {{{
+ *  val s = &quot;Hello&quot;
+ *  val f: Future[String] = future {
+ *    s + &quot; future!&quot;
+ *  }
+ *  f onSuccess {
+ *    case msg =&gt; println(msg)
+ *  }
+ *  }}}
+ *
+ *  @author  Philipp Haller, Heather Miller, Aleksandar Prokopec, Viktor Klang
+ *
+ *  @define multipleCallbacks
+ *  Multiple callbacks may be registered; there is no guarantee that they will be
+ *  executed in a particular order.
+ *
+ *  @define caughtThrowables
+ *  The future may contain a throwable object and this means that the future failed.
+ *  Futures obtained through combinators have the same exception as the future they were obtained from.
+ *  The following throwable objects are not contained in the future:
+ *  - `Error` - errors are not contained within futures
+ *  - `InterruptedException` - not contained within futures
+ *  - all `scala.util.control.ControlThrowable` except `NonLocalReturnControl` - not contained within futures
+ *
+ *  Instead, the future is completed with a ExecutionException with one of the exceptions above
+ *  as the cause.
+ *  If a future is failed with a `scala.runtime.NonLocalReturnControl`,
+ *  it is completed with a value from that throwable instead.
+ *
+ *  @define nonDeterministic
+ *  Note: using this method yields nondeterministic dataflow programs.
+ *
+ *  @define forComprehensionExamples
+ *  Example:
+ *
+ *  {{{
+ *  val f = future { 5 }
+ *  val g = future { 3 }
+ *  val h = for {
+ *    x: Int &lt;- f // returns Future(5)
+ *    y: Int &lt;- g // returns Future(5)
+ *  } yield x + y
+ *  }}}
+ *
+ *  is translated to:
+ *
+ *  {{{
+ *  f flatMap { (x: Int) =&gt; g map { (y: Int) =&gt; x + y } }
+ *  }}}
+ *
+ * @define callbackInContext
+ * The provided callback always runs in the provided implicit
+ *`ExecutionContext`, though there is no guarantee that the
+ * `execute()` method on the `ExecutionContext` will be called once
+ * per callback or that `execute()` will be called in the current
+ * thread. That is, the implementation may run multiple callbacks
+ * in a batch within a single `execute()` and it may run
+ * `execute()` either immediately or asynchronously.
+ */
+<span class="keyword">trait</span> <a title="trait Future[+T] extends Object with scala.concurrent.Awaitable[T]" id="15442">Future</a><span class="delimiter">[</span>+<a title="" id="15577">T</a><span class="delimiter">]</span> <a href="../Unit.scala.html#1515" title="Unit" class="keyword">extends</a> <a href="Awaitable.scala.html#15253" title="scala.concurrent.Awaitable[T]">Awaitable</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+  // The executor within the lexical scope
+  // of the Future trait. Note that this will
+  // (modulo bugs) _never_ execute a callback
+  // other than those below in this same file.
+  // As a nice side benefit, having this implicit
+  // here forces an ambiguity in those methods
+  // that also have an executor parameter, which
+  // keeps us from accidentally forgetting to use
+  // the executor parameter.
+  <span class="keyword">private</span> <span class="keyword">implicit</span> <span class="keyword">def</span> <a title="=&gt; scala.concurrent.ExecutionContext" id="344034">internalExecutor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a> = <a href="#15443" title="scala.concurrent.Future.type">Future</a>.<a href="#344126" title="scala.concurrent.Future.InternalCallbackExecutor.type">InternalCallbackExecutor</a>
+
+  /* Callbacks */
+
+  /** When this future is completed successfully (i.e. with a value),
+   *  apply the provided partial function to the value if the partial function
+   *  is defined at that value.
+   *
+   *  If the future has already been completed with a value,
+   *  this will either be applied immediately or be scheduled asynchronously.
+   *
+   *  $multipleCallbacks
+   *  $callbackInContext
+   */
+  <span class="keyword">def</span> <a title="[U](pf: PartialFunction[T,U])(implicit executor: scala.concurrent.ExecutionContext)Unit" id="344035">onSuccess</a><span class="delimiter">[</span><a title="" id="344037">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[T,U]" id="344131">pf</a>: <a href="../PartialFunction.scala.html#129" title="PartialFunction[T,U]">PartialFunction</a><span class="delimiter">[</span>T, U<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344132">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="../Unit.scala.html#1515" title="Unit">Unit</a> = <a href="#344041" title="(func: scala.util.Try[T] =&gt; Any)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344142" title="scala.util.Try[T]" class="delimiter">{</a>
+    <span class="keyword">case</span> Success<a href="#1444869" title="Any" id="1444870" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344232">v</a><span class="delimiter">)</span> <span class="keyword">if</span> <a href="#344131" title="PartialFunction[T,U]">pf</a> <a href="../PartialFunction.scala.html#27974" title="(x: T)Boolean">isDefinedAt</a> <a href="#344232" title="T">v</a> =&gt; <a href="../Function1.scala.html#27963" title="(v1: T)U">pf</a><a href="#1444872" title="(x: Any)Any" class="delimiter">(</a><a href="#344232" title="T">v</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> _ =&gt;
+  <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344132" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+  /** When this future is completed with a failure (i.e. with a throwable),
+   *  apply the provided callback to the throwable.
+   *
+   *  $caughtThrowables
+   *
+   *  If the future has already been completed with a failure,
+   *  this will either be applied immediately or be scheduled asynchronously.
+   *
+   *  Will not be called in case that the future is completed with a value.
+   *
+   *  $multipleCallbacks
+   *  $callbackInContext
+   */
+  <span class="keyword">def</span> <a title="[U](callback: PartialFunction[Throwable,U])(implicit executor: scala.concurrent.ExecutionContext)Unit" id="344038">onFailure</a><span class="delimiter">[</span><a title="" id="344040">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[Throwable,U]" id="344239">callback</a>: <a href="../PartialFunction.scala.html#129" title="PartialFunction[Throwable,U]">PartialFunction</a><span class="delimiter">[</span>Throwable, U<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344240">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="../Unit.scala.html#1515" title="Unit">Unit</a> = <a href="#344041" title="(func: scala.util.Try[T] =&gt; Any)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344246" title="scala.util.Try[T]" class="delimiter">{</a>
+    <span class="keyword">case</span> Failure<a href="#1444877" title="Any" id="1444878" class="delimiter">(</a><a href="../util/Try.scala.html#344253" title="Throwable" id="344301">t</a><span class="delimiter">)</span> <span class="keyword">if</span> <a href="../util/control/NonFatal.scala.html#344303" title="(t: Throwable)Boolean">NonFatal</a><span class="delimiter">(</span><a href="#344301" title="Throwable">t</a><span class="delimiter">)</span> <a href="../Boolean.scala.html#27150" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#344239" title="PartialFunction[Throwable,U]">callback</a>.<a href="../PartialFunction.scala.html#27974" title="(x: Throwable)Boolean">isDefinedAt</a><span class="delimiter">(</span><a href="#344301" title="Throwable">t</a><span class="delimiter">)</span> =&gt; <a href="../Function1.scala.html#27963" title="(v1: Throwable)U">callback</a><a href="#1444880" title="(x: Any)Any" class="delimiter">(</a><a href="#344301" title="Throwable">t</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> _ =&gt;
+  <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344240" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+  /** When this future is completed, either through an exception, or a value,
+   *  apply the provided function.
+   *
+   *  If the future has already been completed,
+   *  this will either be applied immediately or be scheduled asynchronously.
+   *
+   *  $multipleCallbacks
+   *  $callbackInContext
+   */
+  <span class="keyword">def</span> <a title="[U](func: scala.util.Try[T] =&gt; U)(implicit executor: scala.concurrent.ExecutionContext)Unit" id="344041">onComplete</a><span class="delimiter">[</span><a title="" id="344043">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.util.Try[T] =&gt; U" id="344135">func</a>: Try<span class="delimiter">[</span>T<span class="delimiter">]</span> =&gt; U<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344136">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="../Unit.scala.html#1515" title="Unit">Unit</a>
+
+
+  /* Miscellaneous */
+
+  /** Returns whether the future has already been completed with
+   *  a value or an exception.
+   *
+   *  $nonDeterministic
+   *
+   *  @return    `true` if the future is already completed, `false` otherwise
+   */
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="344044">isCompleted</a>: <a href="../Boolean.scala.html#1425" title="Boolean">Boolean</a>
+
+  /** The value of this `Future`.
+   *
+   *  If the future is not completed the returned value will be `None`.
+   *  If the future is completed the value will be `Some(Success(t))`
+   *  if it contains a valid result, or `Some(Failure(error))` if it contains
+   *  an exception.
+   */
+  <span class="keyword">def</span> <a title="=&gt; Option[scala.util.Try[T]]" id="344045">value</a>: <a href="../Option.scala.html#978" title="Option[scala.util.Try[T]]">Option</a><span class="delimiter">[</span>Try<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span>
+
+
+  /* Projections */
+
+  /** Returns a failed projection of this future.
+   *
+   *  The failed projection is a future holding a value of type `Throwable`.
+   *
+   *  It is completed with a value which is the throwable of the original future
+   *  in case the original future is failed.
+   *
+   *  It is failed with a `NoSuchElementException` if the original future is completed successfully.
+   *
+   *  Blocking on this future returns a value if the original future is completed with an exception
+   *  and throws a corresponding exception if the original future fails.
+   */
+  <span class="keyword">def</span> <a title="=&gt; scala.concurrent.Future[Throwable]" id="344046">failed</a>: <a href="#15442" title="scala.concurrent.Future[Throwable]">Future</a><span class="delimiter">[</span>Throwable<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[Throwable]" id="344318">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[Throwable]" class="delimiter">[</span><span title="Throwable">Throwable</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[Throwable])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344344" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> Failure<a href="#1444885" title="p.type" id="1444886" class="delimiter">(</a><a href="../util/Try.scala.html#344253" title="Throwable" id="344345">t</a><span class="delimiter">)</span> =&gt; <a href="#344318" title="scala.concurrent.Promise[Throwable]">p</a> <a href="#1444889" title="(x: p.type)p.type">success</a> <a href="#344345" title="Throwable">t</a>
+      <span class="keyword">case</span> Success<a href="#1444885" title="p.type" id="1444887" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344349">v</a><span class="delimiter">)</span> =&gt; <a href="#344318" title="scala.concurrent.Promise[Throwable]">p</a> <a href="#1444889" title="(x: p.type)p.type">failure</a> <span class="delimiter">(</span><span title="(x$1: String)java.util.NoSuchElementException" class="keyword">new</span> <a href="../package.scala.html#22180" title="java.util.NoSuchElementException">NoSuchElementException</a><span class="delimiter">(</span><span title="String(&quot;Future.failed not completed with a throwable.&quot;)" class="string">&quot;Future.failed not completed with a throwable.&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="#344318" title="scala.concurrent.Promise[Throwable]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[Throwable]">future</a>
+  <span class="delimiter">}</span>
+
+
+  /* Monadic operations */
+
+  /** Asynchronously processes the value in the future once the value becomes available.
+   *
+   *  Will not be called if the future fails.
+   */
+  <span class="keyword">def</span> <a title="[U](f: T =&gt; U)(implicit executor: scala.concurrent.ExecutionContext)Unit" id="344047">foreach</a><span class="delimiter">[</span><a title="" id="344049">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; U" id="344354">f</a>: T =&gt; U<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344355">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="../Unit.scala.html#1515" title="Unit">Unit</a> = <a href="#344041" title="(func: scala.util.Try[T] =&gt; Any)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344361" title="scala.util.Try[T]" class="delimiter">{</a>
+    <span class="keyword">case</span> Success<a href="#1444894" title="Any" id="1444895" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344363">r</a><span class="delimiter">)</span> =&gt; <a href="../Function1.scala.html#27963" title="(v1: T)U">f</a><a href="#1444897" title="(x: Any)Any" class="delimiter">(</a><a href="#344363" title="T">r</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> _  =&gt; // do nothing
+  <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344355" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+  /** Creates a new future by applying the 's' function to the successful result of
+   *  this future, or the 'f' function to the failed result. If there is any non-fatal
+   *  exception thrown when 's' or 'f' is applied, that exception will be propagated
+   *  to the resulting future.
+   *
+   *  @param  s  function that transforms a successful result of the receiver into a
+   *             successful result of the returned future
+   *  @param  f  function that transforms a failure of the receiver into a failure of
+   *             the returned future
+   *  @return    a future that will be completed with the transformed value
+   */
+  <span class="keyword">def</span> <a title="[S](s: T =&gt; S, f: Throwable =&gt; Throwable)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[S]" id="344050">transform</a><span class="delimiter">[</span><a title="" id="344052">S</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; S" id="344369">s</a>: T =&gt; S, <a title="Throwable =&gt; Throwable" id="344370">f</a>: Throwable =&gt; Throwable<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344371">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[S]">Future</a><span class="delimiter">[</span>S<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[S]" id="344375">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[S]" class="delimiter">[</span><a href="#344052" title="S">S</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[S])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344379" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> result =&gt;
+        <a href="#1444925" title="(x: p.type)p.type" id="1444914" class="keyword">try</a> <span class="delimiter">{</span>
+          <a href="#1444906" title="(x: p.type)p.type">result</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+            <span class="keyword">case</span> Failure<a href="#1444902" title="p.type" id="1444903" class="delimiter">(</a><a href="../util/Try.scala.html#344253" title="Throwable" id="344381">t</a><span class="delimiter">)</span>  =&gt; <a href="#344375" title="scala.concurrent.Promise[S]">p</a> <a href="#1444906" title="(x: p.type)p.type">failure</a> <a href="../Function1.scala.html#27963" title="(v1: Throwable)Throwable">f</a><span class="delimiter">(</span><a href="#344381" title="Throwable">t</a><span class="delimiter">)</span>
+            <span class="keyword">case</span> Success<a href="#1444902" title="p.type" id="1444904" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344384">r</a><span class="delimiter">)</span> =&gt; <a href="#344375" title="scala.concurrent.Promise[S]">p</a> <a href="#1444906" title="(x: p.type)p.type">success</a> <a href="../Function1.scala.html#27963" title="(v1: T)S">s</a><span class="delimiter">(</span><a href="#344384" title="T">r</a><span class="delimiter">)</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="../util/control/NonFatal.scala.html#344304" title="Option[Throwable]" id="1444922">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="344389">t</a><span class="delimiter">)</span> =&gt; <a href="#344375" title="scala.concurrent.Promise[S]">p</a> <a href="#1444918" title="(x: p.type)p.type">failure</a> <a href="#344389" title="Throwable">t</a>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344371" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344375" title="scala.concurrent.Promise[S]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[S]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a new future by applying a function to the successful result of
+   *  this future. If this future is completed with an exception then the new
+   *  future will also contain this exception.
+   *
+   *  $forComprehensionExamples
+   */
+  <span class="keyword">def</span> <a title="[S](f: T =&gt; S)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[S]" id="344053">map</a><span class="delimiter">[</span><a title="" id="344055">S</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; S" id="344391">f</a>: T =&gt; S<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344392">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[S]">Future</a><span class="delimiter">[</span>S<span class="delimiter">]</span> = <span class="delimiter">{</span> // transform(f, identity)
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[S]" id="344395">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[S]" class="delimiter">[</span><a href="#344055" title="S">S</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[S])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344399" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> result =&gt;
+        <a href="#1444954" title="(x: p.type)p.type" id="1444943" class="keyword">try</a> <span class="delimiter">{</span>
+          <a href="#1444933" title="scala extends scala.util.Try[T] with scala.util.Failure[_]">result</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+            <span class="keyword">case</span> Success<a href="#1444929" title="p.type" id="1444930" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344402">r</a><span class="delimiter">)</span> =&gt; <a href="#344395" title="scala.concurrent.Promise[S]">p</a> <a href="#1444935" title="(x: p.type)p.type">success</a> <a href="../Function1.scala.html#27963" title="(v1: T)S">f</a><span class="delimiter">(</span><a href="#344402" title="T">r</a><span class="delimiter">)</span>
+            <span class="keyword">case</span> <a href="#1444929" title="p.type" id="1444933">f</a>: Failure<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#344395" title="scala.concurrent.Promise[S]">p</a> <a href="#1444935" title="(x: p.type)p.type">complete</a> f.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.util.Failure[S]" class="delimiter">[</span><a href="../util/Try.scala.html#18385" title="scala.util.Failure[S]">Failure</a><span class="delimiter">[</span>S<span class="delimiter">]</span><span class="delimiter">]</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="../util/control/NonFatal.scala.html#344304" title="Option[Throwable]" id="1444951">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="344410">t</a><span class="delimiter">)</span> =&gt; <a href="#344395" title="scala.concurrent.Promise[S]">p</a> <a href="#1444947" title="(x: p.type)p.type">failure</a> <a href="#344410" title="Throwable">t</a>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344392" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344395" title="scala.concurrent.Promise[S]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[S]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a new future by applying a function to the successful result of
+   *  this future, and returns the result of the function as the new future.
+   *  If this future is completed with an exception then the new future will
+   *  also contain this exception.
+   *
+   *  $forComprehensionExamples
+   */
+  <span class="keyword">def</span> <a title="[S](f: T =&gt; scala.concurrent.Future[S])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[S]" id="344056">flatMap</a><span class="delimiter">[</span><a title="" id="344058">S</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; scala.concurrent.Future[S]" id="344412">f</a>: T =&gt; Future<span class="delimiter">[</span>S<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344413">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[S]">Future</a><span class="delimiter">[</span>S<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[S]" id="344416">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[S]" class="delimiter">[</span><a href="#344058" title="S">S</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; Any)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344420" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> <a href="#1444981" title="Any" id="1444985">f</a>: Failure<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#344416" title="scala.concurrent.Promise[S]">p</a> <a href="#1444987" title="(x: Any)Any">complete</a> f.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.util.Failure[S]" class="delimiter">[</span><a href="../util/Try.scala.html#18385" title="scala.util.Failure[S]">Failure</a><span class="delimiter">[</span>S<span class="delimiter">]</span><span class="delimiter">]</span>
+      <span class="keyword">case</span> Success<a href="#1444981" title="Any" id="1444984" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344425">v</a><span class="delimiter">)</span> =&gt;
+        <a href="#1444987" title="(x: Any)Any" id="1444972" class="keyword">try</a> <span class="delimiter">{</span>
+          <a href="../Function1.scala.html#27963" title="(v1: T)scala.concurrent.Future[S]">f</a><span class="delimiter">(</span><a href="#344425" title="T">v</a><span class="delimiter">)</span>.<a href="#344041" title="(func: scala.util.Try[S] =&gt; scala.concurrent.Promise[S])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a><span class="delimiter">(</span><a href="#344431" title="scala.util.Try[S]" class="delimiter">{</a>
+            <span class="keyword">case</span> <a href="#1444958" title="p.type" id="1444962">f</a>: Failure<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#344416" title="scala.concurrent.Promise[S]">p</a> <a href="#1444964" title="(x: p.type)p.type">complete</a> f.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.util.Failure[S]" class="delimiter">[</span><a href="../util/Try.scala.html#18385" title="scala.util.Failure[S]">Failure</a><span class="delimiter">[</span>S<span class="delimiter">]</span><span class="delimiter">]</span>
+            <span class="keyword">case</span> Success<a href="#1444958" title="p.type" id="1444961" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="S" id="344436">v</a><span class="delimiter">)</span> =&gt; <a href="#344416" title="scala.concurrent.Promise[S]">p</a> <a href="#1444964" title="(x: p.type)p.type">success</a> <a href="#344436" title="S">v</a>
+          <span class="delimiter">}</span><span class="delimiter">)</span><span class="delimiter">(</span><a href="#344034" title="=&gt; scala.concurrent.ExecutionContext">internalExecutor</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="../util/control/NonFatal.scala.html#344304" title="Option[Throwable]" id="1444980">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="344440">t</a><span class="delimiter">)</span> =&gt; <a href="#344416" title="scala.concurrent.Promise[S]">p</a> <a href="#1444976" title="(x: Any)Any">failure</a> <a href="#344440" title="Throwable">t</a>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344413" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344416" title="scala.concurrent.Promise[S]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[S]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a new future by filtering the value of the current future with a predicate.
+   *
+   *  If the current future contains a value which satisfies the predicate, the new future will also hold that value.
+   *  Otherwise, the resulting future will fail with a `NoSuchElementException`.
+   *
+   *  If the current future fails, then the resulting future also fails.
+   *
+   *  Example:
+   *  {{{
+   *  val f = future { 5 }
+   *  val g = f filter { _ % 2 == 1 }
+   *  val h = f filter { _ % 2 == 0 }
+   *  await(g, 0) // evaluates to 5
+   *  await(h, 0) // throw a NoSuchElementException
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="(pred: T =&gt; Boolean)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[T]" id="344059">filter</a><span class="delimiter">(</span><a title="T =&gt; Boolean" id="344445">pred</a>: T =&gt; Boolean<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344446">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[T]" id="344448">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[T]" class="delimiter">[</span><a href="#15577" title="T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[T])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344452" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> <a href="#1445004" title="p.type" id="1445008">f</a>: Failure<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#344448" title="scala.concurrent.Promise[T]">p</a> <a href="#1445010" title="(x: p.type)p.type">complete</a> f.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.util.Failure[T]" class="delimiter">[</span><a href="../util/Try.scala.html#18385" title="scala.util.Failure[T]">Failure</a><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span>
+      <span class="keyword">case</span> Success<a href="#1445004" title="p.type" id="1445007" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344457">v</a><span class="delimiter">)</span> =&gt;
+        <a href="#1445010" title="(x: p.type)p.type" id="1444995" class="keyword">try</a> <span class="delimiter">{</span>
+          <span title="p.type" class="keyword">if</span> <span class="delimiter">(</span><a href="../Function1.scala.html#27963" title="(v1: T)Boolean">pred</a><span class="delimiter">(</span><a href="#344457" title="T">v</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#344448" title="scala.concurrent.Promise[T]">p</a> <a href="Promise.scala.html#344337" title="(v: T)p.type">success</a> <a href="#344457" title="T">v</a>
+          <span class="keyword">else</span> <a href="#344448" title="scala.concurrent.Promise[T]">p</a> <a href="Promise.scala.html#344339" title="(t: Throwable)p.type">failure</a> <span title="(x$1: String)java.util.NoSuchElementException" class="keyword">new</span> <a href="../package.scala.html#22180" title="java.util.NoSuchElementException">NoSuchElementException</a><span class="delimiter">(</span><span title="String(&quot;Future.filter predicate is not satisfied&quot;)" class="string">&quot;Future.filter predicate is not satisfied&quot;</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="../util/control/NonFatal.scala.html#344304" title="Option[Throwable]" id="1445003">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="344463">t</a><span class="delimiter">)</span> =&gt; <a href="#344448" title="scala.concurrent.Promise[T]">p</a> <a href="#1444999" title="(x: p.type)p.type">failure</a> <a href="#344463" title="Throwable">t</a>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344446" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344448" title="scala.concurrent.Promise[T]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[T]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Used by for-comprehensions.
+   */
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="(p: T =&gt; Boolean)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[T]" id="344060">withFilter</a><span class="delimiter">(</span><a title="T =&gt; Boolean" id="344465">p</a>: T =&gt; Boolean<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344466">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#344059" title="(pred: T =&gt; Boolean)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[T]">filter</a><span class="delimiter">(</span><a href="#344465" title="T =&gt; Boolean">p</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#344466" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+  // final def withFilter(p: T =&gt; Boolean) = new FutureWithFilter[T](this, p)
+
+  // final class FutureWithFilter[+S](self: Future[S], p: S =&gt; Boolean) {
+  //   def foreach(f: S =&gt; Unit): Unit = self filter p foreach f
+  //   def map[R](f: S =&gt; R) = self filter p map f
+  //   def flatMap[R](f: S =&gt; Future[R]) = self filter p flatMap f
+  //   def withFilter(q: S =&gt; Boolean): FutureWithFilter[S] = new FutureWithFilter[S](self, x =&gt; p(x) &amp;&amp; q(x))
+  // }
+
+  /** Creates a new future by mapping the value of the current future, if the given partial function is defined at that value.
+   *
+   *  If the current future contains a value for which the partial function is defined, the new future will also hold that value.
+   *  Otherwise, the resulting future will fail with a `NoSuchElementException`.
+   *
+   *  If the current future fails, then the resulting future also fails.
+   *
+   *  Example:
+   *  {{{
+   *  val f = future { -5 }
+   *  val g = f collect {
+   *    case x if x &lt; 0 =&gt; -x
+   *  }
+   *  val h = f collect {
+   *    case x if x &gt; 0 =&gt; x * 2
+   *  }
+   *  await(g, 0) // evaluates to 5
+   *  await(h, 0) // throw a NoSuchElementException
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[S](pf: PartialFunction[T,S])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[S]" id="344061">collect</a><span class="delimiter">[</span><a title="" id="344063">S</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[T,S]" id="344468">pf</a>: <a href="../PartialFunction.scala.html#129" title="PartialFunction[T,S]">PartialFunction</a><span class="delimiter">[</span>T, S<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344469">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[S]">Future</a><span class="delimiter">[</span>S<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[S]" id="344472">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[S]" class="delimiter">[</span><a href="#344063" title="S">S</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[S])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344476" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> <a href="#1445027" title="p.type" id="1445031">f</a>: Failure<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#344472" title="scala.concurrent.Promise[S]">p</a> <a href="#1445033" title="(x: p.type)p.type">complete</a> f.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.util.Failure[S]" class="delimiter">[</span><a href="../util/Try.scala.html#18385" title="scala.util.Failure[S]">Failure</a><span class="delimiter">[</span>S<span class="delimiter">]</span><span class="delimiter">]</span>
+      <span class="keyword">case</span> Success<a href="#1445027" title="p.type" id="1445030" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344481">v</a><span class="delimiter">)</span> =&gt;
+        <a href="#1445033" title="(x: p.type)p.type" id="1445018" class="keyword">try</a> <span class="delimiter">{</span>
+          <span title="p.type" class="keyword">if</span> <span class="delimiter">(</span><a href="#344468" title="PartialFunction[T,S]">pf</a>.<a href="../PartialFunction.scala.html#27974" title="(x: T)Boolean">isDefinedAt</a><span class="delimiter">(</span><a href="#344481" title="T">v</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#344472" title="scala.concurrent.Promise[S]">p</a> <a href="Promise.scala.html#344337" title="(v: S)p.type">success</a> <a href="../Function1.scala.html#27963" title="(v1: T)S">pf</a><span class="delimiter">(</span><a href="#344481" title="T">v</a><span class="delimiter">)</span>
+          <span class="keyword">else</span> <a href="#344472" title="scala.concurrent.Promise[S]">p</a> <a href="Promise.scala.html#344339" title="(t: Throwable)p.type">failure</a> <span title="(x$1: String)java.util.NoSuchElementException" class="keyword">new</span> <a href="../package.scala.html#22180" title="java.util.NoSuchElementException">NoSuchElementException</a><span class="delimiter">(</span><span title="String(&quot;Future.collect partial function is not defined at: &quot;)" class="string">&quot;Future.collect partial function is not defined at: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#344481" title="T">v</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="../util/control/NonFatal.scala.html#344304" title="Option[Throwable]" id="1445026">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="344488">t</a><span class="delimiter">)</span> =&gt; <a href="#344472" title="scala.concurrent.Promise[S]">p</a> <a href="#1445022" title="(x: p.type)p.type">failure</a> <a href="#344488" title="Throwable">t</a>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344469" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344472" title="scala.concurrent.Promise[S]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[S]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a new future that will handle any matching throwable that this
+   *  future might contain. If there is no match, or if this future contains
+   *  a valid result then the new future will contain the same.
+   *
+   *  Example:
+   *
+   *  {{{
+   *  future (6 / 0) recover { case e: ArithmeticException =&gt; 0 } // result: 0
+   *  future (6 / 0) recover { case e: NotFoundException   =&gt; 0 } // result: exception
+   *  future (6 / 2) recover { case e: ArithmeticException =&gt; 0 } // result: 3
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[U &gt;: T](pf: PartialFunction[Throwable,U])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[U]" id="344064">recover</a><span class="delimiter">[</span><a title=" &gt;: T" id="344066">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[Throwable,U]" id="344490">pf</a>: <a href="../PartialFunction.scala.html#129" title="PartialFunction[Throwable,U]">PartialFunction</a><span class="delimiter">[</span>Throwable, U<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344491">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[U]">Future</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[U]" id="344494">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[U]" class="delimiter">[</span><a href="#344066" title="U">U</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[U])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344498" title="scala.util.Try[T]" class="delimiter">{</a> <span class="keyword">case</span> tr =&gt; <a href="#344494" title="scala.concurrent.Promise[U]">p</a>.<a href="Promise.scala.html#344333" title="(result: scala.util.Try[U])p.type">complete</a><a href="#1445040" title="(x: p.type)p.type" class="delimiter">(</a>tr <a href="../util/Try.scala.html#344166" title="(f: PartialFunction[Throwable,U])scala.util.Try[U]">recover</a> <a href="#344490" title="PartialFunction[Throwable,U]">pf</a><span class="delimiter">)</span> <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344491" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344494" title="scala.concurrent.Promise[U]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[U]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a new future that will handle any matching throwable that this
+   *  future might contain by assigning it a value of another future.
+   *
+   *  If there is no match, or if this future contains
+   *  a valid result then the new future will contain the same result.
+   *
+   *  Example:
+   *
+   *  {{{
+   *  val f = future { Int.MaxValue }
+   *  future (6 / 0) recoverWith { case e: ArithmeticException =&gt; f } // result: Int.MaxValue
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[U &gt;: T](pf: PartialFunction[Throwable,scala.concurrent.Future[U]])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[U]" id="344067">recoverWith</a><span class="delimiter">[</span><a title=" &gt;: T" id="344069">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[Throwable,scala.concurrent.Future[U]]" id="344509">pf</a>: <a href="../PartialFunction.scala.html#129" title="PartialFunction[Throwable,scala.concurrent.Future[U]]">PartialFunction</a><span class="delimiter">[</span>Throwable, Future<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344510">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[U]">Future</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[U]" id="344513">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[U]" class="delimiter">[</span><a href="#344069" title="U">U</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[U])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344517" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> Failure<a href="#1445056" title="p.type" id="1445057" class="delimiter">(</a><a href="../util/Try.scala.html#344253" title="Throwable" id="344518">t</a><span class="delimiter">)</span> <span class="keyword">if</span> <a href="#344509" title="PartialFunction[Throwable,scala.concurrent.Future[U]]">pf</a> <a href="../PartialFunction.scala.html#27974" title="(x: Throwable)Boolean">isDefinedAt</a> <a href="#344518" title="Throwable">t</a> =&gt;
+        <a href="#1445059" title="(x: p.type)p.type" id="1445047" class="keyword">try</a> <span class="delimiter">{</span>
+          <a href="#344513" title="scala.concurrent.Promise[U]">p</a> <a href="Promise.scala.html#344335" title="(other: scala.concurrent.Future[U])p.type">completeWith</a> <a href="../Function1.scala.html#27963" title="(v1: Throwable)scala.concurrent.Future[U]">pf</a><span class="delimiter">(</span><a href="#344518" title="Throwable">t</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="../util/control/NonFatal.scala.html#344304" title="Option[Throwable]" id="1445055">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="344524">t</a><span class="delimiter">)</span> =&gt; <a href="#344513" title="scala.concurrent.Promise[U]">p</a> <a href="#1445051" title="(x: p.type)p.type">failure</a> <a href="#344524" title="Throwable">t</a>
+        <span class="delimiter">}</span>
+      <span class="keyword">case</span> otherwise =&gt; <a href="#344513" title="scala.concurrent.Promise[U]">p</a> <a href="#1445059" title="(x: p.type)p.type">complete</a> otherwise
+    <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344510" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344513" title="scala.concurrent.Promise[U]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[U]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Zips the values of `this` and `that` future, and creates
+   *  a new future holding the tuple of their results.
+   *
+   *  If `this` future fails, the resulting future is failed
+   *  with the throwable stored in `this`.
+   *  Otherwise, if `that` future fails, the resulting future is failed
+   *  with the throwable stored in `that`.
+   */
+  <span class="keyword">def</span> <a title="[U](that: scala.concurrent.Future[U])scala.concurrent.Future[(T, U)]" id="344070">zip</a><span class="delimiter">[</span><a title="" id="344072">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.concurrent.Future[U]" id="344528">that</a>: <a href="#15442" title="scala.concurrent.Future[U]">Future</a><span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[(T, U)]">Future</a><span class="delimiter">[</span><span class="delimiter">(</span>T, U<span class="delimiter">)</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[(T, U)]" id="344531">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[(T, U)]" class="delimiter">[</span><a href="../Tuple2.scala.html#783" title="(T, U)" class="delimiter">(</a>T, U<span class="delimiter">)</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#15442" title="Future.this.type" class="keyword">this</a> <a href="#344041" title="(func: scala.util.Try[T] =&gt; Any)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344535" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> <a href="#1445088" title="Any" id="1445092">f</a>: Failure<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#344531" title="scala.concurrent.Promise[(T, U)]">p</a> <a href="#1445094" title="(x: Any)Any">complete</a> f.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.util.Failure[(T, U)]" class="delimiter">[</span><a href="../util/Try.scala.html#18385" title="scala.util.Failure[(T, U)]">Failure</a><span class="delimiter">[</span><span class="delimiter">(</span>T, U<span class="delimiter">)</span><span class="delimiter">]</span><span class="delimiter">]</span>
+      <span class="keyword">case</span> Success<a href="#1445088" title="Any" id="1445091" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344540">r</a><span class="delimiter">)</span> =&gt;
+        <a href="#344528" title="scala.concurrent.Future[U]">that</a> <a href="#344035" title="(pf: PartialFunction[U,scala.concurrent.Promise[(T, U)]])(implicit executor: scala.concurrent.ExecutionContext)Unit">onSuccess</a> <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[U,p.type] with Serializable" id="344559" class="delimiter">{</a>
+          <span class="keyword">case</span> r2 =&gt; <a href="#344531" title="scala.concurrent.Promise[(T, U)]">p</a> <a href="#1445066" title="(x: B1)B1">success</a> <span class="delimiter">(</span><a href="../Tuple2.scala.html#32170" title="(_1: T, _2: A1)(T, A1)" class="delimiter">(</a><a href="#344540" title="T">r</a>, r2<span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <a href="#344528" title="scala.concurrent.Future[U]">that</a> <a href="#344038" title="(callback: PartialFunction[Throwable,scala.concurrent.Promise[(T, U)]])(implicit executor: scala.concurrent.ExecutionContext)Unit">onFailure</a> <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[Throwable,p.type] with Serializable" id="344596" class="delimiter">{</a>
+          <span class="keyword">case</span> f =&gt; <a href="#344531" title="scala.concurrent.Promise[(T, U)]">p</a> <a href="#1445078" title="(x: B1)B1">failure</a> f
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <a href="#344531" title="scala.concurrent.Promise[(T, U)]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[(T, U)]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a new future which holds the result of this future if it was completed successfully, or, if not,
+   *  the result of the `that` future if `that` is completed successfully.
+   *  If both futures are failed, the resulting future holds the throwable object of the first future.
+   *
+   *  Using this method will not cause concurrent programs to become nondeterministic.
+   *
+   *  Example:
+   *  {{{
+   *  val f = future { sys.error(&quot;failed&quot;) }
+   *  val g = future { 5 }
+   *  val h = f fallbackTo g
+   *  await(h, 0) // evaluates to 5
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[U &gt;: T](that: scala.concurrent.Future[U])scala.concurrent.Future[U]" id="344073">fallbackTo</a><span class="delimiter">[</span><a title=" &gt;: T" id="344075">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.concurrent.Future[U]" id="344629">that</a>: <a href="#15442" title="scala.concurrent.Future[U]">Future</a><span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[U]">Future</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[U]" id="344632">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[U]" class="delimiter">[</span><a href="#344075" title="U">U</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[U])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344636" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> s @ Success<a href="#1445099" title="p.type" id="1445101" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="1445100">_</a><span class="delimiter">)</span> =&gt; <a href="#344632" title="scala.concurrent.Promise[U]">p</a> <a href="#1445103" title="(x: p.type)p.type">complete</a> s
+      <span class="keyword">case</span> _ =&gt; <a href="#344632" title="scala.concurrent.Promise[U]">p</a> <a href="#1445103" title="(x: p.type)p.type">completeWith</a> <a href="#344629" title="scala.concurrent.Future[U]">that</a>
+    <span class="delimiter">}</span>
+    <a href="#344632" title="scala.concurrent.Promise[U]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[U]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a new `Future[S]` which is completed with this `Future`'s result if
+   *  that conforms to `S`'s erased type or a `ClassCastException` otherwise.
+   */
+  <span class="keyword">def</span> <a title="[S](implicit tag: scala.reflect.ClassTag[S])scala.concurrent.Future[S]" id="344076">mapTo</a><span class="delimiter">[</span><a title="" id="344078">S</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.reflect.ClassTag[S]" id="344642">tag</a>: <a href="../reflect/ClassTag.scala.html#2383" title="scala.reflect.ClassTag[S]">ClassTag</a><span class="delimiter">[</span>S<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[S]">Future</a><span class="delimiter">[</span>S<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(c: Class[_])Class[_]" id="344645">boxedType</a><span class="delimiter">(</span><a title="Class[_]" id="344647">c</a>: <span title="Class[_]">Class</span><span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Class[_]">Class</span><span class="delimiter">[</span>_<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <span title="Class[_$4]" class="keyword">if</span> <span class="delimiter">(</span><a href="#344647" title="Class[_]">c</a>.<span title="()Boolean">isPrimitive</span><span class="delimiter">)</span> <a href="#15443" title="scala.concurrent.Future.type">Future</a>.<a href="../collection/MapLike.scala.html#56856" title="(key: Class[_])Class[_]">toBoxed</a><span class="delimiter">(</span><a href="#344647" title="Class[_]">c</a><span class="delimiter">)</span> <span class="keyword">else</span> <a href="#344647" title="Class[_]">c</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[S]" id="344646">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[S]" class="delimiter">[</span><a href="#344078" title="S">S</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; scala.concurrent.Promise[S])(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344903" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> <a href="#1445108" title="p.type" id="1445112">f</a>: Failure<span class="delimiter">[</span>_<span class="delimiter">]</span> =&gt; <a href="#344646" title="scala.concurrent.Promise[S]">p</a> <a href="#1445114" title="(x: p.type)p.type">complete</a> f.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.util.Failure[S]" class="delimiter">[</span><a href="../util/Try.scala.html#18385" title="scala.util.Failure[S]">Failure</a><span class="delimiter">[</span>S<span class="delimiter">]</span><span class="delimiter">]</span>
+      <span class="keyword">case</span> Success<a href="#1445108" title="p.type" id="1445111" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="344908">t</a><span class="delimiter">)</span> =&gt;
+        <a href="#344646" title="scala.concurrent.Promise[S]">p</a> <a href="#1445114" title="(x: p.type)p.type">complete</a> <span class="delimiter">(</span><span class="keyword">try</span> <span class="delimiter">{</span>
+          <a href="../util/Try.scala.html#344179" title="(value: S)scala.util.Success[S]">Success</a><span class="delimiter">(</span><a href="#344645" title="(c: Class[_])Class[_]">boxedType</a><span class="delimiter">(</span><a href="#344642" title="scala.reflect.ClassTag[S]">tag</a>.<a href="../reflect/ClassTag.scala.html#31886" title="=&gt; Class[_]">runtimeClass</a><span class="delimiter">)</span>.<span title="(x$1: Any)_$2">cast</span><span class="delimiter">(</span><a href="#344908" title="T">t</a><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="S" class="delimiter">[</span><a href="#344078" title="S">S</a><span class="delimiter">]</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a title="scala.util.Failure[Nothing]" id="344917">e</a>: <span title="ClassCastException">ClassCastException</span> =&gt; <a href="../util/Try.scala.html#344249" title="(exception: Throwable)scala.util.Failure[Nothing]">Failure</a><span class="delimiter">(</span><a href="#344917" title="ClassCastException">e</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="#344646" title="scala.concurrent.Promise[S]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[S]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Applies the side-effecting function to the result of this future, and returns
+   *  a new future with the result of this future.
+   *
+   *  This method allows one to enforce that the callbacks are executed in a
+   *  specified order.
+   *
+   *  Note that if one of the chained `andThen` callbacks throws
+   *  an exception, that exception is not propagated to the subsequent `andThen`
+   *  callbacks. Instead, the subsequent `andThen` callbacks are given the original
+   *  value of this future.
+   *
+   *  The following example prints out `5`:
+   *
+   *  {{{
+   *  val f = future { 5 }
+   *  f andThen {
+   *    case r =&gt; sys.error(&quot;runtime exception&quot;)
+   *  } andThen {
+   *    case Failure(t) =&gt; println(t)
+   *    case Success(v) =&gt; println(v)
+   *  }
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[U](pf: PartialFunction[scala.util.Try[T],U])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[T]" id="344079">andThen</a><span class="delimiter">[</span><a title="" id="344081">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[scala.util.Try[T],U]" id="344921">pf</a>: <a href="../PartialFunction.scala.html#129" title="PartialFunction[scala.util.Try[T],U]">PartialFunction</a><span class="delimiter">[</span>Try<span class="delimiter">[</span>T<span class="delimiter">]</span>, U<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344922">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[T]" id="344925">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[T]" class="delimiter">[</span><a href="#15577" title="T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <a href="#344041" title="(func: scala.util.Try[T] =&gt; Any)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#344929" title="scala.util.Try[T]" class="delimiter">{</a>
+      <span class="keyword">case</span> r =&gt; <a href="#1445121" title="(x: Any)Any" class="keyword">try</a> <span title="Any" class="keyword">if</span> <span class="delimiter">(</span><a href="#344921" title="PartialFunction[scala.util.Try[T],U]">pf</a> <a href="../PartialFunction.scala.html#27974" title="(x: scala.util.Try[T])Boolean">isDefinedAt</a> r<span class="delimiter">)</span> <a href="../Function1.scala.html#27963" title="(v1: scala.util.Try[T])U">pf</a><span class="delimiter">(</span>r<span class="delimiter">)</span> <span class="keyword">finally</span> <a href="#344925" title="scala.concurrent.Promise[T]">p</a> <a href="Promise.scala.html#344333" title="(result: scala.util.Try[T])p.type">complete</a> r
+    <span class="delimiter">}</span><span class="delimiter">(</span><a href="#344922" title="scala.concurrent.ExecutionContext">executor</a><span class="delimiter">)</span>
+
+    <a href="#344925" title="scala.concurrent.Promise[T]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[T]">future</a>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+
+
+/** Future companion object.
+ *
+ *  @define nonDeterministic
+ *  Note: using this method yields nondeterministic dataflow programs.
+ */
+<span class="keyword">object</span> <a title="scala.concurrent.Future.type" id="15443">Future</a> <a href="#15444" title="scala.concurrent.Future.type" class="delimiter">{</a>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>concurrent<span class="delimiter">]</span> <span class="keyword">val</span> <a title="scala.collection.immutable.Map[Class[_],Class[_]]" id="344087">toBoxed</a> = <a href="../collection/generic/GenMapFactory.scala.html#30065" title="[A, B](elems: (A, B)*)scala.collection.immutable.Map[A,B]">Map</a><span title="(elems: (Class[_], Class[_])*)scala.collection.immutable.Map[Class[_],Class[_]]" class="delimiter">[</span><span title="Class[_]">Class</span><span class="delimiter">[</span>_<span class="delimiter">]</span>, <span title="Class[_]">Class</span><span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span>
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Boolean])ArrowAssoc[Class[Boolean]]" class="delimiter">[</a>Boolean<span class="delimiter">]</span> <a href="../Predef.scala.html#31955" title="(y: Class[Boolean])(Class[Boolean], Class[Boolean])">-&gt;</a> classOf<span title="Class[Boolean](classOf[java.lang.Boolean])" class="delimiter">[</span>java.lang.Boolean<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Byte])ArrowAssoc[Class[Byte]]" class="delimiter">[</a>Byte<span class="delimiter">]</span>    <a href="../Predef.scala.html#31955" title="(y: Class[Byte])(Class[Byte], Class[Byte])">-&gt;</a> classOf<span title="Class[Byte](classOf[java.lang.Byte])" class="delimiter">[</span>java.lang.Byte<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Char])ArrowAssoc[Class[Char]]" class="delimiter">[</a>Char<span class="delimiter">]</span>    <a href="../Predef.scala.html#31955" title="(y: Class[Character])(Class[Char], Class[Character])">-&gt;</a> classOf<span title="Class[Character](classOf[java.lang.Character])" class="delimiter">[</span>java.lang.Character<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Short])ArrowAssoc[Class[Short]]" class="delimiter">[</a>Short<span class="delimiter">]</span>   <a href="../Predef.scala.html#31955" title="(y: Class[Short])(Class[Short], Class[Short])">-&gt;</a> classOf<span title="Class[Short](classOf[java.lang.Short])" class="delimiter">[</span>java.lang.Short<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Int])ArrowAssoc[Class[Int]]" class="delimiter">[</a>Int<span class="delimiter">]</span>     <a href="../Predef.scala.html#31955" title="(y: Class[Integer])(Class[Int], Class[Integer])">-&gt;</a> classOf<span title="Class[Integer](classOf[java.lang.Integer])" class="delimiter">[</span>java.lang.Integer<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Long])ArrowAssoc[Class[Long]]" class="delimiter">[</a>Long<span class="delimiter">]</span>    <a href="../Predef.scala.html#31955" title="(y: Class[Long])(Class[Long], Class[Long])">-&gt;</a> classOf<span title="Class[Long](classOf[java.lang.Long])" class="delimiter">[</span>java.lang.Long<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Float])ArrowAssoc[Class[Float]]" class="delimiter">[</a>Float<span class="delimiter">]</span>   <a href="../Predef.scala.html#31955" title="(y: Class[Float])(Class[Float], Class[Float])">-&gt;</a> classOf<span title="Class[Float](classOf[java.lang.Float])" class="delimiter">[</span>java.lang.Float<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Double])ArrowAssoc[Class[Double]]" class="delimiter">[</a>Double<span class="delimiter">]</span>  <a href="../Predef.scala.html#31955" title="(y: Class[Double])(Class[Double], Class[Double])">-&gt;</a> classOf<span title="Class[Double](classOf[java.lang.Double])" class="delimiter">[</span>java.lang.Double<span class="delimiter">]</span>,
+    classOf<a href="../Predef.scala.html#7219" title="(x: Class[Unit])ArrowAssoc[Class[Unit]]" class="delimiter">[</a>Unit<span class="delimiter">]</span>    <a href="../Predef.scala.html#31955" title="(y: Class[scala.runtime.BoxedUnit])(Class[Unit], Class[scala.runtime.BoxedUnit])">-&gt;</a> classOf<span title="Class[scala.runtime.BoxedUnit](classOf[scala.runtime.BoxedUnit])" class="delimiter">[</span>scala.runtime.BoxedUnit<span class="delimiter">]</span>
+  <span class="delimiter">)</span>
+
+  /** Creates an already completed Future with the specified exception.
+   *
+   *  @tparam T       the type of the value in the future
+   *  @return         the newly created `Future` object
+   */
+  <span class="keyword">def</span> <a title="[T](exception: Throwable)scala.concurrent.Future[T]" id="344089">failed</a><span class="delimiter">[</span><a title="" id="344091">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Throwable" id="344939">exception</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="Promise.scala.html#15419" title="scala.concurrent.Promise.type">Promise</a>.<a href="Promise.scala.html#344323" title="(exception: Throwable)scala.concurrent.Promise[Nothing]">failed</a><span class="delimiter">(</span><a href="#344939" title="Throwable">exception</a><span class="delimiter">)</span>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[Nothing]">future</a>
+
+  /** Creates an already completed Future with the specified result.
+   *
+   *  @tparam T       the type of the value in the future
+   *  @return         the newly created `Future` object
+   */
+  <span class="keyword">def</span> <a title="[T](result: T)scala.concurrent.Future[T]" id="344092">successful</a><span class="delimiter">[</span><a title="" id="344094">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T" id="344942">result</a>: <a href="#344094" title="T">T</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="Promise.scala.html#15419" title="scala.concurrent.Promise.type">Promise</a>.<a href="Promise.scala.html#344326" title="(result: T)scala.concurrent.Promise[T]">successful</a><span class="delimiter">(</span><a href="#344942" title="T">result</a><span class="delimiter">)</span>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[T]">future</a>
+
+  /** Starts an asynchronous computation and returns a `Future` object with the result of that computation.
+  *
+  *  The result becomes available once the asynchronous computation is completed.
+  *
+  *  @tparam T       the type of the result
+  *  @param body     the asychronous computation
+  *  @param execctx  the execution context on which the future is run
+  *  @return         the `Future` holding the result of the computation
+  */
+  <span class="keyword">def</span> <a title="[T](body: =&gt; T)(implicit execctx: scala.concurrent.ExecutionContext)scala.concurrent.Future[T]" id="344095">apply</a><span class="delimiter">[</span><a title="" id="344097">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="344949">body</a>: =&gt;T<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="344950">execctx</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = impl.<a href="impl/Future.scala.html#344955" title="(body: =&gt; T)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[T]">Future</a><a href="#344950" title="scala.concurrent.ExecutionContext" class="delimiter">(</a><a href="#344949" title="=&gt; T">body</a><span class="delimiter">)</span>
+
+  /** Simple version of `Futures.traverse`. Transforms a `TraversableOnce[Future[A]]` into a `Future[TraversableOnce[A]]`.
+   *  Useful for reducing many `Future`s into a single `Future`.
+   */
+  <span class="keyword">def</span> <a title="[A, M[_] &lt;: TraversableOnce[_]](in: M[scala.concurrent.Future[A]])(implicit cbf: scala.collection.generic.CanBuildFrom[M[scala.concurrent.Future[A]],A,M[A]], implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[M[A]]" id="344098">sequence</a><span class="delimiter">[</span><a title="" id="344101">A</a>, <a title="[_] &lt;: TraversableOnce[_]" id="344102">M</a><span class="delimiter">[</span><a title="" id="344967">_</a><span class="delimiter">]</span> &lt;: TraversableOnce<span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><a title="M[scala.concurrent.Future[A]]" id="344964">in</a>: <a href="#344102" title="M[scala.concurrent.Future[A]]">M</a><span class="delimiter">[</span>Future<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[M[scala.concurrent.Future[A]],A,M[A]]" id="344965">cbf</a>: <a href="../collection/generic/CanBuildFrom.scala.html#9806" title="scala.collection.generic.CanBuildFrom[M[scala.concurrent.Future[A]],A,M[A]]">CanBuildFrom</a><span class="delimiter">[</span>M<span class="delimiter">[</span>Future<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span>, A, M<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span>, <a title="scala.concurrent.ExecutionContext" id="344966">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[M[A]]">Future</a><span class="delimiter">[</span>M<span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <a href="#344964" title="M[scala.concurrent.Future[A]]">in</a>.<a href="../collection/TraversableOnce.scala.html#27526" title="(z: scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]])(op: (scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]], Any) =&gt; scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]])scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]]">foldLeft</a><span class="delimiter">(</span><a href="Promise.scala.html#15419" title="scala.concurrent.Promise.type">Promise</a>.<a href="Promise.scala.html#344326" title="(result: scala.collection.mutable.Builder[A,M[A]])scala.concurrent.Promise[scala.collection.mutable.Builder[A,M[A]]]">successful</a><span class="delimiter">(</span><a href="../collection/generic/CanBuildFrom.scala.html#29231" title="(from: M[scala.concurrent.Future[A]])scala.collection.mutable.Builder[A,M[A]]">cbf</a><span class="delimiter">(</span><a href="#344964" title="M[scala.concurrent.Future[A]]">in</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]]">future</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="delimiter">(</span><a title="scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]]" id="344996">fr</a>, <a title="Any" id="344997">fa</a><span class="delimiter">)</span> =&gt; <span class="keyword">for</span> <span class="delimiter">(</span><a title="scala.collection.mutable.Builder[A,M[A]]" id="345002">r</a> &lt;- <a href="#344056" title="(f: scala.collection.mutable.Builder[A,M[A]] =&gt; scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]]">fr</a>; <a title="A" id="345007">a</a> &lt;- <a href="#344997" title="Any">fa</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><a href="#344053" title="(f: A =&gt; scala.collection.mutable.Builder[A,M[A]])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[scala.collection.mutable.Builder[A,M[A]]]" class="delimiter">[</a><a href="#15442" title="scala.concurrent.Future[A]">Future</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="keyword">yield</span> <span class="delimiter">(</span><a href="#345002" title="scala.collection.mutable.Builder[A,M[A]]">r</a> <a href="../collection/mutable/Builder.scala.html#29327" title="(elem: A)r.type">+=</a> <a href="#345007" title="A">a</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span> <a href="#344053" title="(f: scala.collection.mutable.Builder[A,M[A]] =&gt; M[A])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[M[A]]">map</a> <span class="delimiter">(</span><a href="#345021" title="scala.collection.mutable.Builder[A,M[A]]">_</a>.<a href="../collection/mutable/Builder.scala.html#29329" title="()M[A]">result</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Returns a `Future` to the result of the first future in the list that is completed.
+   */
+  <span class="keyword">def</span> <a title="[T](futures: TraversableOnce[scala.concurrent.Future[T]])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[T]" id="344103">firstCompletedOf</a><span class="delimiter">[</span><a title="" id="344105">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="TraversableOnce[scala.concurrent.Future[T]]" id="345023">futures</a>: <a href="../collection/TraversableOnce.scala.html#4352" title="TraversableOnce[scala.concurrent.Future[T]]">TraversableOnce</a><span class="delimiter">[</span>Future<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="345024">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[T]">Future</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.concurrent.Promise[T]" id="345026">p</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[T]" class="delimiter">[</span><a href="#344105" title="T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="keyword">val</span> <a title="scala.util.Try[T] =&gt; Unit" id="345027">completeFirst</a>: Try<span class="delimiter">[</span>T<span class="delimiter">]</span> =&gt; Unit = <a href="#345026" title="scala.concurrent.Promise[T]">p</a> <a href="Promise.scala.html#344334" title="(result: scala.util.Try[T])Boolean">tryComplete</a> <a href="#345029" title="scala.util.Try[T]">_</a>
+    <a href="#345023" title="TraversableOnce[scala.concurrent.Future[T]]">futures</a>.<a href="../collection/TraversableOnce.scala.html#27501" title="(f: scala.concurrent.Future[T] =&gt; Unit)Unit">foreach</a><span class="delimiter">(</span><a href="#345038" title="scala.concurrent.Future[T]">_</a> <a href="#344041" title="(func: scala.util.Try[T] =&gt; Unit)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#345027" title="scala.util.Try[T] =&gt; Unit">completeFirst</a><span class="delimiter">)</span>
+
+    <a href="#345026" title="scala.concurrent.Promise[T]">p</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[T]">future</a>
+  <span class="delimiter">}</span>
+
+  /** Returns a `Future` that will hold the optional result of the first `Future` with a result that matches the predicate.
+   */
+  <span class="keyword">def</span> <a title="[T](futurestravonce: TraversableOnce[scala.concurrent.Future[T]])(predicate: T =&gt; Boolean)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[Option[T]]" id="344106">find</a><span class="delimiter">[</span><a title="" id="344108">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="TraversableOnce[scala.concurrent.Future[T]]" id="345044">futurestravonce</a>: <a href="../collection/TraversableOnce.scala.html#4352" title="TraversableOnce[scala.concurrent.Future[T]]">TraversableOnce</a><span class="delimiter">[</span>Future<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="T =&gt; Boolean" id="345045">predicate</a>: T =&gt; Boolean<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="345046">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[Option[T]]">Future</a><span class="delimiter">[</span>Option<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="scala.collection.mutable.Buffer[scala.concurrent.Future[T]]" id="345049">futures</a> = <a href="#345044" title="TraversableOnce[scala.concurrent.Future[T]]">futurestravonce</a>.<a href="../collection/TraversableOnce.scala.html#27591" title="scala.collection.mutable.Buffer[scala.concurrent.Future[T]]">toBuffer</a>
+    <span title="scala.concurrent.Future[Option[T]]" class="keyword">if</span> <span class="delimiter">(</span><a href="#345049" title="scala.collection.mutable.Buffer[scala.concurrent.Future[T]]">futures</a>.<a href="../collection/SeqLike.scala.html#28108" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="Promise.scala.html#15419" title="scala.concurrent.Promise.type">Promise</a>.<a href="Promise.scala.html#344326" title="[T](result: T)scala.concurrent.Promise[T]">successful</a><span title="(result: Option[T])scala.concurrent.Promise[Option[T]]" class="delimiter">[</span><a href="../Option.scala.html#978" title="Option[T]">Option</a><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><a href="../Option.scala.html#1585" title="None.type">None</a><span class="delimiter">)</span>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[Option[T]]">future</a>
+    <span class="keyword">else</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="scala.concurrent.Promise[Option[T]]" id="345058">result</a> = <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[Option[T]]" class="delimiter">[</span><a href="../Option.scala.html#978" title="Option[T]">Option</a><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">val</span> <a title="java.util.concurrent.atomic.AtomicInteger" id="345059">ref</a> = <span title="java.util.concurrent.atomic.AtomicInteger" class="keyword">new</span> <span title="java.util.concurrent.atomic.AtomicInteger">AtomicInteger</span><span class="delimiter">(</span><a href="#345049" title="scala.collection.mutable.Buffer[scala.concurrent.Future[T]]">futures</a>.<a href="../collection/SeqLike.scala.html#28109" title="=&gt; Int">size</a><span class="delimiter">)</span>
+      <span class="keyword">val</span> <a title="scala.util.Try[T] =&gt; Unit" id="345060">search</a>: Try<span class="delimiter">[</span>T<span class="delimiter">]</span> =&gt; Unit = <a title="scala.util.Try[T]" id="345064">v</a> =&gt; <span class="keyword">try</span> <span class="delimiter">{</span>
+        <a href="#345064" title="scala.util.Try[T]">v</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> Success<a href="#1445125" title="Unit" id="1445126" class="delimiter">(</a><a href="../util/Try.scala.html#344183" title="T" id="345067">r</a><span class="delimiter">)</span> =&gt; <a href="#1445128" title="(x: Unit)Unit" class="keyword">if</a> <span class="delimiter">(</span><a href="../Function1.scala.html#27963" title="(v1: T)Boolean">predicate</a><span class="delimiter">(</span><a href="#345067" title="T">r</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#345058" title="scala.concurrent.Promise[Option[T]]">result</a> <a href="Promise.scala.html#344334" title="(result: scala.util.Try[Option[T]])Boolean">tryComplete</a> <a href="../util/Try.scala.html#344179" title="(value: Some[T])scala.util.Success[Some[T]]">Success</a><span class="delimiter">(</span><a href="../Option.scala.html#32449" title="(x: T)Some[T]">Some</a><span class="delimiter">(</span><a href="#345067" title="T">r</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <span class="keyword">case</span> _ =&gt;
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#345059" title="java.util.concurrent.atomic.AtomicInteger">ref</a>.<span title="()Int">decrementAndGet</span> <a href="../Int.scala.html#26421" title="(x: Int)Boolean">==</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#345058" title="scala.concurrent.Promise[Option[T]]">result</a> <a href="Promise.scala.html#344334" title="(result: scala.util.Try[Option[T]])Boolean">tryComplete</a> <a href="../util/Try.scala.html#344179" title="(value: None.type)scala.util.Success[None.type]">Success</a><span class="delimiter">(</span><a href="../Option.scala.html#1585" title="None.type">None</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+
+      <a href="#345049" title="scala.collection.mutable.Buffer[scala.concurrent.Future[T]]">futures</a>.<a href="../collection/IterableLike.scala.html#27883" title="(f: scala.concurrent.Future[T] =&gt; Unit)Unit">foreach</a><span class="delimiter">(</span><a href="#345100" title="scala.concurrent.Future[T]">_</a> <a href="#344041" title="(func: scala.util.Try[T] =&gt; Unit)(implicit executor: scala.concurrent.ExecutionContext)Unit">onComplete</a> <a href="#345060" title="scala.util.Try[T] =&gt; Unit">search</a><span class="delimiter">)</span>
+
+      <a href="#345058" title="scala.concurrent.Promise[Option[T]]">result</a>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[Option[T]]">future</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** A non-blocking fold over the specified futures, with the start value of the given zero.
+   *  The fold is performed on the thread where the last future is completed,
+   *  the result will be the first failure of any of the futures, or any failure in the actual fold,
+   *  or the result of the fold.
+   *
+   *  Example:
+   *  {{{
+   *    val result = Await.result(Future.fold(futures)(0)(_ + _), 5 seconds)
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[T, R](futures: TraversableOnce[scala.concurrent.Future[T]])(zero: R)(foldFun: (R, T) =&gt; R)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[R]" id="344109">fold</a><span class="delimiter">[</span><a title="" id="344112">T</a>, <a title="" id="344113">R</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="TraversableOnce[scala.concurrent.Future[T]]" id="345106">futures</a>: <a href="../collection/TraversableOnce.scala.html#4352" title="TraversableOnce[scala.concurrent.Future[T]]">TraversableOnce</a><span class="delimiter">[</span>Future<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="R" id="345107">zero</a>: <a href="#344113" title="R">R</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="(R, T) =&gt; R" id="345108">foldFun</a>: <span class="delimiter">(</span>R, T<span class="delimiter">)</span> =&gt; R<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="345109">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[R]">Future</a><span class="delimiter">[</span>R<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span title="scala.concurrent.Future[R]" class="keyword">if</span> <span class="delimiter">(</span><a href="#345106" title="TraversableOnce[scala.concurrent.Future[T]]">futures</a>.<a href="../collection/TraversableOnce.scala.html#27504" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="Promise.scala.html#15419" title="scala.concurrent.Promise.type">Promise</a>.<a href="Promise.scala.html#344326" title="(result: R)scala.concurrent.Promise[R]">successful</a><span class="delimiter">(</span><a href="#345107" title="R">zero</a><span class="delimiter">)</span>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[R]">future</a>
+    <span class="keyword">else</span> <a href="#344098" title="(in: TraversableOnce[scala.concurrent.Future[T]])(implicit cbf: scala.collection.generic.CanBuildFrom[TraversableOnce[scala.concurrent.Future[T]],T,TraversableOnce[T]], implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[TraversableOnce[T]]">sequence</a><a href="../collection/TraversableOnce.scala.html#40850" title="scala.collection.TraversableOnce.OnceCanBuildFrom[T]" class="delimiter">(</a><a href="#345106" title="TraversableOnce[scala.concurrent.Future[T]]">futures</a><span class="delimiter">)</span>.<a href="#344053" title="(f: TraversableOnce[T] =&gt; R)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[R]">map</a><a href="#345109" title="scala.concurrent.ExecutionContext" class="delimiter">(</a><a href="#345141" title="TraversableOnce[T]">_</a>.<a href="../collection/TraversableOnce.scala.html#27526" title="(z: R)(op: (R, T) =&gt; R)R">foldLeft</a><span class="delimiter">(</span><a href="#345107" title="R">zero</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#345108" title="(R, T) =&gt; R">foldFun</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Initiates a fold over the supplied futures where the fold-zero is the result value of the `Future` that's completed first.
+   *
+   *  Example:
+   *  {{{
+   *    val result = Await.result(Futures.reduce(futures)(_ + _), 5 seconds)
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[T, R &gt;: T](futures: TraversableOnce[scala.concurrent.Future[T]])(op: (R, T) =&gt; R)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[R]" id="344114">reduce</a><span class="delimiter">[</span><a title="" id="344117">T</a>, <a title=" &gt;: T" id="344118">R</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="TraversableOnce[scala.concurrent.Future[T]]" id="345154">futures</a>: <a href="../collection/TraversableOnce.scala.html#4352" title="TraversableOnce[scala.concurrent.Future[T]]">TraversableOnce</a><span class="delimiter">[</span>Future<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="(R, T) =&gt; R" id="345155">op</a>: <span class="delimiter">(</span>R, T<span class="delimiter">)</span> =&gt; R<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.ExecutionContext" id="345156">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[R]">Future</a><span class="delimiter">[</span>R<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span title="scala.concurrent.Future[R]" class="keyword">if</span> <span class="delimiter">(</span><a href="#345154" title="TraversableOnce[scala.concurrent.Future[T]]">futures</a>.<a href="../collection/TraversableOnce.scala.html#27504" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="Promise.scala.html#344320" title="[T]()scala.concurrent.Promise[T]">Promise</a><span title="()scala.concurrent.Promise[R]" class="delimiter">[</span><a href="#344118" title="R">R</a><span class="delimiter">]</span>.<a href="Promise.scala.html#344339" title="(t: Throwable)scala.concurrent.Promise[R]">failure</a><span class="delimiter">(</span><span title="(x$1: String)java.util.NoSuchElementException" class="keyword">new</span> <a href="../package.scala.html#22180" title="java.util.NoSuchElementException">NoSuchElementException</a><span class="delimiter">(</span><span title="String(&quot;reduce attempted on empty collection&quot;)" class="string">&quot;reduce attempted on empty collection&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[R]">future</a>
+    <span class="keyword">else</span> <a href="#344098" title="(in: TraversableOnce[scala.concurrent.Future[T]])(implicit cbf: scala.collection.generic.CanBuildFrom[TraversableOnce[scala.concurrent.Future[T]],T,TraversableOnce[T]], implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[TraversableOnce[T]]">sequence</a><a href="../collection/TraversableOnce.scala.html#40850" title="scala.collection.TraversableOnce.OnceCanBuildFrom[T]" class="delimiter">(</a><a href="#345154" title="TraversableOnce[scala.concurrent.Future[T]]">futures</a><span class="delimiter">)</span>.<a href="#344053" title="(f: TraversableOnce[T] =&gt; R)(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[R]">map</a><a href="#345156" title="scala.concurrent.ExecutionContext" class="delimiter">(</a><a href="#345189" title="TraversableOnce[T]">_</a> <a href="../collection/TraversableOnce.scala.html#27532" title="(op: (R, T) =&gt; R)R">reduceLeft</a> <a href="#345155" title="(R, T) =&gt; R">op</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Transforms a `TraversableOnce[A]` into a `Future[TraversableOnce[B]]` using the provided function `A =&gt; Future[B]`.
+   *  This is useful for performing a parallel map. For example, to apply a function to all items of a list
+   *  in parallel:
+   *
+   *  {{{
+   *    val myFutureList = Future.traverse(myList)(x =&gt; Future(myFunc(x)))
+   *  }}}
+   */
+  <span class="keyword">def</span> <a title="[A, B, M[_] &lt;: TraversableOnce[_]](in: M[A])(fn: A =&gt; scala.concurrent.Future[B])(implicit cbf: scala.collection.generic.CanBuildFrom[M[A],B,M[B]], implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[M[B]]" id="344119">traverse</a><span class="delimiter">[</span><a title="" id="344123">A</a>, <a title="" id="344124">B</a>, <a title="[_] &lt;: TraversableOnce[_]" id="344125">M</a><span class="delimiter">[</span><a title="" id="345201">_</a><span class="delimiter">]</span> &lt;: TraversableOnce<span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><a title="M[A]" id="345197">in</a>: <a href="#344125" title="M[A]">M</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; scala.concurrent.Future[B]" id="345198">fn</a>: A =&gt; Future<span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.collection.generic.CanBuildFrom[M[A],B,M[B]]" id="345199">cbf</a>: <a href="../collection/generic/CanBuildFrom.scala.html#9806" title="scala.collection.generic.CanBuildFrom[M[A],B,M[B]]">CanBuildFrom</a><span class="delimiter">[</span>M<span class="delimiter">[</span>A<span class="delimiter">]</span>, B, M<span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">]</span>, <a title="scala.concurrent.ExecutionContext" id="345200">executor</a>: <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a><span class="delimiter">)</span>: <a href="#15442" title="scala.concurrent.Future[M[B]]">Future</a><span class="delimiter">[</span>M<span class="delimiter">[</span>B<span class="delimiter">]</span><span class="delimiter">]</span> =
+    <a href="#345197" title="M[A]">in</a>.<a href="../collection/TraversableOnce.scala.html#27526" title="(z: scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]])(op: (scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]], Any) =&gt; scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]])scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]]">foldLeft</a><span class="delimiter">(</span><a href="Promise.scala.html#15419" title="scala.concurrent.Promise.type">Promise</a>.<a href="Promise.scala.html#344326" title="(result: scala.collection.mutable.Builder[B,M[B]])scala.concurrent.Promise[scala.collection.mutable.Builder[B,M[B]]]">successful</a><span class="delimiter">(</span><a href="../collection/generic/CanBuildFrom.scala.html#29231" title="(from: M[A])scala.collection.mutable.Builder[B,M[B]]">cbf</a><span class="delimiter">(</span><a href="#345197" title="M[A]">in</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="Promise.scala.html#344331" title="=&gt; scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]]">future</a><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">(</span><a title="scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]]" id="345231">fr</a>, <a title="Any" id="345232">a</a><span class="delimiter">)</span> =&gt;
+      <span class="keyword">val</span> <a title="scala.concurrent.Future[B]" id="345233">fb</a> = <a href="../Function1.scala.html#27963" title="(v1: A)scala.concurrent.Future[B]">fn</a><span class="delimiter">(</span><a href="#345232" title="Any">a</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="A" class="delimiter">[</span><a href="#344123" title="A">A</a><span class="delimiter">]</span><span class="delimiter">)</span>
+      <span class="keyword">for</span> <span class="delimiter">(</span><a title="scala.collection.mutable.Builder[B,M[B]]" id="345239">r</a> &lt;- <a href="#344056" title="(f: scala.collection.mutable.Builder[B,M[B]] =&gt; scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]]">fr</a>; <a title="B" id="345244">b</a> &lt;- <a href="#344053" title="(f: B =&gt; scala.collection.mutable.Builder[B,M[B]])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[scala.collection.mutable.Builder[B,M[B]]]">fb</a><span class="delimiter">)</span> <span class="keyword">yield</span> <span class="delimiter">(</span><a href="#345239" title="scala.collection.mutable.Builder[B,M[B]]">r</a> <a href="../collection/mutable/Builder.scala.html#29327" title="(elem: B)r.type">+=</a> <a href="#345244" title="B">b</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>.<a href="#344053" title="(f: scala.collection.mutable.Builder[B,M[B]] =&gt; M[B])(implicit executor: scala.concurrent.ExecutionContext)scala.concurrent.Future[M[B]]">map</a><a href="#345200" title="scala.concurrent.ExecutionContext" class="delimiter">(</a><a href="#345258" title="scala.collection.mutable.Builder[B,M[B]]">_</a>.<a href="../collection/mutable/Builder.scala.html#29329" title="()M[B]">result</a><span class="delimiter">)</span>
+
+  // This is used to run callbacks which are internal
+  // to scala.concurrent; our own callbacks are only
+  // ever used to eventually run another callback,
+  // and that other callback will have its own
+  // executor because all callbacks come with
+  // an executor. Our own callbacks never block
+  // and have no &quot;expected&quot; exceptions.
+  // As a result, this executor can do nothing;
+  // some other executor will always come after
+  // it (and sometimes one will be before it),
+  // and those will be performing the &quot;real&quot;
+  // dispatch to code outside scala.concurrent.
+  // Because this exists, ExecutionContext.defaultExecutionContext
+  // isn't instantiated by Future internals, so
+  // if some code for some reason wants to avoid
+  // ever starting up the default context, it can do so
+  // by just not ever using it itself. scala.concurrent
+  // doesn't need to create defaultExecutionContext as
+  // a side effect.
+  <span class="keyword">private</span><span class="delimiter">[</span>concurrent<span class="delimiter">]</span> <span class="keyword">object</span> <a title="scala.concurrent.Future.InternalCallbackExecutor.type" id="344126">InternalCallbackExecutor</a> <a href="#344127" title="scala.concurrent.Future.InternalCallbackExecutor.type" class="keyword">extends</a> <a href="ExecutionContext.scala.html#15289" title="scala.concurrent.ExecutionContext">ExecutionContext</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="(runnable: Runnable)Unit" id="344129">execute</a><span class="delimiter">(</span><a title="Runnable" id="345261">runnable</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#1515" title="Unit">Unit</a> =
+      <a href="#345261" title="Runnable">runnable</a>.<span title="()Unit">run</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="(t: Throwable)Unit" id="344130">reportFailure</a><span class="delimiter">(</span><a title="Throwable" id="345263">t</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#1515" title="Unit">Unit</a> =
+      <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String, x$2: Throwable)IllegalStateException" class="keyword">new</span> <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;problem in scala.concurrent internal callback&quot;)" class="string">&quot;problem in scala.concurrent internal callback&quot;</span>, <a href="#345263" title="Throwable">t</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+/** A marker indicating that a `java.lang.Runnable` provided to `scala.concurrent.ExecutionContext`
+ * wraps a callback provided to `Future.onComplete`.
+ * All callbacks provided to a `Future` end up going through `onComplete`, so this allows an
+ * `ExecutionContext` to special-case callbacks that were executed by `Future` if desired.
+ */
+<span title="Object" class="keyword">trait</span> <a title="trait OnCompleteRunnable extends Object" id="15364">OnCompleteRunnable</a> <span class="delimiter">{</span>
+  self: Runnable =&gt;
+<span class="delimiter">}</span>
+
+
+        </pre>
+    </body>
+</html>

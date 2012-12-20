@@ -1,0 +1,945 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/util/parsing/combinator/Parsers.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2006-2013, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.util.parsing.combinator
+
+<span class="keyword">import</span> scala.util.parsing.input._
+<span class="keyword">import</span> scala.collection.mutable.ListBuffer
+<span class="keyword">import</span> scala.annotation.tailrec
+<span class="keyword">import</span> scala.annotation.migration
+<span class="keyword">import</span> scala.<a href="../../../language.scala.html#1423" title="language.type">language</a>.implicitConversions
+<span class="keyword">import</span> scala.util.DynamicVariable
+
+// TODO: better error handling (labelling like parsec's &lt;?&gt;)
+
+/** `Parsers` is a component that ''provides'' generic parser combinators.
+ *
+ *  There are two abstract members that must be defined in order to
+ *  produce parsers: the type `Elem` and
+ *  [[scala.util.parsing.combinator.Parsers.Parser]]. There are helper
+ *  methods that produce concrete `Parser` implementations -- see ''primitive
+ *  parser'' below.
+ *
+ *  A `Parsers` may define multiple `Parser` instances, which are combined
+ *  to produced the desired parser.
+ *
+ *  The type of the elements these parsers should parse must be defined
+ *  by declaring `Elem`
+ *  (each parser is polymorphic in the type of result it produces).
+ *
+ *  There are two aspects to the result of a parser:
+ *  1. success or failure
+ *  1. the result.
+ *
+ *  A [[scala.util.parsing.combinator.Parsers.Parser]] produces both kinds of information,
+ *  by returning a [[scala.util.parsing.combinator.Parsers.ParseResult]] when its `apply`
+ *  method is called on an input.
+ *
+ *  The term ''parser combinator'' refers to the fact that these parsers
+ *  are constructed from primitive parsers and composition operators, such
+ *  as sequencing, alternation, optionality, repetition, lifting, and so on. For example,
+ *  given `p1` and `p2` of type [[scala.util.parsing.combinator.Parsers.Parser]]:
+ *
+ *  {{{
+ *  p1 ~ p2 // sequencing: must match p1 followed by p2
+ *  p1 | p2 // alternation: must match either p1 or p2, with preference given to p1
+ *  p1.?    // optionality: may match p1 or not
+ *  p1.*    // repetition: matches any number of repetitions of p1
+ *  }}}
+ *
+ *  These combinators are provided as methods on [[scala.util.parsing.combinator.Parsers.Parser]],
+ *  or as methods taking one or more `Parsers` and returning a `Parser` provided in
+ *  this class.
+ *
+ *  A ''primitive parser'' is a parser that accepts or rejects a single
+ *  piece of input, based on a certain criterion, such as whether the
+ *  input...
+ *  - is equal to some given object (see method `accept`),
+ *  - satisfies a certain predicate (see method `acceptIf`),
+ *  - is in the domain of a given partial function (see method `acceptMatch`)
+ *  - or other conditions, by using one of the other methods available, or subclassing `Parser`
+ *
+ *  Even more primitive parsers always produce the same result, irrespective of the input. See
+ *  methods `success`, `err` and `failure` as examples.
+ *
+ *  @see [[scala.util.parsing.combinator.RegexParsers]] and other known subclasses for practical examples.
+ *
+ *  @author Martin Odersky
+ *  @author Iulian Dragos
+ *  @author Adriaan Moors
+ */
+<span class="keyword">trait</span> <a title="trait Parsers extends Object" id="19542">Parsers</a> <a href="../../../Unit.scala.html#1515" title="Unit" class="delimiter">{</a>
+  /** the type of input elements the provided parsers consume (When consuming
+   *  invidual characters, a parser is typically called a ''scanner'', which
+   *  produces ''tokens'' that are consumed by what is normally called a ''parser''.
+   *  Nonetheless, the same principles apply, regardless of the input type.) */
+  <span class="keyword">type</span> <a title="" id="388592">Elem</a>
+
+  /** The parser input is an abstract reader of input elements, i.e. the type
+   *  of input the parsers in this component expect. */
+  <span class="keyword">type</span> <a title="scala.util.parsing.input.Reader[Parsers.this.Elem]" id="388593">Input</a> = <a href="../input/Reader.scala.html#20090" title="scala.util.parsing.input.Reader[Parsers.this.Elem]">Reader</a><span class="delimiter">[</span>Elem<span class="delimiter">]</span>
+
+  /** A base class for parser results. A result is either successful or not
+   *  (failure may be fatal, i.e., an Error, or not, i.e., a Failure). On
+   *  success, provides a result of type `T` which consists of some result
+   *  (and the rest of the input). */
+  <span class="keyword">sealed</span> <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class ParseResult[+T] extends Object" id="388594">ParseResult</a><span class="delimiter">[</span>+<a title="" id="388595">T</a><span class="delimiter">]</span> <a href="#388594" title="Parsers.this.ParseResult[T]" class="delimiter">{</a>
+    /** Functional composition of ParseResults.
+     *
+     * @param f the function to be lifted over this result
+     * @return `f` applied to the result of this `ParseResult`, packaged up as a new `ParseResult`
+     */
+    <span class="keyword">def</span> <a title="[U](f: T =&gt; U)Parsers.this.ParseResult[U]" id="389242">map</a><span class="delimiter">[</span><a title="" id="389244">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; U" id="390560">f</a>: T =&gt; U<span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+
+    /** Partial functional composition of ParseResults.
+     *
+     * @param f the partial function to be lifted over this result
+     * @param error a function that takes the same argument as `f` and
+     *        produces an error message to explain why `f` wasn't applicable
+     *        (it is called when this is the case)
+     * @return if `f` f is defined at the result in this `ParseResult`, `f`
+     *         applied to the result of this `ParseResult`, packaged up as
+     *         a new `ParseResult`. If `f` is not defined, `Failure`.
+     */
+    <span class="keyword">def</span> <a title="[U](f: PartialFunction[T,U], error: T =&gt; String)Parsers.this.ParseResult[U]" id="389245">mapPartial</a><span class="delimiter">[</span><a title="" id="389247">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[T,U]" id="390562">f</a>: <a href="../../../PartialFunction.scala.html#129" title="PartialFunction[T,U]">PartialFunction</a><span class="delimiter">[</span>T, U<span class="delimiter">]</span>, <a title="T =&gt; String" id="390563">error</a>: T =&gt; String<span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="[U](f: T =&gt; (Parsers.this.Input =&gt; Parsers.this.ParseResult[U]))Parsers.this.ParseResult[U]" id="389248">flatMapWithNext</a><span class="delimiter">[</span><a title="" id="389250">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; (Parsers.this.Input =&gt; Parsers.this.ParseResult[U])" id="390566">f</a>: T =&gt; Input =&gt; ParseResult<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="(p: T =&gt; Boolean, error: T =&gt; String, position: Parsers.this.Input)Parsers.this.ParseResult[T]" id="389251">filterWithError</a><span class="delimiter">(</span><a title="T =&gt; Boolean" id="390568">p</a>: T =&gt; Boolean, <a title="T =&gt; String" id="390569">error</a>: T =&gt; String, <a title="Parsers.this.Input" id="390570">position</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[T]">ParseResult</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="[U &gt;: T](a: =&gt; Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]" id="389252">append</a><span class="delimiter">[</span><a title=" &gt;: T" id="389254">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.ParseResult[U]" id="390571">a</a>: =&gt; ParseResult<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="389255">isEmpty</a> = <a href="../../../Boolean.scala.html#27146" title="=&gt; Boolean">!</a><a href="#389261" title="=&gt; Boolean">successful</a>
+
+    /** Returns the embedded result. */
+    <span class="keyword">def</span> <a title="=&gt; T" id="389256">get</a>: <a href="#388595" title="T">T</a>
+
+    <span class="keyword">def</span> <a title="[B &gt;: T](default: =&gt; B)B" id="389257">getOrElse</a><span class="delimiter">[</span><a title=" &gt;: T" id="389259">B</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; B" id="390573">default</a>: =&gt; B<span class="delimiter">)</span>: <a href="#389259" title="B">B</a> =
+        <span title="B" class="keyword">if</span> <span class="delimiter">(</span><a href="#389255" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="#390573" title="=&gt; B">default</a> <span class="keyword">else</span> <a href="#388594" title="ParseResult.this.type" class="keyword">this</a>.<a href="#389256" title="=&gt; T">get</a>
+
+    <span class="keyword">val</span> <a title="=&gt; Parsers.this.Input" id="389260">next</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a>
+
+    <span class="keyword">val</span> <a title="=&gt; Boolean" id="389261">successful</a>: <a href="../../../Boolean.scala.html#1425" title="Boolean">Boolean</a>
+  <span class="delimiter">}</span>
+
+  /** The success case of `ParseResult`: contains the result and the remaining input.
+   *
+   *  @param result The parser's output
+   *  @param next   The parser's remaining input
+   */
+  case <span class="keyword">class</span> <a href="#390671" title="class Success[+T] extends Parsers.this.ParseResult[T] with Product with Serializable" id="392725">Success</a><span class="delimiter">[</span>+<a title="" id="389329">T</a><span class="delimiter">]</span><a href="../../../Product.scala.html#186" title="Product" class="delimiter">(</a><a title="T" id="390587">result</a>: <a href="#389329" title="T">T</a>, <span class="keyword">override</span> <span class="keyword">val</span> <a title="Parsers.this.Input" id="390588">next</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#388594" title="Parsers.this.ParseResult[T]">ParseResult</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="[U](f: T =&gt; U)Parsers.this.Success[U]" id="389307">map</a><span class="delimiter">[</span><a title="" id="389309">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; U" id="390578">f</a>: T =&gt; U<span class="delimiter">)</span> = <a href="#392725" title="(result: U, next: Parsers.this.Input)Parsers.this.Success[U]">Success</a><span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: T)U">f</a><span class="delimiter">(</span><a href="#390587" title="=&gt; T">result</a><span class="delimiter">)</span>, <a href="#390588" title="=&gt; Parsers.this.Input">next</a><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="[U](f: PartialFunction[T,U], error: T =&gt; String)Parsers.this.ParseResult[U]" id="389310">mapPartial</a><span class="delimiter">[</span><a title="" id="389312">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[T,U]" id="390598">f</a>: <a href="../../../PartialFunction.scala.html#129" title="PartialFunction[T,U]">PartialFunction</a><span class="delimiter">[</span>T, U<span class="delimiter">]</span>, <a title="T =&gt; String" id="390599">error</a>: T =&gt; String<span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+       = <span title="Parsers.this.ParseResult[U]" class="keyword">if</span><span class="delimiter">(</span><a href="#390598" title="PartialFunction[T,U]">f</a>.<a href="../../../PartialFunction.scala.html#27974" title="(x: T)Boolean">isDefinedAt</a><span class="delimiter">(</span><a href="#390587" title="=&gt; T">result</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#392725" title="(result: U, next: Parsers.this.Input)Parsers.this.Success[U]">Success</a><span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: T)U">f</a><span class="delimiter">(</span><a href="#390587" title="=&gt; T">result</a><span class="delimiter">)</span>, <a href="#390588" title="=&gt; Parsers.this.Input">next</a><span class="delimiter">)</span>
+         <span class="keyword">else</span> <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: T)String">error</a><span class="delimiter">(</span><a href="#390587" title="=&gt; T">result</a><span class="delimiter">)</span>, <a href="#390588" title="=&gt; Parsers.this.Input">next</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="[U](f: T =&gt; (Parsers.this.Input =&gt; Parsers.this.ParseResult[U]))Parsers.this.ParseResult[U]" id="389313">flatMapWithNext</a><span class="delimiter">[</span><a title="" id="389315">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; (Parsers.this.Input =&gt; Parsers.this.ParseResult[U])" id="390619">f</a>: T =&gt; Input =&gt; ParseResult<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+      = <a href="../../../Function1.scala.html#27963" title="(v1: T)Parsers.this.Input =&gt; Parsers.this.ParseResult[U]">f</a><a href="../../../Function1.scala.html#27963" title="(v1: Parsers.this.Input)Parsers.this.ParseResult[U]" class="delimiter">(</a><a href="#390587" title="=&gt; T">result</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#390588" title="=&gt; Parsers.this.Input">next</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="(p: T =&gt; Boolean, error: T =&gt; String, position: Parsers.this.Input)Parsers.this.ParseResult[T]" id="389316">filterWithError</a><span class="delimiter">(</span><a title="T =&gt; Boolean" id="390627">p</a>: T =&gt; Boolean, <a title="T =&gt; String" id="390628">error</a>: T =&gt; String, <a title="Parsers.this.Input" id="390629">position</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[T]">ParseResult</a><span class="delimiter">[</span>T<span class="delimiter">]</span> =
+      <span title="Parsers.this.ParseResult[T]" class="keyword">if</span> <span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: T)Boolean">p</a><span class="delimiter">(</span><a href="#390587" title="=&gt; T">result</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#392725" title="Parsers.this.Success[T]" class="keyword">this</a>
+      <span class="keyword">else</span> <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: T)String">error</a><span class="delimiter">(</span><a href="#390587" title="=&gt; T">result</a><span class="delimiter">)</span>, <a href="#390629" title="Parsers.this.Input">position</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="[U &gt;: T](a: =&gt; Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]" id="389317">append</a><span class="delimiter">[</span><a title=" &gt;: T" id="389319">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.ParseResult[U]" id="390636">a</a>: =&gt; ParseResult<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#392725" title="Parsers.this.Success[T]" class="keyword">this</a>
+
+    <span class="keyword">def</span> <a title="=&gt; T" id="389320">get</a>: <a href="#389329" title="T">T</a> = <a href="#390587" title="=&gt; T">result</a>
+
+    /** The toString method of a Success. */
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="389321">toString</a> = <span title="String(&quot;[&quot;)" class="string">&quot;[&quot;</span><span title="(x$1: Any)String">+</span><a href="#390588" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a><span title="(x$1: Any)String">+</span><span title="String(&quot;] parsed: &quot;)" class="string">&quot;] parsed: &quot;</span><span title="(x$1: Any)String">+</span><a href="#390587" title="=&gt; T">result</a>
+
+    <span class="keyword">val</span> <a title="Boolean" id="389322">successful</a> = <span title="Boolean(true)" class="keyword">true</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]" id="388601">lastNoSuccessVar</a> = <span title="scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]" class="keyword">new</span> <a href="../../DynamicVariable.scala.html#18412" title="scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">DynamicVariable</a><span class="delimiter">[</span>Option<span class="delimiter">[</span>NoSuccess<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><a href="../../../Option.scala.html#1585" title="None.type">None</a><span class="delimiter">)</span>
+
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;lastNoSuccess was not thread-safe and will be removed in 2.11.0&quot;</span>, <span class="string">&quot;2.10.0&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="=&gt; Parsers.this.NoSuccess" id="388602">lastNoSuccess</a>: <a href="#388604" title="Parsers.this.NoSuccess">NoSuccess</a> = <a href="#388600" title="=&gt; scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">lastNoSuccessVar</a>.<a href="../../DynamicVariable.scala.html#54411" title="=&gt; Option[Parsers.this.NoSuccess]">value</a>.<a href="../../../Option.scala.html#32183" title="(implicit ev: &lt;:&lt;[Null,Parsers.this.NoSuccess])Parsers.this.NoSuccess">orNull</a>
+
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;lastNoSuccess was not thread-safe and will be removed in 2.11.0&quot;</span>, <span class="string">&quot;2.10.0&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="(x: Parsers.this.NoSuccess)Unit" id="388603">lastNoSuccess_=</a><span class="delimiter">(</span><a title="Parsers.this.NoSuccess" id="390699">x</a>: <a href="#388604" title="Parsers.this.NoSuccess">NoSuccess</a><span class="delimiter">)</span>: <a href="../../../Unit.scala.html#1515" title="Unit">Unit</a> = <a href="#388600" title="=&gt; scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">lastNoSuccessVar</a>.<a href="../../DynamicVariable.scala.html#54415" title="(newval: Option[Parsers.this.NoSuccess])Unit">value</a> = <a href="../../../Option.scala.html#66720" title="(x: Parsers.this.NoSuccess)Option[Parsers.this.NoSuccess]">Option</a><span class="delimiter">(</span><a href="#390699" title="Parsers.this.NoSuccess">x</a><span class="delimiter">)</span>
+
+  /** A common super-class for unsuccessful parse results. */
+  <span class="keyword">sealed</span> <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class NoSuccess extends Parsers.this.ParseResult[Nothing]" id="388604">NoSuccess</a><a href="#388604" title="Parsers.this.NoSuccess" class="delimiter">(</a><span class="keyword">val</span> <a title="String" id="390707">msg</a>: <span title="String">String</span>, <span class="keyword">override</span> <span class="keyword">val</span> <a title="Parsers.this.Input" id="390708">next</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#388594" title="Parsers.this.ParseResult[Nothing]">ParseResult</a><span class="delimiter">[</span>Nothing<span class="delimiter">]</span> <span class="delimiter">{</span> // when we don't care about the difference between Failure and Error
+    <span class="keyword">val</span> <a title="Boolean" id="389269">successful</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#388600" title="=&gt; scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">lastNoSuccessVar</a>.<a href="../../DynamicVariable.scala.html#54411" title="=&gt; Option[Parsers.this.NoSuccess]">value</a> <a href="../../../Option.scala.html#32204" title="(p: Parsers.this.NoSuccess =&gt; Boolean)Boolean">forall</a> <span class="delimiter">(</span><a title="Parsers.this.NoSuccess" id="390711">v</a> =&gt; <a href="../../../Boolean.scala.html#27146" title="=&gt; Boolean">!</a><span class="delimiter">(</span><a href="#390708" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a> <a href="../input/Position.scala.html#389147" title="(that: scala.util.parsing.input.Position)Boolean">&lt;</a> <a href="#390711" title="Parsers.this.NoSuccess">v</a>.<a href="#390708" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#388600" title="=&gt; scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">lastNoSuccessVar</a>.<a href="../../DynamicVariable.scala.html#54415" title="(newval: Option[Parsers.this.NoSuccess])Unit">value</a> = <a href="../../../Option.scala.html#32449" title="(x: Parsers.this.NoSuccess)Some[Parsers.this.NoSuccess]">Some</a><span class="delimiter">(</span><a href="#388604" title="Parsers.this.NoSuccess" class="keyword">this</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="[U](f: Nothing =&gt; U)Parsers.this.NoSuccess" id="389271">map</a><span class="delimiter">[</span><a title="" id="389273">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Nothing =&gt; U" id="390715">f</a>: Nothing =&gt; U<span class="delimiter">)</span> = <a href="#388604" title="Parsers.this.NoSuccess" class="keyword">this</a>
+    <span class="keyword">def</span> <a title="[U](f: PartialFunction[Nothing,U], error: Nothing =&gt; String)Parsers.this.ParseResult[U]" id="389274">mapPartial</a><span class="delimiter">[</span><a title="" id="389276">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[Nothing,U]" id="390723">f</a>: <a href="../../../PartialFunction.scala.html#129" title="PartialFunction[Nothing,U]">PartialFunction</a><span class="delimiter">[</span>Nothing, U<span class="delimiter">]</span>, <a title="Nothing =&gt; String" id="390724">error</a>: Nothing =&gt; String<span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388604" title="Parsers.this.NoSuccess" class="keyword">this</a>
+
+    <span class="keyword">def</span> <a title="[U](f: Nothing =&gt; (Parsers.this.Input =&gt; Parsers.this.ParseResult[U]))Parsers.this.ParseResult[U]" id="389277">flatMapWithNext</a><span class="delimiter">[</span><a title="" id="389279">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Nothing =&gt; (Parsers.this.Input =&gt; Parsers.this.ParseResult[U])" id="390733">f</a>: Nothing =&gt; Input =&gt; ParseResult<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+      = <a href="#388604" title="Parsers.this.NoSuccess" class="keyword">this</a>
+
+    <span class="keyword">def</span> <a title="(p: Nothing =&gt; Boolean, error: Nothing =&gt; String, position: Parsers.this.Input)Parsers.this.ParseResult[Nothing]" id="389280">filterWithError</a><span class="delimiter">(</span><a title="Nothing =&gt; Boolean" id="390738">p</a>: Nothing =&gt; Boolean, <a title="Nothing =&gt; String" id="390739">error</a>: Nothing =&gt; String, <a title="Parsers.this.Input" id="390740">position</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[Nothing]">ParseResult</a><span class="delimiter">[</span>Nothing<span class="delimiter">]</span> = <a href="#388604" title="Parsers.this.NoSuccess" class="keyword">this</a>
+
+    <span class="keyword">def</span> <a title="=&gt; Nothing" id="389281">get</a>: <span title="Nothing">Nothing</span> = scala.sys.<a href="../../../sys/package.scala.html#22309" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="String(&quot;No result when parsing failed&quot;)" class="string">&quot;No result when parsing failed&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  /** An extractor so `NoSuccess(msg, next)` can be used in matches. */
+  <span class="keyword">object</span> <a title="Parsers.this.NoSuccess.type" id="388605">NoSuccess</a> <a href="#388606" title="Parsers.this.NoSuccess.type" class="delimiter">{</a>
+    <span class="keyword">def</span> <a title="[T](x: Parsers.this.ParseResult[T])Option[(String, Parsers.this.Input)]" id="390745">unapply</a><span class="delimiter">[</span><a title="" id="390747">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Parsers.this.ParseResult[T]" id="390749">x</a>: <a href="#388594" title="Parsers.this.ParseResult[T]">ParseResult</a><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="#390749" title="Parsers.this.ParseResult[T]">x</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Failure<a href="#1448527" title="Option[(String, Parsers.this.Input)]" id="1448529" class="delimiter">(</a><a href="#389395" title="String" id="390751">msg</a>, <a href="#389396" title="Parsers.this.Input" id="390752">next</a><span class="delimiter">)</span>   =&gt; <a href="../../../Option.scala.html#32449" title="(x: (String, Parsers.this.Input))Some[(String, Parsers.this.Input)]">Some</a><a href="#1448533" title="(x: Option[(String, Parsers.this.Input)])Option[(String, Parsers.this.Input)]" class="delimiter">(</a><a href="../../../Tuple2.scala.html#32170" title="(_1: String, _2: Parsers.this.Input)(String, Parsers.this.Input)" class="delimiter">(</a><a href="#390751" title="String">msg</a>, <a href="#390752" title="Parsers.this.Input">next</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> Error<a href="#1448527" title="Option[(String, Parsers.this.Input)]" id="1448531" class="delimiter">(</a><a href="#391227" title="String" id="390763">msg</a>, <a href="#391228" title="Parsers.this.Input" id="390764">next</a><span class="delimiter">)</span>     =&gt; <a href="../../../Option.scala.html#32449" title="(x: (String, Parsers.this.Input))Some[(String, Parsers.this.Input)]">Some</a><a href="#1448533" title="(x: Option[(String, Parsers.this.Input)])Option[(String, Parsers.this.Input)]" class="delimiter">(</a><a href="../../../Tuple2.scala.html#32170" title="(_1: String, _2: Parsers.this.Input)(String, Parsers.this.Input)" class="delimiter">(</a><a href="#390763" title="String">msg</a>, <a href="#390764" title="Parsers.this.Input">next</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> _                    =&gt; <a href="#1448533" title="(x: Option[(String, Parsers.this.Input)])Option[(String, Parsers.this.Input)]">None</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** The failure case of `ParseResult`: contains an error-message and the remaining input.
+   *  Parsing will back-track when a failure occurs.
+   *
+   *  @param msg    An error message string describing the failure.
+   *  @param next   The parser's unconsumed input at the point where the failure occurred.
+   */
+  case <span class="keyword">class</span> <a title="class Failure extends Parsers.this.NoSuccess with Product with Serializable" id="392729">Failure</a><a href="../../../Product.scala.html#186" title="Product" class="delimiter">(</a><span class="keyword">override</span> <span class="keyword">val</span> <a title="String" id="389395">msg</a>: <span title="String">String</span>, <span class="keyword">override</span> <span class="keyword">val</span> <a title="Parsers.this.Input" id="389396">next</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#388604" title="Parsers.this.NoSuccess">NoSuccess</a><span class="delimiter">(</span><a href="#389395" title="String">msg</a>, <a href="#389396" title="Parsers.this.Input">next</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    /** The toString method of a Failure yields an error message. */
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="389389">toString</a> = <span title="String(&quot;[&quot;)" class="string">&quot;[&quot;</span><span title="(x$1: Any)String">+</span><a href="#389396" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a><span title="(x$1: Any)String">+</span><span title="String(&quot;] failure: &quot;)" class="string">&quot;] failure: &quot;</span><span title="(x$1: Any)String">+</span><a href="#389395" title="=&gt; String">msg</a><span title="(x$1: Any)String">+</span><span title="String(&quot;\n\n&quot;)" class="string">&quot;\n\n&quot;</span><span title="(x$1: Any)String">+</span><a href="#389396" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a>.<a href="../input/Position.scala.html#389146" title="=&gt; String">longString</a>
+
+    <span class="keyword">def</span> <a title="[U](a: =&gt; Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]" id="389390">append</a><span class="delimiter">[</span><a title="" id="389392">U</a> &gt;: Nothing<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.ParseResult[U]" id="390900">a</a>: =&gt; ParseResult<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <span class="delimiter">{</span> <span class="keyword">val</span> <a title="Parsers.this.ParseResult[U]" id="390907">alt</a> = <a href="#390900" title="=&gt; Parsers.this.ParseResult[U]">a</a>; <a href="#390907" title="Parsers.this.ParseResult[U]">alt</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Success<a href="#1448539" title="Parsers.this.ParseResult[U]" id="1448543" class="delimiter">(</a><a href="#390587" title="U" id="1448540">_</a>, <a href="#390588" title="Parsers.this.Input" id="1448541">_</a><span class="delimiter">)</span> =&gt; <a href="#1448547" title="(x: Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]">alt</a>
+      <span class="keyword">case</span> <a href="#1448539" title="Parsers.this.ParseResult[U]" id="1448545">ns</a>: NoSuccess =&gt; <a href="#1448547" title="(x: Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]" class="keyword">if</a> <span class="delimiter">(</span><a href="#390907" title="Parsers.this.ParseResult[U]">alt</a>.<a href="#389260" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a> <a href="../input/Position.scala.html#389147" title="(that: scala.util.parsing.input.Position)Boolean">&lt;</a> <a href="#389396" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a><span class="delimiter">)</span> <a href="#392729" title="Parsers.this.Failure" class="keyword">this</a> <span class="keyword">else</span> <a href="#390907" title="Parsers.this.ParseResult[U]">alt</a>
+    <span class="delimiter">}</span><span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** The fatal failure case of ParseResult: contains an error-message and
+   *  the remaining input.
+   *  No back-tracking is done when a parser returns an `Error`.
+   *
+   *  @param msg    An error message string describing the error.
+   *  @param next   The parser's unconsumed input at the point where the error occurred.
+   */
+  case <span class="keyword">class</span> <a title="class Error extends Parsers.this.NoSuccess with Product with Serializable" id="392733">Error</a><a href="../../../Product.scala.html#186" title="Product" class="delimiter">(</a><span class="keyword">override</span> <span class="keyword">val</span> <a title="String" id="391227">msg</a>: <span title="String">String</span>, <span class="keyword">override</span> <span class="keyword">val</span> <a title="Parsers.this.Input" id="391228">next</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#388604" title="Parsers.this.NoSuccess">NoSuccess</a><span class="delimiter">(</span><a href="#391227" title="String">msg</a>, <a href="#391228" title="Parsers.this.Input">next</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    /** The toString method of an Error yields an error message. */
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="390215">toString</a> = <span title="String(&quot;[&quot;)" class="string">&quot;[&quot;</span><span title="(x$1: Any)String">+</span><a href="#391228" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a><span title="(x$1: Any)String">+</span><span title="String(&quot;] error: &quot;)" class="string">&quot;] error: &quot;</span><span title="(x$1: Any)String">+</span><a href="#391227" title="=&gt; String">msg</a><span title="(x$1: Any)String">+</span><span title="String(&quot;\n\n&quot;)" class="string">&quot;\n\n&quot;</span><span title="(x$1: Any)String">+</span><a href="#391228" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a>.<a href="../input/Position.scala.html#389146" title="=&gt; String">longString</a>
+    <span class="keyword">def</span> <a title="[U](a: =&gt; Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]" id="390216">append</a><span class="delimiter">[</span><a title="" id="390218">U</a> &gt;: Nothing<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.ParseResult[U]" id="390954">a</a>: =&gt; ParseResult<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[U]">ParseResult</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#392733" title="Parsers.this.Error" class="keyword">this</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[T](f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]" id="388613">Parser</a><span class="delimiter">[</span><a title="" id="388615">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Parsers.this.Input =&gt; Parsers.this.ParseResult[T]" id="389837">f</a>: Input =&gt; ParseResult<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+    = <a href="#390997" title="Parsers.this.Parser[T]" class="keyword">new</a> <a title="anonymous class $anon extends Parsers.this.Parser[T]" id="390997">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">{</span> <span class="keyword">def</span> <a title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" id="390999">apply</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="391002">in</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> = <a href="../../../Function1.scala.html#27963" title="(v1: Parsers.this.Input)Parsers.this.ParseResult[T]">f</a><span class="delimiter">(</span><a href="#391002" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  <span class="keyword">def</span> <a title="[T](f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T] with Parsers.this.OnceParser[T]" id="388616">OnceParser</a><span class="delimiter">[</span><a title="" id="388618">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Parsers.this.Input =&gt; Parsers.this.ParseResult[T]" id="391009">f</a>: Input =&gt; ParseResult<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#391010" title="Parsers extends Parsers.this.Parser[T] with Parsers.this.OnceParser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="keyword">with</span> OnceParser<span class="delimiter">[</span>T<span class="delimiter">]</span>
+    = <a href="#391017" title="Parsers.this.Parser[T] with Parsers.this.OnceParser[T]" class="keyword">new</a> <a title="anonymous class $anon extends Parsers.this.Parser[T] with Parsers.this.OnceParser[T]" id="391017">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="keyword">with</span> <a href="#388702" title="Parsers.this.OnceParser[T]">OnceParser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span> <span class="keyword">def</span> <a title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" id="391019">apply</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="391029">in</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> = <a href="../../../Function1.scala.html#27963" title="(v1: Parsers.this.Input)Parsers.this.ParseResult[T]">f</a><span class="delimiter">(</span><a href="#391029" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** The root class of parsers.
+   *  Parsers are functions from the Input type to ParseResult.
+   */
+  <span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class Parser[+T] extends Object with Parsers.this.Input =&gt; Parsers.this.ParseResult[T]" id="388619">Parser</a><span class="delimiter">[</span>+<a title="" id="388620">T</a><span class="delimiter">]</span> <a href="#388619" title="Parsers.this.Parser[T]" class="keyword">extends</a> <span class="delimiter">(</span>Input =&gt; ParseResult<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="String" id="388926">name</a>: <span title="String">String</span> = <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+    <span class="keyword">def</span> <a title="(n: String)Parser.this.type" id="388928">named</a><span class="delimiter">(</span><a title="String" id="391039">n</a>: <span title="String">String</span><span class="delimiter">)</span>: <span class="keyword">this</span>.<span class="keyword">type</span> = <span class="delimiter">{</span><a href="#388926" title="(x$1: String)Unit">name</a>=<a href="#391039" title="String">n</a>; <a href="#388619" title="Parser.this.type" class="keyword">this</a><span class="delimiter">}</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="388929">toString</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span title="String(&quot;Parser (&quot;)" class="string">&quot;Parser (&quot;</span><span title="(x$1: Any)String">+</span> <a href="#388926" title="=&gt; String">name</a> <span title="(x$1: Any)String">+</span><span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+
+    /** An unspecified method that defines the behaviour of this parser. */
+    <span class="keyword">def</span> <a title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" id="388930">apply</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="389234">in</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[T]">ParseResult</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="[U](f: T =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" id="388931">flatMap</a><span class="delimiter">[</span><a title="" id="388933">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; Parsers.this.Parser[U]" id="391041">f</a>: T =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+      = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[U])Parsers.this.Parser[U]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391047">in</a> =&gt; <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" class="keyword">this</a><span class="delimiter">(</span><a href="#391047" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <a href="#389248" title="(f: T =&gt; (Parsers.this.Input =&gt; Parsers.this.ParseResult[U]))Parsers.this.ParseResult[U]">flatMapWithNext</a><span class="delimiter">(</span><a href="#391041" title="T =&gt; Parsers.this.Parser[U]">f</a><span class="delimiter">)</span><span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="[U](f: T =&gt; U)Parsers.this.Parser[U]" id="388934">map</a><span class="delimiter">[</span><a title="" id="388936">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; U" id="391061">f</a>: T =&gt; U<span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> //= flatMap{x =&gt; success(f(x))}
+      = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[U])Parsers.this.Parser[U]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391067">in</a> =&gt; <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" class="keyword">this</a><span class="delimiter">(</span><a href="#391067" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <a href="#389242" title="(f: T =&gt; U)Parsers.this.ParseResult[U]">map</a><span class="delimiter">(</span><a href="#391061" title="T =&gt; U">f</a><span class="delimiter">)</span><span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(p: T =&gt; Boolean)Parsers.this.Parser[T]" id="388937">filter</a><span class="delimiter">(</span><a title="T =&gt; Boolean" id="391081">p</a>: T =&gt; Boolean<span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+      = <a href="#388938" title="(p: T =&gt; Boolean)Parsers.this.Parser[T]">withFilter</a><span class="delimiter">(</span><a href="#391081" title="T =&gt; Boolean">p</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="(p: T =&gt; Boolean)Parsers.this.Parser[T]" id="388938">withFilter</a><span class="delimiter">(</span><a title="T =&gt; Boolean" id="391083">p</a>: T =&gt; Boolean<span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+      = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391088">in</a> =&gt; <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" class="keyword">this</a><span class="delimiter">(</span><a href="#391088" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <a href="#389251" title="(p: T =&gt; Boolean, error: T =&gt; String, position: Parsers.this.Input)Parsers.this.ParseResult[T]">filterWithError</a><span class="delimiter">(</span><a href="#391083" title="T =&gt; Boolean">p</a>, <span title="String(&quot;Input doesn\'t match filter: &quot;)" class="string">&quot;Input doesn't match filter: &quot;</span><span title="(x$1: Any)String">+</span><a href="#391101" title="T">_</a>, <a href="#391088" title="Parsers.this.Input">in</a><span class="delimiter">)</span><span class="delimiter">}</span>
+
+    // no filter yet, dealing with zero is tricky!
+
+    @migration<span class="delimiter">(</span><span class="string">&quot;The call-by-name argument is evaluated at most once per constructed Parser object, instead of on every need that arises during parsing.&quot;</span>, <span class="string">&quot;2.9.0&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="[U &gt;: T](p0: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" id="388939">append</a><span class="delimiter">[</span><a title=" &gt;: T" id="388941">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391103">p0</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <span class="delimiter">{</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Parsers.this.Parser[U]" id="391107">p</a> = <a href="#391103" title="=&gt; Parsers.this.Parser[U]">p0</a> // lazy argument
+      <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[U])Parsers.this.Parser[U]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391111">in</a> =&gt; <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" class="keyword">this</a><span class="delimiter">(</span><a href="#391111" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <a href="#389252" title="(a: =&gt; Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]">append</a> <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[U]">p</a><span class="delimiter">(</span><a href="#391111" title="Parsers.this.Input">in</a><span class="delimiter">)</span><span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    // the operator formerly known as +++, ++, &amp;, but now, behold the venerable ~
+    // it's short, light (looks like whitespace), has few overloaded meaning (thanks to the recent change from ~ to unary_~)
+    // and we love it! (or do we like `,` better?)
+
+    /** A parser combinator for sequential composition.
+     *
+     * `p ~ q` succeeds if `p` succeeds and `q` succeeds on the input left over by `p`.
+     *
+     * @param q a parser that will be executed after `p` (this parser)
+     *          succeeds -- evaluated at most once, and only when necessary.
+     * @return a `Parser` that -- on success -- returns a `~` (like a `Pair`,
+     *         but easier to pattern match on) that contains the result of `p` and
+     *         that of `q`. The resulting parser fails if either `p` or `q` fails.
+     */
+    @migration<span class="delimiter">(</span><span class="string">&quot;The call-by-name argument is evaluated at most once per constructed Parser object, instead of on every need that arises during parsing.&quot;</span>, <span class="string">&quot;2.9.0&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="[U](q: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[Parsers.this.~[T,U]]" id="388942">~</a> <span class="delimiter">[</span><a title="" id="388944">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391020">q</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Parsers.this.~[T,U]]">Parser</a><span class="delimiter">[</span>~<span class="delimiter">[</span>T, U<span class="delimiter">]</span><span class="delimiter">]</span> = <span class="delimiter">{</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Parsers.this.Parser[U]" id="391134">p</a> = <a href="#391020" title="=&gt; Parsers.this.Parser[U]">q</a> // lazy argument
+      <span class="delimiter">(</span><span class="keyword">for</span><span class="delimiter">(</span><a title="T" id="391138">a</a> &lt;- <a href="#388931" title="(f: T =&gt; Parsers.this.Parser[Parsers.this.~[T,U]])Parsers.this.Parser[Parsers.this.~[T,U]]" class="keyword">this</a>; <a title="U" id="391143">b</a> &lt;- <a href="#388934" title="(f: U =&gt; Parsers.this.~[T,U])Parsers.this.Parser[Parsers.this.~[T,U]]">p</a><span class="delimiter">)</span> <span class="keyword">yield</span> <span title="Parsers.this.~[T,U]" class="keyword">new</span> <a href="#392744" title="Parsers.this.~[T,U]">~</a><span class="delimiter">(</span><a href="#391138" title="T">a</a>,<a href="#391143" title="U">b</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[Parsers.this.~[T,U]]">named</a><span class="delimiter">(</span><span title="String(&quot;~&quot;)" class="string">&quot;~&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    /** A parser combinator for sequential composition which keeps only the right result.
+     *
+     * `p ~&gt; q` succeeds if `p` succeeds and `q` succeeds on the input left over by `p`.
+     *
+     * @param q a parser that will be executed after `p` (this parser)
+     *        succeeds -- evaluated at most once, and only when necessary.
+     * @return a `Parser` that -- on success -- returns the result of `q`.
+     */
+    @migration<span class="delimiter">(</span><span class="string">&quot;The call-by-name argument is evaluated at most once per constructed Parser object, instead of on every need that arises during parsing.&quot;</span>, <span class="string">&quot;2.9.0&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="[U](q: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" id="388945">~&gt;</a> <span class="delimiter">[</span><a title="" id="388947">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391155">q</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <span class="delimiter">{</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Parsers.this.Parser[U]" id="391159">p</a> = <a href="#391155" title="=&gt; Parsers.this.Parser[U]">q</a> // lazy argument
+      <span class="delimiter">(</span><span class="keyword">for</span><span class="delimiter">(</span><a title="T" id="391163">a</a> &lt;- <a href="#388931" title="(f: T =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" class="keyword">this</a>; <a title="U" id="391168">b</a> &lt;- <a href="#388934" title="(f: U =&gt; U)Parsers.this.Parser[U]">p</a><span class="delimiter">)</span> <span class="keyword">yield</span> <a href="#391168" title="U">b</a><span class="delimiter">)</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[U]">named</a><span class="delimiter">(</span><span title="String(&quot;~&gt;&quot;)" class="string">&quot;~&gt;&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    /** A parser combinator for sequential composition which keeps only the left result.
+     *
+     *  `p &lt;~ q` succeeds if `p` succeeds and `q` succeeds on the input
+     *           left over by `p`.
+     *
+     * @note &lt;~ has lower operator precedence than ~ or ~&gt;.
+     *
+     * @param q a parser that will be executed after `p` (this parser) succeeds -- evaluated at most once, and only when necessary
+     * @return a `Parser` that -- on success -- returns the result of `p`.
+     */
+    @migration<span class="delimiter">(</span><span class="string">&quot;The call-by-name argument is evaluated at most once per constructed Parser object, instead of on every need that arises during parsing.&quot;</span>, <span class="string">&quot;2.9.0&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="[U](q: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[T]" id="388948">&lt;~</a> <span class="delimiter">[</span><a title="" id="388950">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391174">q</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Parsers.this.Parser[U]" id="391178">p</a> = <a href="#391174" title="=&gt; Parsers.this.Parser[U]">q</a> // lazy argument
+      <span class="delimiter">(</span><span class="keyword">for</span><span class="delimiter">(</span><a title="T" id="391182">a</a> &lt;- <a href="#388931" title="(f: T =&gt; Parsers.this.Parser[T])Parsers.this.Parser[T]" class="keyword">this</a>; <a title="U" id="391187">b</a> &lt;- <a href="#388934" title="(f: U =&gt; T)Parsers.this.Parser[T]">p</a><span class="delimiter">)</span> <span class="keyword">yield</span> <a href="#391182" title="T">a</a><span class="delimiter">)</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[T]">named</a><span class="delimiter">(</span><span title="String(&quot;&lt;~&quot;)" class="string">&quot;&lt;~&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+     /* not really useful: V cannot be inferred because Parser is covariant in first type parameter (V is always trivially Nothing)
+    def ~~ [U, V](q: =&gt; Parser[U])(implicit combine: (T, U) =&gt; V): Parser[V] = new Parser[V] {
+      def apply(in: Input) = seq(Parser.this, q)((x, y) =&gt; combine(x,y))(in)
+    }  */
+
+    /** A parser combinator for non-back-tracking sequential composition.
+     *
+     *  `p ~! q` succeeds if `p` succeeds and `q` succeeds on the input left over by `p`.
+     *   In case of failure, no back-tracking is performed (in an earlier parser produced by the `|` combinator).
+     *
+     * @param p a parser that will be executed after `p` (this parser) succeeds
+     * @return a `Parser` that -- on success -- returns a `~` (like a Pair, but easier to pattern match on)
+     *         that contains the result of `p` and that of `q`.
+     *         The resulting parser fails if either `p` or `q` fails, this failure is fatal.
+     */
+    <span class="keyword">def</span> <a title="[U](p: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[Parsers.this.~[T,U]]" id="388951">~!</a> <span class="delimiter">[</span><a title="" id="388953">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391193">p</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Parsers.this.~[T,U]]">Parser</a><span class="delimiter">[</span>~<span class="delimiter">[</span>T, U<span class="delimiter">]</span><span class="delimiter">]</span>
+      = <a href="#388616" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[Parsers.this.~[T,U]])Parsers.this.Parser[Parsers.this.~[T,U]] with Parsers.this.OnceParser[Parsers.this.~[T,U]]">OnceParser</a><span class="delimiter">{</span> <span class="delimiter">(</span><span class="keyword">for</span><span class="delimiter">(</span><a title="T" id="391203">a</a> &lt;- <a href="#388931" title="(f: T =&gt; Parsers.this.Parser[Parsers.this.~[T,U]])Parsers.this.Parser[Parsers.this.~[T,U]]" class="keyword">this</a>; <a title="U" id="391310">b</a> &lt;- <a href="#388621" title="(p: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]">commit</a><a href="#388934" title="(f: U =&gt; Parsers.this.~[T,U])Parsers.this.Parser[Parsers.this.~[T,U]]" class="delimiter">(</a><a href="#391193" title="=&gt; Parsers.this.Parser[U]">p</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">yield</span> <span title="Parsers.this.~[T,U]" class="keyword">new</span> <a href="#392744" title="Parsers.this.~[T,U]">~</a><span class="delimiter">(</span><a href="#391203" title="T">a</a>,<a href="#391310" title="U">b</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[Parsers.this.~[T,U]]">named</a><span class="delimiter">(</span><span title="String(&quot;~!&quot;)" class="string">&quot;~!&quot;</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+    /** A parser combinator for alternative composition.
+     *
+     *  `p | q` succeeds if `p` succeeds or `q` succeeds.
+     *   Note that `q` is only tried if `p`s failure is non-fatal (i.e., back-tracking is allowed).
+     *
+     * @param q a parser that will be executed if `p` (this parser) fails (and allows back-tracking)
+     * @return a `Parser` that returns the result of the first parser to succeed (out of `p` and `q`)
+     *         The resulting parser succeeds if (and only if)
+     *         - `p` succeeds, ''or''
+     *         - if `p` fails allowing back-tracking and `q` succeeds.
+     */
+    <span class="keyword">def</span> <a title="[U &gt;: T](q: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" id="388954">|</a> <span class="delimiter">[</span><a title=" &gt;: T" id="388956">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391325">q</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388939" title="(p0: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]">append</a><span class="delimiter">(</span><a href="#391325" title="=&gt; Parsers.this.Parser[U]">q</a><span class="delimiter">)</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[U]">named</a><span class="delimiter">(</span><span title="String(&quot;|&quot;)" class="string">&quot;|&quot;</span><span class="delimiter">)</span>
+
+    // TODO
+    /** A parser combinator for alternative with longest match composition.
+     *
+     *  `p ||| q` succeeds if `p` succeeds or `q` succeeds.
+     *  If `p` and `q` both succeed, the parser that consumed the most characters accepts.
+     *
+     * @param q0 a parser that accepts if p consumes less characters. -- evaluated at most once, and only when necessary
+     * @return a `Parser` that returns the result of the parser consuming the most characters (out of `p` and `q`).
+     */
+    @migration<span class="delimiter">(</span><span class="string">&quot;The call-by-name argument is evaluated at most once per constructed Parser object, instead of on every need that arises during parsing.&quot;</span>, <span class="string">&quot;2.9.0&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="[U &gt;: T](q0: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" id="388957">|||</a> <span class="delimiter">[</span><a title=" &gt;: T" id="388959">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391334">q0</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#391337" title="Parsers.this.Parser[U]{}" class="keyword">new</a> <a title="anonymous class $anon extends Parsers.this.Parser[U]" id="391337">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> <span class="delimiter">{</span>
+      <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Parsers.this.Parser[U]" id="391340">q</a> = <a href="#391334" title="=&gt; Parsers.this.Parser[U]">q0</a> // lazy argument
+      <span class="keyword">def</span> <a title="(in: Parsers.this.Input)Parsers.this.ParseResult[U]" id="391341">apply</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="391345">in</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> = <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="Parsers.this.ParseResult[T]" id="391350">res1</a> = <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">Parser</a>.<span class="keyword">this</span><span class="delimiter">(</span><a href="#391345" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="Parsers.this.ParseResult[U]" id="391351">res2</a> = <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[U]">q</a><span class="delimiter">(</span><a href="#391345" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+
+        <a href="../../../Tuple2.scala.html#32170" title="(_1: Parsers.this.ParseResult[T], _2: Parsers.this.ParseResult[U])(Parsers.this.ParseResult[T], Parsers.this.ParseResult[U])" class="delimiter">(</a><a href="#391350" title="Parsers.this.ParseResult[T]">res1</a>, <a href="#391351" title="Parsers.this.ParseResult[U]">res2</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <span class="delimiter">(</span><a href="../../../Tuple2.scala.html#29956" title="Parsers.this.ParseResult[T]" id="391376">s1</a> @ Success<a href="#391376" title="Parsers.this.ParseResult[U]" id="1448593" class="delimiter">(</a><a href="#390587" title="T" id="1448591">_</a>, <a href="#390588" title="Parsers.this.Input" id="391379">next1</a><span class="delimiter">)</span>, <a href="../../../Tuple2.scala.html#29958" title="Parsers.this.ParseResult[U]" id="391380">s2</a> @ Success<a href="#391380" title="Parsers.this.ParseResult[U]" id="1448596" class="delimiter">(</a><a href="#390587" title="U" id="1448594">_</a>, <a href="#390588" title="Parsers.this.Input" id="391384">next2</a><span class="delimiter">)</span><span class="delimiter">)</span> =&gt; <a href="#1448618" title="(x: Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]" class="keyword">if</a> <span class="delimiter">(</span><a href="#391384" title="Parsers.this.Input">next2</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a> <a href="../input/Position.scala.html#389147" title="(that: scala.util.parsing.input.Position)Boolean">&lt;</a> <a href="#391379" title="Parsers.this.Input">next1</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a><span class="delimiter">)</span> s1 <span class="keyword">else</span> s2
+          <span class="keyword">case</span> <span class="delimiter">(</span><a href="../../../Tuple2.scala.html#29956" title="Parsers.this.ParseResult[T]" id="391388">s1</a> @ Success<a href="#391388" title="Parsers.this.ParseResult[U]" id="1448601" class="delimiter">(</a><a href="#390587" title="T" id="1448598">_</a>, <a href="#390588" title="Parsers.this.Input" id="1448599">_</a><span class="delimiter">)</span>, <a href="../../../Tuple2.scala.html#29958" title="Parsers.this.ParseResult[U]" id="1448597">_</a><span class="delimiter">)</span> =&gt; <a href="#1448618" title="(x: Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]">s1</a>
+          <span class="keyword">case</span> <span class="delimiter">(</span><a href="../../../Tuple2.scala.html#29956" title="Parsers.this.ParseResult[T]" id="1448602">_</a>, <a href="../../../Tuple2.scala.html#29958" title="Parsers.this.ParseResult[U]" id="391394">s2</a> @ Success<a href="#391394" title="Parsers.this.ParseResult[U]" id="1448606" class="delimiter">(</a><a href="#390587" title="U" id="1448603">_</a>, <a href="#390588" title="Parsers.this.Input" id="1448604">_</a><span class="delimiter">)</span><span class="delimiter">)</span> =&gt; <a href="#1448618" title="(x: Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]">s2</a>
+          <span class="keyword">case</span> <span class="delimiter">(</span><a href="../../../Tuple2.scala.html#29956" title="Parsers.this.ParseResult[T]" id="391401">e1</a> @ Error<a href="#391401" title="Parsers.this.ParseResult[U]" id="1448611" class="delimiter">(</a><a href="#391227" title="String" id="1448608">_</a>, <a href="#391228" title="Parsers.this.Input" id="1448609">_</a><span class="delimiter">)</span>, <a href="../../../Tuple2.scala.html#29958" title="Parsers.this.ParseResult[U]" id="1448607">_</a><span class="delimiter">)</span> =&gt; <a href="#1448618" title="(x: Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]">e1</a>
+          <span class="keyword">case</span> <span class="delimiter">(</span><a href="../../../Tuple2.scala.html#29956" title="Parsers.this.ParseResult[T]" id="391405">f1</a> @ Failure<a href="#391405" title="Parsers.this.ParseResult[U]" id="1448614" class="delimiter">(</a><a href="#389395" title="String" id="1448612">_</a>, <a href="#389396" title="Parsers.this.Input" id="391406">next1</a><span class="delimiter">)</span>, <a href="../../../Tuple2.scala.html#29958" title="Parsers.this.ParseResult[U]" id="391407">ns2</a> @ <a href="#390745" title="Option[(String, Parsers.this.Input)]" id="1448626">NoSuccess</a><span class="delimiter">(</span><a href="../../../Tuple2.scala.html#29956" title="String" id="1448615">_</a>, <a href="../../../Tuple2.scala.html#29958" title="Parsers.this.Input" id="391414">next2</a><span class="delimiter">)</span><span class="delimiter">)</span> =&gt; <a href="#1448618" title="(x: Parsers.this.ParseResult[U])Parsers.this.ParseResult[U]" class="keyword">if</a> <span class="delimiter">(</span><a href="#391414" title="Parsers.this.Input">next2</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a> <a href="../input/Position.scala.html#389147" title="(that: scala.util.parsing.input.Position)Boolean">&lt;</a> <a href="#391406" title="Parsers.this.Input">next1</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a><span class="delimiter">)</span> f1 <span class="keyword">else</span> <a href="#391407" title="Parsers.this.ParseResult[U]">ns2</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="391342">toString</a> = <span title="String(&quot;|||&quot;)" class="string">&quot;|||&quot;</span>
+    <span class="delimiter">}</span>
+
+    /** A parser combinator for function application.
+     *
+     *  `p ^^ f` succeeds if `p` succeeds; it returns `f` applied to the result of `p`.
+     *
+     * @param f a function that will be applied to this parser's result (see `map` in `ParseResult`).
+     * @return a parser that has the same behaviour as the current parser, but whose result is
+     *         transformed by `f`.
+     */
+    <span class="keyword">def</span> <a title="[U](f: T =&gt; U)Parsers.this.Parser[U]" id="388960">^^</a> <span class="delimiter">[</span><a title="" id="388962">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; U" id="391419">f</a>: T =&gt; U<span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388934" title="(f: T =&gt; U)Parsers.this.Parser[U]">map</a><span class="delimiter">(</span><a href="#391419" title="T =&gt; U">f</a><span class="delimiter">)</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[U]">named</a><span class="delimiter">(</span><a href="#388929" title="()String">toString</a><span title="(x$1: Any)String">+</span><span title="String(&quot;^^&quot;)" class="string">&quot;^^&quot;</span><span class="delimiter">)</span>
+
+    /** A parser combinator that changes a successful result into the specified value.
+     *
+     *  `p ^^^ v` succeeds if `p` succeeds; discards its result, and returns `v` instead.
+     *
+     * @param v The new result for the parser, evaluated at most once (if `p` succeeds), not evaluated at all if `p` fails.
+     * @return a parser that has the same behaviour as the current parser, but whose successful result is `v`
+     */
+    @migration<span class="delimiter">(</span><span class="string">&quot;The call-by-name argument is evaluated at most once per constructed Parser object, instead of on every need that arises during parsing.&quot;</span>, <span class="string">&quot;2.9.0&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">def</span> <a title="[U](v: =&gt; U)Parsers.this.Parser[U]" id="388963">^^^</a> <span class="delimiter">[</span><a title="" id="388965">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; U" id="391428">v</a>: =&gt; U<span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> =  <a href="#391431" title="Parsers.this.Parser[U]{lazy val v0: U}" class="keyword">new</a> <a title="anonymous class $anon extends Parsers.this.Parser[U]" id="391431">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> <span class="delimiter">{</span>
+      <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="U" id="391434">v0</a> = <a href="#391428" title="=&gt; U">v</a> // lazy argument
+      <span class="keyword">def</span> <a title="(in: Parsers.this.Input)Parsers.this.ParseResult[U]" id="391435">apply</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="391436">in</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> = <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">Parser</a>.<span class="keyword">this</span><span class="delimiter">(</span><a href="#391436" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <a href="#389242" title="(f: T =&gt; U)Parsers.this.ParseResult[U]">map</a> <span class="delimiter">(</span><a title="T" id="391453">x</a> =&gt; <a href="#391433" title="=&gt; U">v0</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[U]{lazy val v0: U}">named</a><span class="delimiter">(</span><a href="#388929" title="()String">toString</a><span title="(x$1: Any)String">+</span><span title="String(&quot;^^^&quot;)" class="string">&quot;^^^&quot;</span><span class="delimiter">)</span>
+
+    /** A parser combinator for partial function application.
+     *
+     *  `p ^? (f, error)` succeeds if `p` succeeds AND `f` is defined at the result of `p`;
+     *  in that case, it returns `f` applied to the result of `p`. If `f` is not applicable,
+     *  error(the result of `p`) should explain why.
+     *
+     * @param f a partial function that will be applied to this parser's result
+     *          (see `mapPartial` in `ParseResult`).
+     * @param error a function that takes the same argument as `f` and produces an error message
+     *        to explain why `f` wasn't applicable
+     * @return a parser that succeeds if the current parser succeeds &lt;i&gt;and&lt;/i&gt; `f` is applicable
+     *         to the result. If so, the result will be transformed by `f`.
+     */
+    <span class="keyword">def</span> <a title="[U](f: PartialFunction[T,U], error: T =&gt; String)Parsers.this.Parser[U]" id="388966">^?</a> <span class="delimiter">[</span><a title="" id="388968">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[T,U]" id="391459">f</a>: <a href="../../../PartialFunction.scala.html#129" title="PartialFunction[T,U]">PartialFunction</a><span class="delimiter">[</span>T, U<span class="delimiter">]</span>, <a title="T =&gt; String" id="391460">error</a>: T =&gt; String<span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[U])Parsers.this.Parser[U]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391467">in</a> =&gt;
+      <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" class="keyword">this</a><span class="delimiter">(</span><a href="#391467" title="Parsers.this.Input">in</a><span class="delimiter">)</span>.<a href="#389245" title="(f: PartialFunction[T,U], error: T =&gt; String)Parsers.this.ParseResult[U]">mapPartial</a><span class="delimiter">(</span><a href="#391459" title="PartialFunction[T,U]">f</a>, <a href="#391460" title="T =&gt; String">error</a><span class="delimiter">)</span><span class="delimiter">}</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[U]">named</a><span class="delimiter">(</span><a href="#388929" title="()String">toString</a><span title="(x$1: Any)String">+</span><span title="String(&quot;^?&quot;)" class="string">&quot;^?&quot;</span><span class="delimiter">)</span>
+
+    /** A parser combinator for partial function application.
+     *
+     *  `p ^? f` succeeds if `p` succeeds AND `f` is defined at the result of `p`;
+     *  in that case, it returns `f` applied to the result of `p`.
+     *
+     * @param f a partial function that will be applied to this parser's result
+     *          (see `mapPartial` in `ParseResult`).
+     * @return a parser that succeeds if the current parser succeeds &lt;i&gt;and&lt;/i&gt; `f` is applicable
+     *         to the result. If so, the result will be transformed by `f`.
+     */
+    <span class="keyword">def</span> <a title="[U](f: PartialFunction[T,U])Parsers.this.Parser[U]" id="388969">^?</a> <span class="delimiter">[</span><a title="" id="388971">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[T,U]" id="391487">f</a>: <a href="../../../PartialFunction.scala.html#129" title="PartialFunction[T,U]">PartialFunction</a><span class="delimiter">[</span>T, U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388966" title="(f: PartialFunction[T,U], error: T =&gt; String)Parsers.this.Parser[U]">^?</a><span class="delimiter">(</span><a href="#391487" title="PartialFunction[T,U]">f</a>, <a title="T" id="391503">r</a> =&gt; <span title="String(&quot;Constructor function not defined at &quot;)" class="string">&quot;Constructor function not defined at &quot;</span><span title="(x$1: Any)String">+</span><a href="#391503" title="T">r</a><span class="delimiter">)</span>
+
+    /** A parser combinator that parameterizes a subsequent parser with the
+     *  result of this one.
+     *
+     *  Use this combinator when a parser depends on the result of a previous
+     *  parser. `p` should be a function that takes the result from the first
+     *  parser and returns the second parser.
+     *
+     *  `p into fq` (with `fq` typically `{x =&gt; q}`) first applies `p`, and
+     *  then, if `p` successfully returned result `r`, applies `fq(r)` to the
+     *  rest of the input.
+     *
+     *  ''From: G. Hutton. Higher-order functions for parsing. J. Funct. Program., 2(3):323--343, 1992.''
+     *
+     *  @example {{{
+     *  def perlRE = &quot;m&quot; ~&gt; (&quot;.&quot;.r into (separator =&gt; &quot;&quot;&quot;[^%s]*&quot;&quot;&quot;.format(separator).r &lt;~ separator))
+     *  }}}
+     *
+     *  @param fq a function that, given the result from this parser, returns
+     *         the second parser to be applied
+     *  @return a parser that succeeds if this parser succeeds (with result `x`)
+     *          and if then `fq(x)` succeeds
+     */
+    <span class="keyword">def</span> <a title="[U](fq: T =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" id="388972">into</a><span class="delimiter">[</span><a title="" id="388974">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; Parsers.this.Parser[U]" id="391506">fq</a>: T =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388931" title="(f: T =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]">flatMap</a><span class="delimiter">(</span><a href="#391506" title="T =&gt; Parsers.this.Parser[U]">fq</a><span class="delimiter">)</span>
+
+    // shortcuts for combinators:
+
+    /** Returns `into(fq)`. */
+    <span class="keyword">def</span> <a title="[U](fq: T =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]" id="388975">&gt;&gt;</a><span class="delimiter">[</span><a title="" id="388977">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T =&gt; Parsers.this.Parser[U]" id="391512">fq</a>: T =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>=<a href="#388972" title="(fq: T =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]">into</a><span class="delimiter">(</span><a href="#391512" title="T =&gt; Parsers.this.Parser[U]">fq</a><span class="delimiter">)</span>
+
+    /** Returns a parser that repeatedly parses what this parser parses.
+     *
+     *  @return rep(this)
+     */
+    <span class="keyword">def</span> <a title="=&gt; Parsers.this.Parser[List[T]]" id="388978">*</a> = <a href="#388648" title="(p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]">rep</a><span class="delimiter">(</span><a href="#388619" title="Parsers.this.Parser[T]" class="keyword">this</a><span class="delimiter">)</span>
+
+    /** Returns a parser that repeatedly parses what this parser parses,
+     *  interleaved with the `sep` parser. The `sep` parser specifies how
+     *  the results parsed by this parser should be combined.
+     *
+     *  @return chainl1(this, sep)
+     */
+    <span class="keyword">def</span> <a title="[U &gt;: T](sep: =&gt; Parsers.this.Parser[(U, U) =&gt; U])Parsers.this.Parser[U]" id="388979">*</a><span class="delimiter">[</span><a title=" &gt;: T" id="388981">U</a> &gt;: T<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[(U, U) =&gt; U]" id="391527">sep</a>: =&gt; Parser<span class="delimiter">[</span><span class="delimiter">(</span>U, U<span class="delimiter">)</span> =&gt; U<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="#388666" title="(p: =&gt; Parsers.this.Parser[U], q: =&gt; Parsers.this.Parser[(U, U) =&gt; U])Parsers.this.Parser[U]">chainl1</a><span class="delimiter">(</span><a href="#388619" title="Parsers.this.Parser[T]" class="keyword">this</a>, <a href="#391527" title="=&gt; Parsers.this.Parser[(U, U) =&gt; U]">sep</a><span class="delimiter">)</span>
+
+    // TODO: improve precedence? a ~ b*(&quot;,&quot;) = a ~ (b*(&quot;,&quot;))  should be true
+
+    /** Returns a parser that repeatedly (at least once) parses what this parser parses.
+     *
+     *  @return rep1(this)
+     */
+    <span class="keyword">def</span> <a title="=&gt; Parsers.this.Parser[List[T]]" id="388982">+</a> = <a href="#388654" title="(p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]">rep1</a><span class="delimiter">(</span><a href="#388619" title="Parsers.this.Parser[T]" class="keyword">this</a><span class="delimiter">)</span>
+
+    /** Returns a parser that optionally parses what this parser parses.
+     *
+     *  @return opt(this)
+     */
+    <span class="keyword">def</span> <a title="=&gt; Parsers.this.Parser[Option[T]]" id="388983">?</a> = <a href="#388679" title="(p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[Option[T]]">opt</a><span class="delimiter">(</span><a href="#388619" title="Parsers.this.Parser[T]" class="keyword">this</a><span class="delimiter">)</span>
+
+    /** Changes the failure message produced by a parser.
+     *
+     *  This doesn't change the behavior of a parser on neither
+     *  success nor error, just on failure. The semantics are
+     *  slightly different than those obtained by doing `| failure(msg)`,
+     *  in that the message produced by this method will always
+     *  replace the message produced, which is not guaranteed
+     *  by that idiom.
+     *
+     *  For example, parser `p` below will always produce the
+     *  designated failure message, while `q` will not produce
+     *  it if `sign` is parsed but `number` is not.
+     *
+     *  {{{
+     *  def p = sign.? ~ number withFailureMessage  &quot;Number expected!&quot;
+     *  def q = sign.? ~ number | failure(&quot;Number expected!&quot;)
+     *  }}}
+     *
+     *  @param msg The message that will replace the default failure message.
+     *  @return    A parser with the same properties and different failure message.
+     */
+    <span class="keyword">def</span> <a title="(msg: String)Parsers.this.Parser[T]" id="388984">withFailureMessage</a><span class="delimiter">(</span><a title="String" id="391587">msg</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391593">in</a> =&gt;
+      <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" class="keyword">this</a><span title="Parsers.this.ParseResult[T]" class="delimiter">(</span><a href="#391593" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> Failure<a href="#1448629" title="Parsers.this.ParseResult[T]" id="1448632" class="delimiter">(</a><a href="#389395" title="String" id="1448630">_</a>, <a href="#389396" title="Parsers.this.Input" id="391602">next</a><span class="delimiter">)</span> =&gt; <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><a href="#1448634" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]" class="delimiter">(</a><a href="#391587" title="String">msg</a>, <a href="#391602" title="Parsers.this.Input">next</a><span class="delimiter">)</span>
+        <span class="keyword">case</span> other            =&gt; <a href="#1448634" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]">other</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /** Changes the error message produced by a parser.
+     *
+     *  This doesn't change the behavior of a parser on neither
+     *  success nor failure, just on error. The semantics are
+     *  slightly different than those obtained by doing `| error(msg)`,
+     *  in that the message produced by this method will always
+     *  replace the message produced, which is not guaranteed
+     *  by that idiom.
+     *
+     *  For example, parser `p` below will always produce the
+     *  designated error message, while `q` will not produce
+     *  it if `sign` is parsed but `number` is not.
+     *
+     *  {{{
+     *  def p = sign.? ~ number withErrorMessage  &quot;Number expected!&quot;
+     *  def q = sign.? ~ number | error(&quot;Number expected!&quot;)
+     *  }}}
+     *
+     *  @param msg The message that will replace the default error message.
+     *  @return    A parser with the same properties and different error message.
+     */
+    <span class="keyword">def</span> <a title="(msg: String)Parsers.this.Parser[T]" id="388985">withErrorMessage</a><span class="delimiter">(</span><a title="String" id="391607">msg</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391613">in</a> =&gt;
+      <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" class="keyword">this</a><span title="Parsers.this.ParseResult[T]" class="delimiter">(</span><a href="#391613" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> Error<a href="#1448639" title="Parsers.this.ParseResult[T]" id="1448642" class="delimiter">(</a><a href="#391227" title="String" id="1448640">_</a>, <a href="#391228" title="Parsers.this.Input" id="391622">next</a><span class="delimiter">)</span> =&gt; <a href="#392733" title="(msg: String, next: Parsers.this.Input)Parsers.this.Error">Error</a><a href="#1448644" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]" class="delimiter">(</a><a href="#391607" title="String">msg</a>, <a href="#391622" title="Parsers.this.Input">next</a><span class="delimiter">)</span>
+        <span class="keyword">case</span> other          =&gt; <a href="#1448644" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]">other</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Wrap a parser so that its failures become errors (the `|` combinator
+   *  will give up as soon as it encounters an error, on failure it simply
+   *  tries the next alternative).
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[T]" id="388621">commit</a><span class="delimiter">[</span><a title="" id="388623">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="391204">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391208">in</a> =&gt;
+    <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p</a><a href="#1448653" title="Parsers.this.Success[T]" class="delimiter">(</a><a href="#391208" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span><span class="delimiter">{</span>
+      <span class="keyword">case</span> s @ Success<a href="#1448649" title="Parsers extends Product with Serializable with Parsers.this.ParseResult[T]" id="1448653" class="delimiter">(</a><a href="#390587" title="T" id="1448650">_</a>, <a href="#390588" title="Parsers.this.Input" id="1448651">_</a><span class="delimiter">)</span> =&gt; <a href="#1448661" title="(x: Product with Serializable with Parsers.this.ParseResult[T])Product with Serializable with Parsers.this.ParseResult[T]">s</a>
+      <span class="keyword">case</span> e @ Error<a href="#1448649" title="Parsers extends Product with Serializable with Parsers.this.ParseResult[T]" id="1448657" class="delimiter">(</a><a href="#391227" title="String" id="1448654">_</a>, <a href="#391228" title="Parsers.this.Input" id="1448655">_</a><span class="delimiter">)</span> =&gt; <a href="#1448661" title="(x: Product with Serializable with Parsers.this.ParseResult[T])Product with Serializable with Parsers.this.ParseResult[T]">e</a>
+      <span class="keyword">case</span> f @ Failure<a href="#1448649" title="Parsers extends Product with Serializable with Parsers.this.ParseResult[T]" id="1448659" class="delimiter">(</a><a href="#389395" title="String" id="391225">msg</a>, <a href="#389396" title="Parsers.this.Input" id="391226">next</a><span class="delimiter">)</span> =&gt; <a href="#392733" title="(msg: String, next: Parsers.this.Input)Parsers.this.Error">Error</a><a href="#1448661" title="(x: Product with Serializable with Parsers.this.ParseResult[T])Product with Serializable with Parsers.this.ParseResult[T]" class="delimiter">(</a><a href="#391225" title="String">msg</a>, <a href="#391226" title="Parsers.this.Input">next</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+	/*trait ElemFun
+  case class EFCons(hd: Elem =&gt; ElemFun, tl: ElemFun) extends ElemFun
+  case class EFNil(res: Boolean) extends ElemFun*/
+
+  /** A parser matching input elements that satisfy a given predicate.
+   *
+   *  `elem(kind, p)` succeeds if the input starts with an element `e` for which `p(e)` is true.
+   *
+   *  @param  kind   The element kind, used for error messages
+   *  @param  p      A predicate that determines which elements match.
+   *  @return
+   */
+  <span class="keyword">def</span> <a title="(kind: String, p: Parsers.this.Elem =&gt; Boolean)Parsers.this.Parser[Parsers.this.Elem]" id="388624">elem</a><span class="delimiter">(</span><a title="String" id="391629">kind</a>: <span title="String">String</span>, <a title="Parsers.this.Elem =&gt; Boolean" id="391630">p</a>: Elem =&gt; Boolean<span class="delimiter">)</span> = <a href="#388633" title="(p: Parsers.this.Elem =&gt; Boolean)(err: Parsers.this.Elem =&gt; String)Parsers.this.Parser[Parsers.this.Elem]">acceptIf</a><span class="delimiter">(</span><a href="#391630" title="Parsers.this.Elem =&gt; Boolean">p</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="Parsers.this.Elem" id="391634">inEl</a> =&gt; <a href="#391629" title="String">kind</a><span title="(x$1: Any)String">+</span><span title="String(&quot; expected&quot;)" class="string">&quot; expected&quot;</span><span class="delimiter">)</span>
+
+  /** A parser that matches only the given element `e`.
+   *
+   *  `elem(e)` succeeds if the input starts with an element `e`.
+   *
+   *  @param e the `Elem` that must be the next piece of input for the returned parser to succeed
+   *  @return a `Parser` that succeeds if `e` is the next available input (and returns it).
+   */
+  <span class="keyword">def</span> <a title="(e: Parsers.this.Elem)Parsers.this.Parser[Parsers.this.Elem]" id="388625">elem</a><span class="delimiter">(</span><a title="Parsers.this.Elem" id="391635">e</a>: <a href="#388592" title="Parsers.this.Elem">Elem</a><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Parsers.this.Elem]">Parser</a><span class="delimiter">[</span>Elem<span class="delimiter">]</span> = <a href="#388626" title="implicit scala.util.parsing.combinator.Parsers.accept : (e: Parsers.this.Elem)Parsers.this.Parser[Parsers.this.Elem]">accept</a><span class="delimiter">(</span><a href="#391635" title="Parsers.this.Elem">e</a><span class="delimiter">)</span>
+
+  /** A parser that matches only the given element `e`.
+   *
+   *  The method is implicit so that elements can automatically be lifted to their parsers.
+   *  For example, when parsing `Token`s, `Identifier(&quot;new&quot;)` (which is a `Token`) can be used directly,
+   *  instead of first creating a `Parser` using `accept(Identifier(&quot;new&quot;))`.
+   *
+   *  @param e the `Elem` that must be the next piece of input for the returned parser to succeed
+   *  @return a `tParser` that succeeds if `e` is the next available input.
+   */
+
+  <span class="keyword">implicit</span> <span class="keyword">def</span> <a title="implicit scala.util.parsing.combinator.Parsers.accept : (e: Parsers.this.Elem)Parsers.this.Parser[Parsers.this.Elem]" id="388626">accept</a><span class="delimiter">(</span><a title="Parsers.this.Elem" id="388868">e</a>: <a href="#388592" title="Parsers.this.Elem">Elem</a><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Parsers.this.Elem]">Parser</a><span class="delimiter">[</span>Elem<span class="delimiter">]</span> = <a href="#388633" title="(p: Parsers.this.Elem =&gt; Boolean)(err: Parsers.this.Elem =&gt; String)Parsers.this.Parser[Parsers.this.Elem]">acceptIf</a><span class="delimiter">(</span><a href="#391657" title="Parsers.this.Elem">_</a> <span title="(x$1: Any)Boolean">==</span> <a href="#388868" title="Parsers.this.Elem">e</a><span class="delimiter">)</span><span class="delimiter">(</span><span title="String(&quot;`&quot;)" class="string">&quot;`&quot;</span><span title="(x$1: Any)String">+</span><a href="#388868" title="Parsers.this.Elem">e</a><span title="(x$1: Any)String">+</span><span title="String(&quot;\' expected but &quot;)" class="string">&quot;' expected but &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#391659" title="Parsers.this.Elem">_</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; found&quot;)" class="string">&quot; found&quot;</span><span class="delimiter">)</span>
+
+  /** A parser that matches only the given list of element `es`.
+   *
+   *  `accept(es)` succeeds if the input subsequently provides the elements in the list `es`.
+   *
+   *  @param  es the list of expected elements
+   *  @return a Parser that recognizes a specified list of elements
+   */
+  <span class="keyword">def</span> <a title="[ES](es: ES)(implicit evidence$1: ES =&gt; List[Parsers.this.Elem])Parsers.this.Parser[List[Parsers.this.Elem]]" id="391648">accept</a><span class="delimiter">[</span><a title="" id="388629">ES</a> &lt;% List<span class="delimiter">[</span>Elem<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><a title="ES" id="391647">es</a>: <a href="#388629" title="ES">ES</a><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[Parsers.this.Elem]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>Elem<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="#391661" title="(es: ES)(implicit evidence$2: ES =&gt; Iterable[Parsers.this.Elem])Parsers.this.Parser[List[Parsers.this.Elem]]">acceptSeq</a><a href="#391648" title="ES =&gt; List[Parsers.this.Elem]" class="delimiter">(</a><a href="#391647" title="ES">es</a><span class="delimiter">)</span>
+
+  /** The parser that matches an element in the domain of the partial function `f`.
+   *
+   *  If `f` is defined on the first element in the input, `f` is applied
+   *  to it to produce this parser's result.
+   *
+   *  Example: The parser `accept(&quot;name&quot;, {case Identifier(n) =&gt; Name(n)})`
+   *          accepts an `Identifier(n)` and returns a `Name(n)`
+   *
+   *  @param expected a description of the kind of element this parser expects (for error messages)
+   *  @param f a partial function that determines when this parser is successful and what its output is
+   *  @return A parser that succeeds if `f` is applicable to the first element of the input,
+   *          applying `f` to it to produce the result.
+   */
+  <span class="keyword">def</span> <a title="[U](expected: String, f: PartialFunction[Parsers.this.Elem,U])Parsers.this.Parser[U]" id="388630">accept</a><span class="delimiter">[</span><a title="" id="388632">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="String" id="391640">expected</a>: <span title="String">String</span>, <a title="PartialFunction[Parsers.this.Elem,U]" id="391641">f</a>: <a href="../../../PartialFunction.scala.html#129" title="PartialFunction[Parsers.this.Elem,U]">PartialFunction</a><span class="delimiter">[</span>Elem, U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388634" title="(expected: String, f: PartialFunction[Parsers.this.Elem,U])Parsers.this.Parser[U]">acceptMatch</a><span class="delimiter">(</span><a href="#391640" title="String">expected</a>, <a href="#391641" title="PartialFunction[Parsers.this.Elem,U]">f</a><span class="delimiter">)</span>
+
+  /** A parser matching input elements that satisfy a given predicate.
+   *
+   *  `acceptIf(p)(el =&gt; &quot;Unexpected &quot;+el)` succeeds if the input starts with an element `e` for which `p(e)` is true.
+   *
+   *  @param  err    A function from the received element into an error message.
+   *  @param  p      A predicate that determines which elements match.
+   *  @return        A parser for elements satisfying p(e).
+   */
+  <span class="keyword">def</span> <a title="(p: Parsers.this.Elem =&gt; Boolean)(err: Parsers.this.Elem =&gt; String)Parsers.this.Parser[Parsers.this.Elem]" id="388633">acceptIf</a><span class="delimiter">(</span><a title="Parsers.this.Elem =&gt; Boolean" id="391631">p</a>: Elem =&gt; Boolean<span class="delimiter">)</span><span class="delimiter">(</span><a title="Parsers.this.Elem =&gt; String" id="391632">err</a>: Elem =&gt; String<span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Parsers.this.Elem]">Parser</a><span class="delimiter">[</span>Elem<span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[Parsers.this.Elem])Parsers.this.Parser[Parsers.this.Elem]">Parser</a> <span class="delimiter">{</span> <a title="Parsers.this.Input" id="391686">in</a> =&gt;
+    <span title="Parsers.this.ParseResult[Parsers.this.Elem]" class="keyword">if</span> <span class="delimiter">(</span><a href="#391686" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388923" title="=&gt; Boolean">atEnd</a><span class="delimiter">)</span> <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><span title="String(&quot;end of input&quot;)" class="string">&quot;end of input&quot;</span>, <a href="#391686" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <span title="Parsers.this.ParseResult[Parsers.this.Elem]" class="keyword">if</span> <span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: Parsers.this.Elem)Boolean">p</a><span class="delimiter">(</span><a href="#391686" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388919" title="=&gt; Parsers.this.Elem">first</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#392725" title="(result: Parsers.this.Elem, next: Parsers.this.Input)Parsers.this.Success[Parsers.this.Elem]">Success</a><span class="delimiter">(</span><a href="#391686" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388919" title="=&gt; Parsers.this.Elem">first</a>, <a href="#391686" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388920" title="=&gt; scala.util.parsing.input.Reader[Parsers.this.Elem]">rest</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: Parsers.this.Elem)String">err</a><span class="delimiter">(</span><a href="#391686" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388919" title="=&gt; Parsers.this.Elem">first</a><span class="delimiter">)</span>, <a href="#391686" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** The parser that matches an element in the domain of the partial function `f`.
+   *
+   *  If `f` is defined on the first element in the input, `f` is applied
+   *  to it to produce this parser's result.
+   *
+   *  Example: The parser `acceptMatch(&quot;name&quot;, {case Identifier(n) =&gt; Name(n)})`
+   *          accepts an `Identifier(n)` and returns a `Name(n)`
+   *
+   *  @param expected a description of the kind of element this parser expects (for error messages)
+   *  @param f a partial function that determines when this parser is successful and what its output is
+   *  @return A parser that succeeds if `f` is applicable to the first element of the input,
+   *          applying `f` to it to produce the result.
+   */
+  <span class="keyword">def</span> <a title="[U](expected: String, f: PartialFunction[Parsers.this.Elem,U])Parsers.this.Parser[U]" id="388634">acceptMatch</a><span class="delimiter">[</span><a title="" id="388636">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="String" id="391674">expected</a>: <span title="String">String</span>, <a title="PartialFunction[Parsers.this.Elem,U]" id="391675">f</a>: <a href="../../../PartialFunction.scala.html#129" title="PartialFunction[Parsers.this.Elem,U]">PartialFunction</a><span class="delimiter">[</span>Elem, U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[U])Parsers.this.Parser[U]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="391700">in</a> =&gt;
+    <span title="Parsers.this.ParseResult[U]" class="keyword">if</span> <span class="delimiter">(</span><a href="#391700" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388923" title="=&gt; Boolean">atEnd</a><span class="delimiter">)</span> <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><span title="String(&quot;end of input&quot;)" class="string">&quot;end of input&quot;</span>, <a href="#391700" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <span title="Parsers.this.ParseResult[U]" class="keyword">if</span> <span class="delimiter">(</span><a href="#391675" title="PartialFunction[Parsers.this.Elem,U]">f</a>.<a href="../../../PartialFunction.scala.html#27974" title="(x: Parsers.this.Elem)Boolean">isDefinedAt</a><span class="delimiter">(</span><a href="#391700" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388919" title="=&gt; Parsers.this.Elem">first</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#392725" title="(result: U, next: Parsers.this.Input)Parsers.this.Success[U]">Success</a><span class="delimiter">(</span><a href="../../../Function1.scala.html#27963" title="(v1: Parsers.this.Elem)U">f</a><span class="delimiter">(</span><a href="#391700" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388919" title="=&gt; Parsers.this.Elem">first</a><span class="delimiter">)</span>, <a href="#391700" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388920" title="=&gt; scala.util.parsing.input.Reader[Parsers.this.Elem]">rest</a><span class="delimiter">)</span>
+    <span class="keyword">else</span> <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><a href="#391674" title="String">expected</a><span title="(x$1: Any)String">+</span><span title="String(&quot; expected&quot;)" class="string">&quot; expected&quot;</span>, <a href="#391700" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** A parser that matches only the given [[scala.collection.Iterable]] collection of elements `es`.
+   *
+   *  `acceptSeq(es)` succeeds if the input subsequently provides the elements in the iterable `es`.
+   *
+   *  @param  es the list of expected elements
+   *  @return a Parser that recognizes a specified list of elements
+   */
+  <span class="keyword">def</span> <a title="[ES](es: ES)(implicit evidence$2: ES =&gt; Iterable[Parsers.this.Elem])Parsers.this.Parser[List[Parsers.this.Elem]]" id="391661">acceptSeq</a><span class="delimiter">[</span><a title="" id="388639">ES</a> &lt;% Iterable<span class="delimiter">[</span>Elem<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><a title="ES" id="391660">es</a>: <a href="#388639" title="ES">ES</a><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[Parsers.this.Elem]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>Elem<span class="delimiter">]</span><span class="delimiter">]</span> =
+    <a href="../../../Function1.scala.html#27963" title="(v1: ES)Iterable[Parsers.this.Elem]">es</a>.<a href="../../../collection/IterableLike.scala.html#27890" title="[B](z: B)(op: (Parsers.this.Elem, B) =&gt; B)B">foldRight</a><span title="(z: Parsers.this.Parser[List[Parsers.this.Elem]])(op: (Parsers.this.Elem, Parsers.this.Parser[List[Parsers.this.Elem]]) =&gt; Parsers.this.Parser[List[Parsers.this.Elem]])Parsers.this.Parser[List[Parsers.this.Elem]]" class="delimiter">[</span><a href="#388619" title="Parsers.this.Parser[List[Parsers.this.Elem]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>Elem<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><a href="#388642" title="(v: scala.collection.immutable.Nil.type)Parsers.this.Parser[scala.collection.immutable.Nil.type]">success</a><span class="delimiter">(</span><a href="../../../collection/immutable/List.scala.html#10307" title="scala.collection.immutable.Nil.type">Nil</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">{</span><span class="delimiter">(</span><a title="Parsers.this.Elem" id="392035">x</a>, <a title="Parsers.this.Parser[List[Parsers.this.Elem]]" id="392036">pxs</a><span class="delimiter">)</span> =&gt; <a href="#388626" title="implicit scala.util.parsing.combinator.Parsers.accept : (e: Parsers.this.Elem)Parsers.this.Parser[Parsers.this.Elem]">accept</a><span class="delimiter">(</span><a href="#392035" title="Parsers.this.Elem">x</a><span class="delimiter">)</span> <a href="#388942" title="(q: =&gt; Parsers.this.Parser[List[Parsers.this.Elem]])Parsers.this.Parser[Parsers.this.~[Parsers.this.Elem,List[Parsers.this.Elem]]]">~</a> <a href="#392036" title="Parsers.this.Parser[List[Parsers.this.Elem]]">pxs</a> <a href="#388960" title="(f: Parsers.this.~[Parsers.this.Elem,List[Parsers.this.Elem]] =&gt; List[Parsers.this.Elem])Parsers.this.Parser[List[Parsers.this.Elem]]">^^</a> <a href="#388694" title="Parsers.this.~[Parsers.this.Elem,List[Parsers.this.Elem]] =&gt; List[Parsers.this.Elem]">mkList</a><span class="delimiter">}</span>
+
+  /** A parser that always fails.
+   *
+   * @param msg The error message describing the failure.
+   * @return A parser that always fails with the specified error message.
+   */
+  <span class="keyword">def</span> <a title="(msg: String)Parsers.this.Parser[Nothing]" id="388640">failure</a><span class="delimiter">(</span><a title="String" id="392088">msg</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[Nothing])Parsers.this.Parser[Nothing]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="392092">in</a> =&gt; <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><a href="#392088" title="String">msg</a>, <a href="#392092" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** A parser that results in an error.
+   *
+   * @param msg The error message describing the failure.
+   * @return A parser that always fails with the specified error message.
+   */
+  <span class="keyword">def</span> <a title="(msg: String)Parsers.this.Parser[Nothing]" id="388641">err</a><span class="delimiter">(</span><a title="String" id="392094">msg</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[Nothing])Parsers.this.Parser[Nothing]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="392098">in</a> =&gt; <a href="#392733" title="(msg: String, next: Parsers.this.Input)Parsers.this.Error">Error</a><span class="delimiter">(</span><a href="#392094" title="String">msg</a>, <a href="#392098" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** A parser that always succeeds.
+   *
+   * @param v The result for the parser
+   * @return A parser that always succeeds, with the given result `v`
+   */
+  <span class="keyword">def</span> <a title="[T](v: T)Parsers.this.Parser[T]" id="388642">success</a><span class="delimiter">[</span><a title="" id="388644">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="T" id="392019">v</a>: <a href="#388644" title="T">T</a><span class="delimiter">)</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="392023">in</a> =&gt; <a href="#392725" title="(result: T, next: Parsers.this.Input)Parsers.this.Success[T]">Success</a><span class="delimiter">(</span><a href="#392019" title="T">v</a>, <a href="#392023" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** A helper method that turns a `Parser` into one that will
+   *  print debugging information to stdout before and after
+   *  being applied.
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T])(name: String)Parsers.this.Parser[T]" id="388645">log</a><span class="delimiter">[</span><a title="" id="388647">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="392102">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="String" id="392103">name</a>: <span title="String">String</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a><span class="delimiter">{</span> <a title="Parsers.this.Input" id="392108">in</a> =&gt;
+    <a href="../../../Predef.scala.html#7224" title="(x: Any)Unit">println</a><span class="delimiter">(</span><span title="String(&quot;trying &quot;)" class="string">&quot;trying &quot;</span><span title="(x$1: Any)String">+</span> <a href="#392103" title="String">name</a> <span title="(x$1: Any)String">+</span><span title="String(&quot; at &quot;)" class="string">&quot; at &quot;</span><span title="(x$1: Any)String">+</span> <a href="#392108" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+    <span class="keyword">val</span> <a title="Parsers.this.ParseResult[T]" id="392109">r</a> = <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p</a><span class="delimiter">(</span><a href="#392108" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+    <a href="../../../Predef.scala.html#7224" title="(x: Any)Unit">println</a><span class="delimiter">(</span><a href="#392103" title="String">name</a> <span title="(x$1: Any)String">+</span><span title="String(&quot; --&gt; &quot;)" class="string">&quot; --&gt; &quot;</span><span title="(x$1: Any)String">+</span> <a href="#392109" title="Parsers.this.ParseResult[T]">r</a><span class="delimiter">)</span>
+    <a href="#392109" title="Parsers.this.ParseResult[T]">r</a>
+  <span class="delimiter">}</span>
+
+  /** A parser generator for repetitions.
+   *
+   *  `rep(p)` repeatedly uses `p` to parse the input until `p` fails
+   *  (the result is a List of the consecutive results of `p`).
+   *
+   * @param p a `Parser` that is to be applied successively to the input
+   * @return A parser that returns a list of results produced by repeatedly applying `p` to the input.
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]" id="388648">rep</a><span class="delimiter">[</span><a title="" id="388650">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="391522">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[T]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="#388654" title="(p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]">rep1</a><span class="delimiter">(</span><a href="#391522" title="=&gt; Parsers.this.Parser[T]">p</a><span class="delimiter">)</span> <a href="#388954" title="(q: =&gt; Parsers.this.Parser[List[T]])Parsers.this.Parser[List[T]]">|</a> <a href="#388642" title="(v: List[Nothing])Parsers.this.Parser[List[Nothing]]">success</a><span class="delimiter">(</span>List<a href="../../../collection/immutable/List.scala.html#10307" title="scala.collection.immutable.Nil.type" class="delimiter">(</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** A parser generator for interleaved repetitions.
+   *
+   *  `repsep(p, q)` repeatedly uses `p` interleaved with `q` to parse the input, until `p` fails.
+   *  (The result is a `List` of the results of `p`.)
+   *
+   *  Example: `repsep(term, &quot;,&quot;)` parses a comma-separated list of term's, yielding a list of these terms.
+   *
+   * @param p a `Parser` that is to be applied successively to the input
+   * @param q a `Parser` that parses the elements that separate the elements parsed by `p`
+   * @return A parser that returns a list of results produced by repeatedly applying `p` (interleaved with `q`) to the input.
+   *         The results of `p` are collected in a list. The results of `q` are discarded.
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T], q: =&gt; Parsers.this.Parser[Any])Parsers.this.Parser[List[T]]" id="388651">repsep</a><span class="delimiter">[</span><a title="" id="388653">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="392150">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span>, <a title="=&gt; Parsers.this.Parser[Any]" id="392151">q</a>: =&gt; Parser<span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[T]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> =
+    <a href="#388663" title="(p: =&gt; Parsers.this.Parser[T], q: =&gt; Parsers.this.Parser[Any])Parsers.this.Parser[List[T]]">rep1sep</a><span class="delimiter">(</span><a href="#392150" title="=&gt; Parsers.this.Parser[T]">p</a>, <a href="#392151" title="=&gt; Parsers.this.Parser[Any]">q</a><span class="delimiter">)</span> <a href="#388954" title="(q: =&gt; Parsers.this.Parser[List[T]])Parsers.this.Parser[List[T]]">|</a> <a href="#388642" title="(v: List[Nothing])Parsers.this.Parser[List[Nothing]]">success</a><span class="delimiter">(</span>List<a href="../../../collection/immutable/List.scala.html#10307" title="scala.collection.immutable.Nil.type" class="delimiter">(</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** A parser generator for non-empty repetitions.
+   *
+   *  `rep1(p)` repeatedly uses `p` to parse the input until `p` fails -- `p` must succeed at least
+   *             once (the result is a `List` of the consecutive results of `p`)
+   *
+   * @param p a `Parser` that is to be applied successively to the input
+   * @return A parser that returns a list of results produced by repeatedly applying `p` to the input
+   *        (and that only succeeds if `p` matches at least once).
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]" id="388654">rep1</a><span class="delimiter">[</span><a title="" id="388656">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="391572">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[T]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="#388657" title="(first: =&gt; Parsers.this.Parser[T], p0: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]">rep1</a><span class="delimiter">(</span><a href="#391572" title="=&gt; Parsers.this.Parser[T]">p</a>, <a href="#391572" title="=&gt; Parsers.this.Parser[T]">p</a><span class="delimiter">)</span>
+
+  /** A parser generator for non-empty repetitions.
+   *
+   *  `rep1(f, p)` first uses `f` (which must succeed) and then repeatedly
+   *     uses `p` to parse the input until `p` fails
+   *     (the result is a `List` of the consecutive results of `f` and `p`)
+   *
+   * @param first a `Parser` that parses the first piece of input
+   * @param p0 a `Parser` that is to be applied successively to the rest of the input (if any) -- evaluated at most once, and only when necessary
+   * @return A parser that returns a list of results produced by first applying `f` and then
+   *         repeatedly `p` to the input (it only succeeds if `f` matches).
+   */
+  @migration<span class="delimiter">(</span><span class="string">&quot;The `p0` call-by-name arguments is evaluated at most once per constructed Parser object, instead of on every need that arises during parsing.&quot;</span>, <span class="string">&quot;2.9.0&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="[T](first: =&gt; Parsers.this.Parser[T], p0: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]" id="388657">rep1</a><span class="delimiter">[</span><a title="" id="388659">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="391565">first</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span>, <a title="=&gt; Parsers.this.Parser[T]" id="391566">p0</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[T]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[List[T]])Parsers.this.Parser[List[T]]">Parser</a> <span class="delimiter">{</span> <a title="Parsers.this.Input" id="392195">in</a> =&gt;
+    <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="Parsers.this.Parser[T]" id="392197">p</a> = <a href="#391566" title="=&gt; Parsers.this.Parser[T]">p0</a> // lazy argument
+    <span class="keyword">val</span> <a title="scala.collection.mutable.ListBuffer[T]" id="392198">elems</a> = <span title="scala.collection.mutable.ListBuffer[T]" class="keyword">new</span> <a href="../../../collection/mutable/ListBuffer.scala.html#12466" title="scala.collection.mutable.ListBuffer[T]">ListBuffer</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+
+    <span class="keyword">def</span> <a title="(in: Parsers.this.Input)Parsers.this.ParseResult[List[T]]" id="392199">continue</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="392200">in</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[List[T]]">ParseResult</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Parsers.this.Parser[T]" id="392201">p0</a> = <a href="#392196" title="=&gt; Parsers.this.Parser[T]">p</a>    // avoid repeatedly re-evaluating by-name parser
+      @tailrec <span class="keyword">def</span> <a title="(in0: Parsers.this.Input)Parsers.this.ParseResult[List[T]]" id="392202">applyp</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="392203">in0</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[List[T]]">ParseResult</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> = <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p0</a><a href="#1448673" title="Parsers.this.Error" class="delimiter">(</a><a href="#392203" title="Parsers.this.Input">in0</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> Success<a href="#1448667" title="Parsers.this.ParseResult[List[T]]" id="1448669" class="delimiter">(</a><a href="#390587" title="T" id="392214">x</a>, <a href="#390588" title="Parsers.this.Input" id="392215">rest</a><span class="delimiter">)</span> =&gt; <a href="#392198" title="scala.collection.mutable.ListBuffer[T]">elems</a> <a href="../../../collection/mutable/ListBuffer.scala.html#49086" title="(x: T)elems.type">+=</a> <a href="#392214" title="T">x</a> ; <a href="#392202" title="(in0: Parsers.this.Input)Parsers.this.ParseResult[List[T]]">applyp</a><span class="delimiter">(</span><a href="#392215" title="Parsers.this.Input">rest</a><span class="delimiter">)</span>
+        <span class="keyword">case</span> e @ Error<a href="#1448667" title="Parsers.this.ParseResult[List[T]]" id="1448673" class="delimiter">(</a><a href="#391227" title="String" id="1448670">_</a>, <a href="#391228" title="Parsers.this.Input" id="1448671">_</a><span class="delimiter">)</span>  =&gt; <a href="#1448675" title="(x: Parsers.this.ParseResult[List[T]])Parsers.this.ParseResult[List[T]]">e</a>  // still have to propagate error
+        <span class="keyword">case</span> _                =&gt; <a href="#392725" title="(result: List[T], next: Parsers.this.Input)Parsers.this.Success[List[T]]">Success</a><a href="#1448675" title="(x: Parsers.this.ParseResult[List[T]])Parsers.this.ParseResult[List[T]]" class="delimiter">(</a><a href="#392198" title="scala.collection.mutable.ListBuffer[T]">elems</a>.<a href="../../../collection/mutable/ListBuffer.scala.html#49094" title="=&gt; List[T]">toList</a>, <a href="#392203" title="Parsers.this.Input">in0</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      <a href="#392202" title="(in0: Parsers.this.Input)Parsers.this.ParseResult[List[T]]">applyp</a><span class="delimiter">(</span><a href="#392200" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">first</a><a href="#1448687" title="(x: Parsers.this.ParseResult[List[T]])Parsers.this.ParseResult[List[T]]" class="delimiter">(</a><a href="#392195" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Success<a href="#1448681" title="Parsers.this.ParseResult[List[T]]" id="1448683" class="delimiter">(</a><a href="#390587" title="T" id="392245">x</a>, <a href="#390588" title="Parsers.this.Input" id="392246">rest</a><span class="delimiter">)</span> =&gt; <a href="#392198" title="scala.collection.mutable.ListBuffer[T]">elems</a> <a href="../../../collection/mutable/ListBuffer.scala.html#49086" title="(x: T)elems.type">+=</a> <a href="#392245" title="T">x</a> ; <a href="#392199" title="(in: Parsers.this.Input)Parsers.this.ParseResult[List[T]]">continue</a><span class="delimiter">(</span><a href="#392246" title="Parsers.this.Input">rest</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a href="#1448681" title="Parsers.this.ParseResult[List[T]]" id="1448685">ns</a>: NoSuccess    =&gt; <a href="#1448687" title="(x: Parsers.this.ParseResult[List[T]])Parsers.this.ParseResult[List[T]]">ns</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** A parser generator for a specified number of repetitions.
+   *
+   *  `repN(n, p)` uses `p` exactly `n` time to parse the input
+   *  (the result is a `List` of the `n` consecutive results of `p`).
+   *
+   * @param p   a `Parser` that is to be applied successively to the input
+   * @param num the exact number of times `p` must succeed
+   * @return    A parser that returns a list of results produced by repeatedly applying `p` to the input
+   *        (and that only succeeds if `p` matches exactly `n` times).
+   */
+  <span class="keyword">def</span> <a title="[T](num: Int, p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]" id="388660">repN</a><span class="delimiter">[</span><a title="" id="388662">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Int" id="392251">num</a>: <a href="../../../Int.scala.html#321" title="Int">Int</a>, <a title="=&gt; Parsers.this.Parser[T]" id="392252">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[T]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> =
+    <span title="Parsers.this.Parser[List[T]]" class="keyword">if</span> <span class="delimiter">(</span><a href="#392251" title="Int">num</a> <a href="../../../Int.scala.html#26421" title="(x: Int)Boolean">==</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#388642" title="(v: scala.collection.immutable.Nil.type)Parsers.this.Parser[scala.collection.immutable.Nil.type]">success</a><span class="delimiter">(</span><a href="../../../collection/immutable/List.scala.html#10307" title="scala.collection.immutable.Nil.type">Nil</a><span class="delimiter">)</span> <span class="keyword">else</span> <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[List[T]])Parsers.this.Parser[List[T]]">Parser</a> <span class="delimiter">{</span> <a title="Parsers.this.Input" id="392265">in</a> =&gt;
+      <span class="keyword">val</span> <a title="scala.collection.mutable.ListBuffer[T]" id="392266">elems</a> = <span title="scala.collection.mutable.ListBuffer[T]" class="keyword">new</span> <a href="../../../collection/mutable/ListBuffer.scala.html#12466" title="scala.collection.mutable.ListBuffer[T]">ListBuffer</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+      <span class="keyword">val</span> <a title="Parsers.this.Parser[T]" id="392267">p0</a> = <a href="#392252" title="=&gt; Parsers.this.Parser[T]">p</a>    // avoid repeatedly re-evaluating by-name parser
+
+      @tailrec <span class="keyword">def</span> <a title="(in0: Parsers.this.Input)Parsers.this.ParseResult[List[T]]" id="392268">applyp</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="392269">in0</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span>: <a href="#388594" title="Parsers.this.ParseResult[List[T]]">ParseResult</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> =
+        <span title="Parsers.this.ParseResult[List[T]]" class="keyword">if</span> <span class="delimiter">(</span><a href="#392266" title="scala.collection.mutable.ListBuffer[T]">elems</a>.<a href="../../../collection/mutable/ListBuffer.scala.html#49082" title="=&gt; Int">length</a> <a href="../../../Int.scala.html#26421" title="(x: Int)Boolean">==</a> <a href="#392251" title="Int">num</a><span class="delimiter">)</span> <a href="#392725" title="(result: List[T], next: Parsers.this.Input)Parsers.this.Success[List[T]]">Success</a><span class="delimiter">(</span><a href="#392266" title="scala.collection.mutable.ListBuffer[T]">elems</a>.<a href="../../../collection/mutable/ListBuffer.scala.html#49094" title="=&gt; List[T]">toList</a>, <a href="#392269" title="Parsers.this.Input">in0</a><span class="delimiter">)</span>
+        <span class="keyword">else</span> <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p0</a><a href="#1448696" title="Parsers.this.NoSuccess" class="delimiter">(</a><a href="#392269" title="Parsers.this.Input">in0</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> Success<a href="#1448692" title="Parsers.this.ParseResult[List[T]]" id="1448694" class="delimiter">(</a><a href="#390587" title="T" id="392292">x</a>, <a href="#390588" title="Parsers.this.Input" id="392293">rest</a><span class="delimiter">)</span> =&gt; <a href="#392266" title="scala.collection.mutable.ListBuffer[T]">elems</a> <a href="../../../collection/mutable/ListBuffer.scala.html#49086" title="(x: T)elems.type">+=</a> <a href="#392292" title="T">x</a> ; <a href="#392268" title="(in0: Parsers.this.Input)Parsers.this.ParseResult[List[T]]">applyp</a><span class="delimiter">(</span><a href="#392293" title="Parsers.this.Input">rest</a><span class="delimiter">)</span>
+          <span class="keyword">case</span> <a href="#1448692" title="Parsers.this.ParseResult[List[T]]" id="1448696">ns</a>: NoSuccess    =&gt; <a href="#1448698" title="(x: Parsers.this.ParseResult[List[T]])Parsers.this.ParseResult[List[T]]" class="keyword">return</a> ns
+        <span class="delimiter">}</span>
+
+      <a href="#392268" title="(in0: Parsers.this.Input)Parsers.this.ParseResult[List[T]]">applyp</a><span class="delimiter">(</span><a href="#392265" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+  /** A parser generator for non-empty repetitions.
+   *
+   *  `rep1sep(p, q)` repeatedly applies `p` interleaved with `q` to parse the
+   *  input, until `p` fails. The parser `p` must succeed at least once.
+   *
+   * @param p a `Parser` that is to be applied successively to the input
+   * @param q a `Parser` that parses the elements that separate the elements parsed by `p`
+   *          (interleaved with `q`)
+   * @return A parser that returns a list of results produced by repeatedly applying `p` to the input
+   *         (and that only succeeds if `p` matches at least once).
+   *         The results of `p` are collected in a list. The results of `q` are discarded.
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T], q: =&gt; Parsers.this.Parser[Any])Parsers.this.Parser[List[T]]" id="388663">rep1sep</a><span class="delimiter">[</span><a title="" id="388665">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="392154">p</a> : =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span>, <a title="=&gt; Parsers.this.Parser[Any]" id="392155">q</a> : =&gt; Parser<span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[List[T]]">Parser</a><span class="delimiter">[</span>List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> =
+    <a href="#392154" title="=&gt; Parsers.this.Parser[T]">p</a> <a href="#388942" title="(q: =&gt; Parsers.this.Parser[List[T]])Parsers.this.Parser[Parsers.this.~[T,List[T]]]">~</a> <a href="#388648" title="(p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[List[T]]">rep</a><span class="delimiter">(</span><a href="#392155" title="=&gt; Parsers.this.Parser[Any]">q</a> <a href="#388945" title="(q: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[T]">~&gt;</a> <a href="#392154" title="=&gt; Parsers.this.Parser[T]">p</a><span class="delimiter">)</span> <a href="#388960" title="(f: Parsers.this.~[T,List[T]] =&gt; List[T])Parsers.this.Parser[List[T]]">^^</a> <a href="#392318" title="Parsers.this.~[T,List[T]]" class="delimiter">{</a><span class="keyword">case</span> <a href="#392737" title="T" id="392323">x</a>~<a href="#392738" title="List[T]" id="392324">y</a> =&gt; <a href="#392323" title="T">x</a><a href="#1448705" title="(x: List[T])List[T]">::</a><a href="#392324" title="List[T]">y</a><span class="delimiter">}</span>
+
+  /** A parser generator that, roughly, generalises the rep1sep generator so
+   *  that `q`, which parses the separator, produces a left-associative
+   *  function that combines the elements it separates.
+   *
+   *  ''From: J. Fokker. Functional parsers. In J. Jeuring and E. Meijer, editors, Advanced Functional Programming,
+   *  volume 925 of Lecture Notes in Computer Science, pages 1--23. Springer, 1995.''
+   *
+   * @param p a parser that parses the elements
+   * @param q a parser that parses the token(s) separating the elements, yielding a left-associative function that
+   *          combines two elements into one
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T], q: =&gt; Parsers.this.Parser[(T, T) =&gt; T])Parsers.this.Parser[T]" id="388666">chainl1</a><span class="delimiter">[</span><a title="" id="388668">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="391545">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span>, <a title="=&gt; Parsers.this.Parser[(T, T) =&gt; T]" id="391546">q</a>: =&gt; Parser<span class="delimiter">[</span><span class="delimiter">(</span>T, T<span class="delimiter">)</span> =&gt; T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+    = <a href="#388669" title="(first: =&gt; Parsers.this.Parser[T], p: =&gt; Parsers.this.Parser[T], q: =&gt; Parsers.this.Parser[(T, T) =&gt; T])Parsers.this.Parser[T]">chainl1</a><span class="delimiter">(</span><a href="#391545" title="=&gt; Parsers.this.Parser[T]">p</a>, <a href="#391545" title="=&gt; Parsers.this.Parser[T]">p</a>, <a href="#391546" title="=&gt; Parsers.this.Parser[(T, T) =&gt; T]">q</a><span class="delimiter">)</span>
+
+  /** A parser generator that, roughly, generalises the `rep1sep` generator
+   *  so that `q`, which parses the separator, produces a left-associative
+   *  function that combines the elements it separates.
+   *
+   * @param first a parser that parses the first element
+   * @param p a parser that parses the subsequent elements
+   * @param q a parser that parses the token(s) separating the elements,
+   *          yielding a left-associative function that combines two elements
+   *          into one
+   */
+  <span class="keyword">def</span> <a title="[T, U](first: =&gt; Parsers.this.Parser[T], p: =&gt; Parsers.this.Parser[U], q: =&gt; Parsers.this.Parser[(T, U) =&gt; T])Parsers.this.Parser[T]" id="388669">chainl1</a><span class="delimiter">[</span><a title="" id="388672">T</a>, <a title="" id="388673">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="391534">first</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span>, <a title="=&gt; Parsers.this.Parser[U]" id="391535">p</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span>, <a title="=&gt; Parsers.this.Parser[(T, U) =&gt; T]" id="391536">q</a>: =&gt; Parser<span class="delimiter">[</span><span class="delimiter">(</span>T, U<span class="delimiter">)</span> =&gt; T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+    = <a href="#391534" title="=&gt; Parsers.this.Parser[T]">first</a> <a href="#388942" title="(q: =&gt; Parsers.this.Parser[List[Parsers.this.~[(T, U) =&gt; T,U]]])Parsers.this.Parser[Parsers.this.~[T,List[Parsers.this.~[(T, U) =&gt; T,U]]]]">~</a> <a href="#388648" title="(p: =&gt; Parsers.this.Parser[Parsers.this.~[(T, U) =&gt; T,U]])Parsers.this.Parser[List[Parsers.this.~[(T, U) =&gt; T,U]]]">rep</a><span class="delimiter">(</span><a href="#391536" title="=&gt; Parsers.this.Parser[(T, U) =&gt; T]">q</a> <a href="#388942" title="(q: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[Parsers.this.~[(T, U) =&gt; T,U]]">~</a> <a href="#391535" title="=&gt; Parsers.this.Parser[U]">p</a><span class="delimiter">)</span> <a href="#388960" title="(f: Parsers.this.~[T,List[Parsers.this.~[(T, U) =&gt; T,U]]] =&gt; T)Parsers.this.Parser[T]">^^</a> <a href="#392365" title="Parsers.this.~[T,List[Parsers.this.~[(T, U) =&gt; T,U]]]" class="delimiter">{</a>
+        <span class="keyword">case</span> <a href="#392737" title="T" id="392373">x</a> ~ <a href="#392738" title="List[Parsers.this.~[(T, U) =&gt; T,U]]" id="392374">xs</a> =&gt; <a href="#392374" title="List[Parsers.this.~[(T, U) =&gt; T,U]]">xs</a>.<a href="../../../collection/LinearSeqOptimized.scala.html#55703" title="(z: T)(f: (T, Parsers.this.~[(T, U) =&gt; T,U]) =&gt; T)T">foldLeft</a><span class="delimiter">(</span><a href="#392373" title="T">x</a>: <a href="#388672" title="T">T</a><span class="delimiter">)</span><a href="#1448718" title="(x: T)T" class="delimiter">{</a><span class="keyword">case</span> <span class="delimiter">(</span><a href="../../../Tuple2.scala.html#29956" title="T" id="392405">a</a>, <a href="#392737" title="(T, U) =&gt; T" id="392412">f</a> <a href="../../../Tuple2.scala.html#29958" title="Parsers.this.~[(T, U) =&gt; T,U]" id="1448710">~</a> <a href="#392738" title="U" id="392413">b</a><span class="delimiter">)</span> =&gt; <a href="../../../Function2.scala.html#35169" title="(v1: T, v2: U)T">f</a><a href="#1448712" title="(x: T)T" class="delimiter">(</a><a href="#392405" title="T">a</a>, <a href="#392413" title="U">b</a><span class="delimiter">)</span><span class="delimiter">}</span> // x's type annotation is needed to deal with changed type inference due to SI-5189
+      <span class="delimiter">}</span>
+
+  /** A parser generator that generalises the `rep1sep` generator so that `q`,
+   *  which parses the separator, produces a right-associative function that
+   *  combines the elements it separates. Additionally, the right-most (last)
+   *  element and the left-most combining function have to be supplied.
+   *
+   * rep1sep(p: Parser[T], q) corresponds to chainr1(p, q ^^ cons, cons, Nil) (where val cons = (x: T, y: List[T]) =&gt; x :: y)
+   *
+   * @param p a parser that parses the elements
+   * @param q a parser that parses the token(s) separating the elements, yielding a right-associative function that
+   *          combines two elements into one
+   * @param combine the &quot;last&quot; (left-most) combination function to be applied
+   * @param first   the &quot;first&quot; (right-most) element to be combined
+   */
+  <span class="keyword">def</span> <a title="[T, U](p: =&gt; Parsers.this.Parser[T], q: =&gt; Parsers.this.Parser[(T, U) =&gt; U], combine: (T, U) =&gt; U, first: U)Parsers.this.Parser[U]" id="388674">chainr1</a><span class="delimiter">[</span><a title="" id="388677">T</a>, <a title="" id="388678">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="392417">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span>, <a title="=&gt; Parsers.this.Parser[(T, U) =&gt; U]" id="392418">q</a>: =&gt; Parser<span class="delimiter">[</span><span class="delimiter">(</span>T, U<span class="delimiter">)</span> =&gt; U<span class="delimiter">]</span>, <a title="(T, U) =&gt; U" id="392419">combine</a>: <span class="delimiter">(</span>T, U<span class="delimiter">)</span> =&gt; U, <a title="U" id="392420">first</a>: <a href="#388678" title="U">U</a><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[U]">Parser</a><span class="delimiter">[</span>U<span class="delimiter">]</span>
+    = <a href="#392417" title="=&gt; Parsers.this.Parser[T]">p</a> <a href="#388942" title="(q: =&gt; Parsers.this.Parser[List[Parsers.this.~[(T, U) =&gt; U,T]]])Parsers.this.Parser[Parsers.this.~[T,List[Parsers.this.~[(T, U) =&gt; U,T]]]]">~</a> <a href="#388648" title="(p: =&gt; Parsers.this.Parser[Parsers.this.~[(T, U) =&gt; U,T]])Parsers.this.Parser[List[Parsers.this.~[(T, U) =&gt; U,T]]]">rep</a><span class="delimiter">(</span><a href="#392418" title="=&gt; Parsers.this.Parser[(T, U) =&gt; U]">q</a> <a href="#388942" title="(q: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[Parsers.this.~[(T, U) =&gt; U,T]]">~</a> <a href="#392417" title="=&gt; Parsers.this.Parser[T]">p</a><span class="delimiter">)</span> <a href="#388960" title="(f: Parsers.this.~[T,List[Parsers.this.~[(T, U) =&gt; U,T]]] =&gt; U)Parsers.this.Parser[U]">^^</a> <a href="#392438" title="Parsers.this.~[T,List[Parsers.this.~[(T, U) =&gt; U,T]]]" class="delimiter">{</a>
+        <span class="keyword">case</span> <a href="#392737" title="T" id="392446">x</a> ~ <a href="#392738" title="List[Parsers.this.~[(T, U) =&gt; U,T]]" id="392447">xs</a> =&gt; <span class="delimiter">(</span><span title="Parsers.this.~[(T, U) =&gt; U,T]" class="keyword">new</span> <a href="#392744" title="Parsers.this.~[(T, U) =&gt; U,T]">~</a><span class="delimiter">(</span><a href="#392419" title="(T, U) =&gt; U">combine</a>, <a href="#392446" title="T">x</a><span class="delimiter">)</span> <a href="../../../collection/immutable/List.scala.html#32006" title="(x: Parsers.this.~[(T, U) =&gt; U,T])List[Parsers.this.~[(T, U) =&gt; U,T]]">::</a> <a href="#392447" title="List[Parsers.this.~[(T, U) =&gt; U,T]]">xs</a><span class="delimiter">)</span>.<a href="../../../collection/LinearSeqOptimized.scala.html#55706" title="(z: U)(f: (Parsers.this.~[(T, U) =&gt; U,T], U) =&gt; U)U">foldRight</a><span class="delimiter">(</span><a href="#392420" title="U">first</a><span class="delimiter">)</span><a href="#1448731" title="(x: U)U" class="delimiter">{</a><span class="keyword">case</span> <span class="delimiter">(</span><a href="#392737" title="(T, U) =&gt; U" id="392505">f</a> <a href="../../../Tuple2.scala.html#29956" title="Parsers.this.~[(T, U) =&gt; U,T]" id="1448723">~</a> <a href="#392738" title="T" id="392506">a</a>, <a href="../../../Tuple2.scala.html#29958" title="U" id="392507">b</a><span class="delimiter">)</span> =&gt; <a href="../../../Function2.scala.html#35169" title="(v1: T, v2: U)U">f</a><a href="#1448725" title="(x: U)U" class="delimiter">(</a><a href="#392506" title="T">a</a>, <a href="#392507" title="U">b</a><span class="delimiter">)</span><span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+
+  /** A parser generator for optional sub-phrases.
+   *
+   *  `opt(p)` is a parser that returns `Some(x)` if `p` returns `x` and `None` if `p` fails.
+   *
+   * @param p A `Parser` that is tried on the input
+   * @return a `Parser` that always succeeds: either with the result provided by `p` or
+   *         with the empty result
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[Option[T]]" id="388679">opt</a><span class="delimiter">[</span><a title="" id="388681">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="391582">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Option[T]]">Parser</a><span class="delimiter">[</span>Option<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span> =
+    <a href="#391582" title="=&gt; Parsers.this.Parser[T]">p</a> <a href="#388960" title="(f: T =&gt; Some[T])Parsers.this.Parser[Some[T]]">^^</a> <span class="delimiter">(</span><a title="T" id="392515">x</a> =&gt; <a href="../../../Option.scala.html#32449" title="(x: T)Some[T]">Some</a><span class="delimiter">(</span><a href="#392515" title="T">x</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#388954" title="(q: =&gt; Parsers.this.Parser[Option[T]])Parsers.this.Parser[Option[T]]">|</a> <a href="#388642" title="(v: None.type)Parsers.this.Parser[None.type]">success</a><span class="delimiter">(</span><a href="../../../Option.scala.html#1585" title="None.type">None</a><span class="delimiter">)</span>
+
+  /** Wrap a parser so that its failures and errors become success and
+   *  vice versa -- it never consumes any input.
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[Unit]" id="388682">not</a><span class="delimiter">[</span><a title="" id="388684">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="392538">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Unit]">Parser</a><span class="delimiter">[</span>Unit<span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[Unit])Parsers.this.Parser[Unit]">Parser</a> <span class="delimiter">{</span> <a title="Parsers.this.Input" id="392543">in</a> =&gt;
+    <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p</a><span title="Parsers.this.ParseResult[Unit]" class="delimiter">(</span><a href="#392543" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Success<a href="#1448735" title="Parsers.this.ParseResult[Unit]" id="1448739" class="delimiter">(</a><a href="#390587" title="T" id="1448736">_</a>, <a href="#390588" title="Parsers.this.Input" id="1448737">_</a><span class="delimiter">)</span>  =&gt; <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><a href="#1448741" title="(x: Parsers.this.ParseResult[Unit])Parsers.this.ParseResult[Unit]" class="delimiter">(</a><span title="String(&quot;Expected failure&quot;)" class="string">&quot;Expected failure&quot;</span>, <a href="#392543" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> _              =&gt; <a href="#392725" title="(result: Unit, next: Parsers.this.Input)Parsers.this.Success[Unit]">Success</a><a href="#1448741" title="(x: Parsers.this.ParseResult[Unit])Parsers.this.ParseResult[Unit]" class="delimiter">(</a><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>, <a href="#392543" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** A parser generator for guard expressions. The resulting parser will
+   *  fail or succeed just like the one given as parameter but it will not
+   *  consume any input.
+   *
+   * @param p a `Parser` that is to be applied to the input
+   * @return A parser that returns success if and only if `p` succeeds but
+   *         never consumes any input
+   */
+  <span class="keyword">def</span> <a title="[T](p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[T]" id="388685">guard</a><span class="delimiter">[</span><a title="" id="388687">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="392563">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a> <span class="delimiter">{</span> <a title="Parsers.this.Input" id="392568">in</a> =&gt;
+    <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p</a><span title="Parsers.this.ParseResult[T]" class="delimiter">(</span><a href="#392568" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span><span class="delimiter">{</span>
+      <span class="keyword">case</span> s@ Success<a href="#1448746" title="Parsers.this.ParseResult[T]" id="1448749" class="delimiter">(</a><a href="#390587" title="T" id="392581">s1</a>,<a href="#390588" title="Parsers.this.Input" id="1448747">_</a><span class="delimiter">)</span> =&gt; <a href="#392725" title="(result: T, next: Parsers.this.Input)Parsers.this.Success[T]">Success</a><a href="#1448751" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]" class="delimiter">(</a><a href="#392581" title="T">s1</a>, <a href="#392568" title="Parsers.this.Input">in</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> e =&gt; <a href="#1448751" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]">e</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** `positioned` decorates a parser's result with the start position of the
+   *  input it consumed.
+   *
+   * @param p a `Parser` whose result conforms to `Positional`.
+   * @return A parser that has the same behaviour as `p`, but which marks its
+   *         result with the start position of the input it consumed,
+   *         if it didn't already have a position.
+   */
+  <span class="keyword">def</span> <a title="[T &lt;: scala.util.parsing.input.Positional](p: =&gt; Parsers.this.Parser[T])Parsers.this.Parser[T]" id="388688">positioned</a><span class="delimiter">[</span><a title=" &lt;: scala.util.parsing.input.Positional" id="388690">T</a> &lt;: Positional<span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[T]" id="392589">p</a>: =&gt; Parser<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#388613" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[T])Parsers.this.Parser[T]">Parser</a> <span class="delimiter">{</span> <a title="Parsers.this.Input" id="392594">in</a> =&gt;
+    <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p</a><a href="#1448762" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]" class="delimiter">(</a><a href="#392594" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Success<a href="#1448756" title="Parsers.this.ParseResult[T]" id="1448758" class="delimiter">(</a><a href="#390587" title="T" id="392606">t</a>, <a href="#390588" title="Parsers.this.Input" id="392607">in1</a><span class="delimiter">)</span> =&gt; <a href="#392725" title="(result: T, next: Parsers.this.Input)Parsers.this.Success[T]">Success</a><a href="#1448762" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]" class="delimiter">(</a><span title="t.type" class="keyword">if</span> <span class="delimiter">(</span><a href="#392606" title="T">t</a>.<a href="../input/Positional.scala.html#387165" title="=&gt; scala.util.parsing.input.Position">pos</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="../input/NoPosition.scala.html#20085" title="scala.util.parsing.input.NoPosition.type">NoPosition</a><span class="delimiter">)</span> <a href="#392606" title="T">t</a> <a href="../input/Positional.scala.html#387168" title="(newpos: scala.util.parsing.input.Position)t.type">setPos</a> <a href="#392594" title="Parsers.this.Input">in</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a> <span class="keyword">else</span> <a href="#392606" title="T">t</a>, <a href="#392607" title="Parsers.this.Input">in1</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a href="#1448756" title="Parsers.this.ParseResult[T]" id="1448760">ns</a>: NoSuccess =&gt; <a href="#1448762" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]">ns</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** A parser generator delimiting whole phrases (i.e. programs).
+   *
+   *  `phrase(p)` succeeds if `p` succeeds and no input is left over after `p`.
+   *
+   *  @param p the parser that must consume all input for the resulting parser
+   *           to succeed.
+   *  @return  a parser that has the same result as `p`, but that only succeeds
+   *           if `p` consumed all the input.
+   */
+  <span class="keyword">def</span> <a title="[T](p: Parsers.this.Parser[T])Parsers.this.Parser[T]" id="388691">phrase</a><span class="delimiter">[</span><a title="" id="388693">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Parsers.this.Parser[T]" id="389228">p</a>: <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="#389229" title="Parsers.this.Parser[T]" class="keyword">new</a> <a title="anonymous class $anon extends Parsers.this.Parser[T]" id="389229">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]" id="389231">apply</a><span class="delimiter">(</span><a title="Parsers.this.Input" id="389232">in</a>: <a href="../input/Reader.scala.html#20090" title="Parsers.this.Input">Input</a><span class="delimiter">)</span> = <a href="#388600" title="=&gt; scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">lastNoSuccessVar</a>.<a href="../../DynamicVariable.scala.html#54412" title="(newval: Option[Parsers.this.NoSuccess])(thunk: =&gt; Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]">withValue</a><span class="delimiter">(</span><a href="../../../Option.scala.html#1585" title="None.type">None</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#388930" title="(in: Parsers.this.Input)Parsers.this.ParseResult[T]">p</a><a href="#1448769" title="Parsers.this.Success[T]" class="delimiter">(</a><a href="#389232" title="Parsers.this.Input">in</a><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> s @ Success<a href="#1448767" title="Parsers.this.ParseResult[T]" id="1448769" class="delimiter">(</a><a href="#390587" title="T" id="389356">out</a>, <a href="#390588" title="Parsers.this.Input" id="389357">in1</a><span class="delimiter">)</span> =&gt;
+        <a href="#1448771" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]" class="keyword">if</a> <span class="delimiter">(</span><a href="#389357" title="Parsers.this.Input">in1</a>.<a href="../input/Reader.scala.html#388923" title="=&gt; Boolean">atEnd</a><span class="delimiter">)</span>
+          s
+        <span class="keyword">else</span>
+            <a href="#388600" title="=&gt; scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">lastNoSuccessVar</a>.<a href="../../DynamicVariable.scala.html#54411" title="=&gt; Option[Parsers.this.NoSuccess]">value</a> <a href="../../../Option.scala.html#32199" title="(p: Parsers.this.NoSuccess =&gt; Boolean)Option[Parsers.this.NoSuccess]">filterNot</a> <span class="delimiter">{</span> <a href="#389360" title="Parsers.this.NoSuccess">_</a>.<a href="#390708" title="=&gt; Parsers.this.Input">next</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a> <a href="../input/Position.scala.html#389147" title="(that: scala.util.parsing.input.Position)Boolean">&lt;</a> <a href="#389357" title="Parsers.this.Input">in1</a>.<a href="../input/Reader.scala.html#388922" title="=&gt; scala.util.parsing.input.Position">pos</a> <span class="delimiter">}</span> <a href="../../../Option.scala.html#32180" title="(default: =&gt; Parsers.this.NoSuccess)Parsers.this.NoSuccess">getOrElse</a> <a href="#392729" title="(msg: String, next: Parsers.this.Input)Parsers.this.Failure">Failure</a><span class="delimiter">(</span><span title="String(&quot;end of input expected&quot;)" class="string">&quot;end of input expected&quot;</span>, <a href="#389357" title="Parsers.this.Input">in1</a><span class="delimiter">)</span>
+        <span class="keyword">case</span> ns =&gt; <a href="#388600" title="=&gt; scala.util.DynamicVariable[Option[Parsers.this.NoSuccess]]">lastNoSuccessVar</a>.<a href="../../DynamicVariable.scala.html#54411" title="=&gt; Option[Parsers.this.NoSuccess]">value</a>.<a href="../../../Option.scala.html#32180" title="(default: =&gt; Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]">getOrElse</a><a href="#1448771" title="(x: Parsers.this.ParseResult[T])Parsers.this.ParseResult[T]" class="delimiter">(</a>ns<span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Given a concatenation with a repetition (list), move the concatenated element into the list */
+  <span class="keyword">def</span> <a title="[T]=&gt; Parsers.this.~[T,List[T]] =&gt; List[T]" id="388694">mkList</a><span class="delimiter">[</span><a title="" id="388696">T</a><span class="delimiter">]</span> = <span class="delimiter">(</span><a href="#392073" title="Parsers.this.~[T,List[T]]">_</a>: <a href="#392744" title="Parsers.this.~[T,List[T]]">~</a><span class="delimiter">[</span>T, List<span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="keyword">match</span> <span class="delimiter">{</span> <span class="keyword">case</span> <a href="#392737" title="T" id="392078">x</a> ~ <a href="#392738" title="List[T]" id="392079">xs</a> =&gt; <a href="#392078" title="T">x</a> <a href="#1448778" title="(x: List[T])List[T]">::</a> <a href="#392079" title="List[T]">xs</a> <span class="delimiter">}</span>
+
+  /** A wrapper over sequence of matches.
+   *
+   *  Given `p1: Parser[A]` and `p2: Parser[B]`, a parser composed with
+   *  `p1 ~ p2` will have type `Parser[~[A, B]]`. The successful result
+   *  of the parser can be extracted from this case class.
+   *
+   *  It also enables pattern matching, so something like this is possible:
+   *
+   *  {{{
+   *  def concat(p1: Parser[String], p2: Parser[String]): Parser[String] =
+   *    p1 ~ p2 ^^ { case a ~ b =&gt; a + b }
+   *  }}}
+   */
+  case <span class="keyword">class</span> <a href="#392664" title="class ~[+a, +b] extends AnyRef with Product with Serializable" id="392744">~</a><span class="delimiter">[</span>+<a title="" id="388731">a</a>, +<a title="" id="388732">b</a><span class="delimiter">]</span><a href="../../../Product.scala.html#186" title="Product" class="delimiter">(</a><a title="a" id="392737">_1</a>: <a href="#388731" title="a">a</a>, <a title="b" id="392738">_2</a>: <a href="#388732" title="b">b</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="388715">toString</a> = <span title="String(&quot;(&quot;)" class="string">&quot;(&quot;</span><span title="(x$1: Any)String">+</span> <a href="#392737" title="=&gt; a">_1</a> <span title="(x$1: Any)String">+</span><span title="String(&quot;~&quot;)" class="string">&quot;~&quot;</span><span title="(x$1: Any)String">+</span> <a href="#392738" title="=&gt; b">_2</a> <span title="(x$1: Any)String">+</span><span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+  <span class="delimiter">}</span>
+
+  /** A parser whose `~` combinator disallows back-tracking.
+   */
+  <span class="keyword">trait</span> <a title="trait OnceParser[+T] extends Parsers.this.Parser[T]" id="388702">OnceParser</a><span class="delimiter">[</span>+<a title="" id="388703">T</a><span class="delimiter">]</span> <a href="../../../Unit.scala.html#1515" title="Unit" class="keyword">extends</a> <a href="#388619" title="Parsers.this.Parser[T]">Parser</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="[U](p: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[Parsers.this.~[T,U]]" id="391014">~</a> <span class="delimiter">[</span><a title="" id="391016">U</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; Parsers.this.Parser[U]" id="391023">p</a>: =&gt; Parser<span class="delimiter">[</span>U<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#388619" title="Parsers.this.Parser[Parsers.this.~[T,U]]">Parser</a><span class="delimiter">[</span>~<span class="delimiter">[</span>T, U<span class="delimiter">]</span><span class="delimiter">]</span>
+      = <a href="#388616" title="(f: Parsers.this.Input =&gt; Parsers.this.ParseResult[Parsers.this.~[T,U]])Parsers.this.Parser[Parsers.this.~[T,U]] with Parsers.this.OnceParser[Parsers.this.~[T,U]]">OnceParser</a><span class="delimiter">{</span> <span class="delimiter">(</span><span class="keyword">for</span><span class="delimiter">(</span><a title="T" id="392694">a</a> &lt;- <a href="#388931" title="(f: T =&gt; Parsers.this.Parser[Parsers.this.~[T,U]])Parsers.this.Parser[Parsers.this.~[T,U]]" class="keyword">this</a>; <a title="U" id="392702">b</a> &lt;- <a href="#388621" title="(p: =&gt; Parsers.this.Parser[U])Parsers.this.Parser[U]">commit</a><a href="#388934" title="(f: U =&gt; Parsers.this.~[T,U])Parsers.this.Parser[Parsers.this.~[T,U]]" class="delimiter">(</a><a href="#391023" title="=&gt; Parsers.this.Parser[U]">p</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">yield</span> <span title="Parsers.this.~[T,U]" class="keyword">new</span> <a href="#392744" title="Parsers.this.~[T,U]">~</a><span class="delimiter">(</span><a href="#392694" title="T">a</a>,<a href="#392702" title="U">b</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="#388928" title="(n: String)Parsers.this.Parser[Parsers.this.~[T,U]]">named</a><span class="delimiter">(</span><span title="String(&quot;~&quot;)" class="string">&quot;~&quot;</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
