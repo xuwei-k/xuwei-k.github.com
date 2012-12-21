@@ -1,0 +1,365 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/sys/process/ProcessBuilder.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.sys
+<span class="keyword">package</span> process
+
+<span class="keyword">import</span> <a href="package.scala.html#25755" title="scala.sys.process.processInternal.type">processInternal</a>._
+<span class="keyword">import</span> <a href="#25944" title="scala.sys.process.ProcessBuilder.type">ProcessBuilder</a>._
+
+/** Represents a sequence of one or more external processes that can be
+  * executed. A `ProcessBuilder` can be a single external process, or a
+  * combination of other `ProcessBuilder`. One can control where a
+  * the output of an external process will go to, and where its input will come
+  * from, or leave that decision to whoever starts it.
+  *
+  * One creates a `ProcessBuilder` through factories provided in
+  * [[scala.sys.process.Process]]'s companion object, or implicit conversions
+  * based on these factories made available in the package object
+  * [[scala.sys.process]]. Here are some examples:
+  * {{{
+  * import.scala.sys.process._
+  *
+  * // Executes &quot;ls&quot; and sends output to stdout
+  * &quot;ls&quot;.!
+  *
+  * // Execute &quot;ls&quot; and assign a `Stream[String]` of its output to &quot;contents&quot;.
+  * // Because [[scala.Predef]] already defines a `lines` method for `String`,
+  * // we use [[scala.sys.process.Process]]'s object companion to create it.
+  * val contents = Process(&quot;ls&quot;).lines
+  *
+  * // Here we use a `Seq` to make the parameter whitespace-safe
+  * def contentsOf(dir: String): String = Seq(&quot;ls&quot;, dir).!!
+  * }}}
+  *
+  * The methods of `ProcessBuilder` are divided in three categories: the ones that
+  * combine two `ProcessBuilder` to create a third, the ones that redirect input
+  * or output of a `ProcessBuilder`, and the ones that execute
+  * the external processes associated with it.
+  *
+  * ==Combining `ProcessBuilder`==
+  *
+  * Two existing `ProcessBuilder` can be combined in the following ways:
+  *
+  *   * They can be executed in parallel, with the output of the first being fed
+  *   as input to the second, like Unix pipes. This is achieved with the `#|`
+  *   method.
+  *   * They can be executed in sequence, with the second starting as soon as
+  *   the first ends. This is done by the `###` method.
+  *   * The execution of the second one can be conditioned by the return code
+  *   (exit status) of the first, either only when it's zero, or only when it's
+  *   not zero. The methods `#&amp;&amp;` and `#||` accomplish these tasks.
+  *
+  * ==Redirecting Input/Output==
+  *
+  * Though control of input and output can be done when executing the process,
+  * there's a few methods that create a new `ProcessBuilder` with a
+  * pre-configured input or output. They are `#&lt;`, `#&gt;` and `#&gt;&gt;`, and may take
+  * as input either another `ProcessBuilder` (like the pipe described above), or
+  * something else such as a `java.io.File` or a `java.lang.InputStream`.
+  * For example:
+  * {{{
+  * new URL(&quot;http://databinder.net/dispatch/About&quot;) #&gt; &quot;grep JSON&quot; #&gt;&gt; new File(&quot;About_JSON&quot;) !
+  * }}}
+  *
+  * ==Starting Processes==
+  *
+  * To execute all external commands associated with a `ProcessBuilder`, one
+  * may use one of four groups of methods. Each of these methods have various
+  * overloads and variations to enable further control over the I/O. These
+  * methods are:
+  *
+  *   * `run`: the most general method, it returns a
+  *   [[scala.sys.process.Process]] immediately, and the external command
+  *   executes concurrently.
+  *   * `!`: blocks until all external commands exit, and returns the exit code
+  *   of the last one in the chain of execution.
+  *   * `!!`: blocks until all external commands exit, and returns a `String`
+  *   with the output generated.
+  *   * `lines`: returns immediately like `run`, and the output being generared
+  *   is provided through a `Stream[String]`. Getting the next element of that
+  *   `Stream` may block until it becomes available. This method will throw an
+  *   exception if the return code is different than zero -- if this is not
+  *   desired, use the `lines_!` method.
+  *
+  * ==Handling Input and Output==
+  *
+  * If not specified, the input of the external commands executed with `run` or
+  * `!` will not be tied to anything, and the output will be redirected to the
+  * stdout and stderr of the Scala process. For the methods `!!` and `lines`, no
+  * input will be provided, and the output will be directed according to the
+  * semantics of these methods.
+  *
+  * Some methods will cause stdin to be used as input. Output can be controlled
+  * with a [[scala.sys.process.ProcessLogger]] -- `!!` and `lines` will only
+  * redirect error output when passed a `ProcessLogger`. If one desires full
+  * control over input and output, then a [[scala.sys.process.ProcessIO]] can be
+  * used with `run`.
+  *
+  * For example, we could silence the error output from `lines_!` like this:
+  * {{{
+  * val etcFiles = &quot;find /etc&quot; lines_! ProcessLogger(line =&gt; ())
+  * }}}
+  *
+  * ==Extended Example==
+  *
+  * Let's examine in detail one example of usage:
+  * {{{
+  * import scala.sys.process._
+  * &quot;find src -name *.scala -exec grep null {} ;&quot;  #|  &quot;xargs test -z&quot;  #&amp;&amp;  &quot;echo null-free&quot;  #||  &quot;echo null detected&quot;  !
+  * }}}
+  * Note that every `String` is implicitly converted into a `ProcessBuilder`
+  * through the implicits imported from [[scala.sys.process]]. These `ProcessBuilder` are then
+  * combined in three different ways.
+  *
+  *   1. `#|` pipes the output of the first command into the input of the second command. It
+  *      mirrors a shell pipe (`|`).
+  *   1. `#&amp;&amp;` conditionally executes the second command if the previous one finished with
+  *      exit value 0. It mirrors shell's `&amp;&amp;`.
+  *   1. `#||` conditionally executes the third command if the exit value of the previous
+  *      command is different than zero. It mirrors shell's `&amp;&amp;`.
+  *
+  * Finally, `!` at the end executes the commands, and returns the exit value.
+  * Whatever is printed will be sent to the Scala process standard output. If
+  * we wanted to caputre it, we could run that with `!!` instead.
+  *
+  * Note: though it is not shown above, the equivalent of a shell's `;` would be
+  * `###`. The reason for this name is that `;` is a reserved token in Scala.
+  */
+<span class="keyword">trait</span> <a title="trait ProcessBuilder extends Object with scala.sys.process.ProcessBuilder.Source with scala.sys.process.ProcessBuilder.Sink" id="25943">ProcessBuilder</a> <span class="keyword">extends</span> <a href="#585587" title="scala.sys.process.ProcessBuilder.Source">Source</a> <span class="keyword">with</span> <a href="#585588" title="scala.sys.process.ProcessBuilder.Sink">Sink</a> <span class="delimiter">{</span>
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the output as a String.  Standard error is sent to the console.  If
+    * the exit code is non-zero, an exception is thrown.
+    */
+  <span class="keyword">def</span> <a title="=&gt; String" id="585983">!!</a> : <span title="String">String</span>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the output as a String.  Standard error is sent to the provided
+    * ProcessLogger.  If the exit code is non-zero, an exception is thrown.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)String" id="585984">!!</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586573">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span>: <span title="String">String</span>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the output as a String.  Standard error is sent to the console.  If
+    * the exit code is non-zero, an exception is thrown.  The newly started
+    * process reads from standard input of the current process.
+    */
+  <span class="keyword">def</span> <a title="=&gt; String" id="585985">!!&lt;</a> : <span title="String">String</span>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the output as a String.  Standard error is sent to the provided
+    * ProcessLogger.  If the exit code is non-zero, an exception is thrown.  The
+    * newly started process reads from standard input of the current process.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)String" id="585986">!!&lt;</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586577">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span>: <span title="String">String</span>
+
+  /** Starts the process represented by this builder.  The output is returned as
+    * a Stream that blocks when lines are not available but the process has not
+    * completed.  Standard error is sent to the console.  If the process exits
+    * with a non-zero value, the Stream will provide all lines up to termination
+    * and then throw an exception.
+    */
+  <span class="keyword">def</span> <a title="=&gt; Stream[String]" id="585987">lines</a>: <a href="../../collection/immutable/Stream.scala.html#11226" title="Stream[String]">Stream</a><span class="delimiter">[</span>String<span class="delimiter">]</span>
+
+  /** Starts the process represented by this builder.  The output is returned as
+    * a Stream that blocks when lines are not available but the process has not
+    * completed.  Standard error is sent to the provided ProcessLogger.  If the
+    * process exits with a non-zero value, the Stream will provide all lines up
+    * to termination but will not throw an exception.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)Stream[String]" id="585988">lines</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586581">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span>: <a href="../../collection/immutable/Stream.scala.html#11226" title="Stream[String]">Stream</a><span class="delimiter">[</span>String<span class="delimiter">]</span>
+
+  /** Starts the process represented by this builder.  The output is returned as
+    * a Stream that blocks when lines are not available but the process has not
+    * completed.  Standard error is sent to the console. If the process exits
+    * with a non-zero value, the Stream will provide all lines up to termination
+    * but will not throw an exception.
+    */
+  <span class="keyword">def</span> <a title="=&gt; Stream[String]" id="585989">lines_!</a> : <a href="../../collection/immutable/Stream.scala.html#11226" title="Stream[String]">Stream</a><span class="delimiter">[</span>String<span class="delimiter">]</span>
+
+  /** Starts the process represented by this builder.  The output is returned as
+    * a Stream that blocks when lines are not available but the process has not
+    * completed.  Standard error is sent to the provided ProcessLogger. If the
+    * process exits with a non-zero value, the Stream will provide all lines up
+    * to termination but will not throw an exception.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)Stream[String]" id="585990">lines_!</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586585">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span>: <a href="../../collection/immutable/Stream.scala.html#11226" title="Stream[String]">Stream</a><span class="delimiter">[</span>String<span class="delimiter">]</span>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the exit code.  Standard output and error are sent to the console.
+    */
+  <span class="keyword">def</span> <a title="=&gt; Int" id="585991">!</a> : <a href="../../Int.scala.html#321" title="Int">Int</a>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the exit code.  Standard output and error are sent to the given
+    * ProcessLogger.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)Int" id="585992">!</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586589">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span>: <a href="../../Int.scala.html#321" title="Int">Int</a>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the exit code.  Standard output and error are sent to the console.
+    * The newly started process reads from standard input of the current process.
+    */
+  <span class="keyword">def</span> <a title="=&gt; Int" id="585993">!&lt;</a> : <a href="../../Int.scala.html#321" title="Int">Int</a>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the exit code.  Standard output and error are sent to the given
+    * ProcessLogger.  The newly started process reads from standard input of the
+    * current process.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)Int" id="585994">!&lt;</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586593">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span>: <a href="../../Int.scala.html#321" title="Int">Int</a>
+
+  /** Starts the process represented by this builder.  Standard output and error
+   * are sent to the console.*/
+  <span class="keyword">def</span> <a title="()scala.sys.process.Process" id="585995">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="Process.scala.html#25784" title="scala.sys.process.Process">Process</a>
+
+  /** Starts the process represented by this builder.  Standard output and error
+    * are sent to the given ProcessLogger.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)scala.sys.process.Process" id="585996">run</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586596">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span>: <a href="Process.scala.html#25784" title="scala.sys.process.Process">Process</a>
+
+  /** Starts the process represented by this builder.  I/O is handled by the
+    * given ProcessIO instance.
+    */
+  <span class="keyword">def</span> <a title="(io: scala.sys.process.ProcessIO)scala.sys.process.Process" id="585997">run</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessIO" id="586598">io</a>: <a href="ProcessIO.scala.html#25832" title="scala.sys.process.ProcessIO">ProcessIO</a><span class="delimiter">)</span>: <a href="Process.scala.html#25784" title="scala.sys.process.Process">Process</a>
+
+  /** Starts the process represented by this builder.  Standard output and error
+    * are sent to the console.  The newly started process reads from standard
+    * input of the current process if `connectInput` is true.
+    */
+  <span class="keyword">def</span> <a title="(connectInput: Boolean)scala.sys.process.Process" id="585998">run</a><span class="delimiter">(</span><a title="Boolean" id="586600">connectInput</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a><span class="delimiter">)</span>: <a href="Process.scala.html#25784" title="scala.sys.process.Process">Process</a>
+
+  /** Starts the process represented by this builder, blocks until it exits, and
+    * returns the exit code.  Standard output and error are sent to the given
+    * ProcessLogger.  The newly started process reads from standard input of the
+    * current process if `connectInput` is true.
+    */
+  <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger, connectInput: Boolean)scala.sys.process.Process" id="585999">run</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="586602">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a>, <a title="Boolean" id="586603">connectInput</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a><span class="delimiter">)</span>: <a href="Process.scala.html#25784" title="scala.sys.process.Process">Process</a>
+
+  /** Constructs a command that runs this command first and then `other` if this
+    * command succeeds.
+    */
+  <span class="keyword">def</span> <a title="(other: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder" id="586000">#&amp;&amp;</a> <span class="delimiter">(</span><a title="scala.sys.process.ProcessBuilder" id="586514">other</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+  /** Constructs a command that runs this command first and then `other` if this
+    * command does not succeed.
+    */
+  <span class="keyword">def</span> <a title="(other: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder" id="586001">#||</a> <span class="delimiter">(</span><a title="scala.sys.process.ProcessBuilder" id="586605">other</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+  /** Constructs a command that will run this command and pipes the output to
+    * `other`.  `other` must be a simple command.
+    */
+  <span class="keyword">def</span> <a title="(other: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder" id="586002">#|</a> <span class="delimiter">(</span><a title="scala.sys.process.ProcessBuilder" id="586607">other</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+  /** Constructs a command that will run this command and then `other`.  The
+    * exit code will be the exit code of `other`.
+    */
+  <span class="keyword">def</span> <a title="(other: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder" id="586003">###</a> <span class="delimiter">(</span><a title="scala.sys.process.ProcessBuilder" id="586609">other</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+
+  /** True if this command can be the target of a pipe.  */
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="586004">canPipeTo</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a>
+
+  /** True if this command has an exit code which should be propagated to the
+    * user.  Given a pipe between A and B, if B.hasExitValue is true then the
+    * exit code will be the one from B; if it is false, the one from A.  This
+    * exists to prevent output redirections (implemented as pipes) from masking
+    * useful process error codes.
+    */
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="586005">hasExitValue</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a>
+<span class="delimiter">}</span>
+
+/** This object contains traits used to describe input and output sources. */
+<span class="keyword">object</span> <a title="scala.sys.process.ProcessBuilder.type" id="25944">ProcessBuilder</a> <a href="#25945" title="scala.sys.process.ProcessBuilder.type" class="keyword">extends</a> <a href="ProcessBuilderImpl.scala.html#25772" title="scala.sys.process.ProcessBuilderImpl">ProcessBuilderImpl</a> <span class="delimiter">{</span>
+  /** Used when creating [[scala.sys.process.ProcessBuilder.Source]] from an URL. */
+  <span class="keyword">trait</span> <a title="trait URLBuilder extends Object with scala.sys.process.ProcessBuilder.Source" id="585585">URLBuilder</a> <span class="keyword">extends</span> <a href="#585587" title="scala.sys.process.ProcessBuilder.Source">Source</a> <span class="delimiter">{</span>
+
+  <span class="delimiter">}</span>
+
+  /** Used when creating [[scala.sys.process.ProcessBuilder.Source]] and/or
+    * [[scala.sys.process.ProcessBuilder.Sink]] from a file.
+    */
+  <span class="keyword">trait</span> <a title="trait FileBuilder extends Object with scala.sys.process.ProcessBuilder.Sink with scala.sys.process.ProcessBuilder.Source" id="585586">FileBuilder</a> <span class="keyword">extends</span> <a href="#585588" title="scala.sys.process.ProcessBuilder.Sink">Sink</a> <span class="keyword">with</span> <a href="#585587" title="scala.sys.process.ProcessBuilder.Source">Source</a> <span class="delimiter">{</span>
+    /** Append the contents of a `java.io.File` to this file */
+    <span class="keyword">def</span> <a title="(f: scala.sys.process.processInternal.File)scala.sys.process.ProcessBuilder" id="586239">#&lt;&lt;</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.File" id="586618">f</a>: <span title="scala.sys.process.processInternal.File">File</span><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+    /** Append the contents from a `java.net.URL` to this file */
+    <span class="keyword">def</span> <a title="(u: scala.sys.process.processInternal.URL)scala.sys.process.ProcessBuilder" id="586240">#&lt;&lt;</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.URL" id="586620">u</a>: <span title="scala.sys.process.processInternal.URL">URL</span><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+    /** Append the contents of a `java.io.InputStream` to this file */
+    <span class="keyword">def</span> <a title="(i: =&gt; scala.sys.process.processInternal.InputStream)scala.sys.process.ProcessBuilder" id="586241">#&lt;&lt;</a><span class="delimiter">(</span><a title="=&gt; scala.sys.process.processInternal.InputStream" id="586622">i</a>: =&gt; InputStream<span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+    /** Append the contents of a [[scala.sys.process.ProcessBuilder]] to this file */
+    <span class="keyword">def</span> <a title="(p: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder" id="586242">#&lt;&lt;</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessBuilder" id="586624">p</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+  <span class="delimiter">}</span>
+
+  /** Represents everything that can be used as an input to a
+    * [[scala.sys.process.ProcessBuilder]].
+    */
+  <span class="keyword">trait</span> <a title="trait Source extends Object" id="585587">Source</a> <a href="../../Unit.scala.html#1515" title="Unit" class="delimiter">{</a>
+    <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; scala.sys.process.ProcessBuilder" id="585976">toSource</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+    /** Writes the output stream of this process to the given file. */
+    <span class="keyword">def</span> <a title="(f: scala.sys.process.processInternal.File)scala.sys.process.ProcessBuilder" id="585977">#&gt;</a> <span class="delimiter">(</span><a title="scala.sys.process.processInternal.File" id="586627">f</a>: <span title="scala.sys.process.processInternal.File">File</span><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <a href="#585982" title="(f: scala.sys.process.processInternal.File, append: Boolean)scala.sys.process.ProcessBuilder">toFile</a><span class="delimiter">(</span><a href="#586627" title="scala.sys.process.processInternal.File">f</a>, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+
+    /** Appends the output stream of this process to the given file. */
+    <span class="keyword">def</span> <a title="(f: scala.sys.process.processInternal.File)scala.sys.process.ProcessBuilder" id="585978">#&gt;&gt;</a> <span class="delimiter">(</span><a title="scala.sys.process.processInternal.File" id="586658">f</a>: <span title="scala.sys.process.processInternal.File">File</span><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <a href="#585982" title="(f: scala.sys.process.processInternal.File, append: Boolean)scala.sys.process.ProcessBuilder">toFile</a><span class="delimiter">(</span><a href="#586658" title="scala.sys.process.processInternal.File">f</a>, <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+
+    /** Writes the output stream of this process to the given OutputStream. The
+      * argument is call-by-name, so the stream is recreated, written, and closed each
+      * time this process is executed.
+      */
+    <span class="keyword">def</span> <a title="(out: =&gt; scala.sys.process.processInternal.OutputStream)scala.sys.process.ProcessBuilder" id="585979">#&gt;</a><span class="delimiter">(</span><a title="=&gt; scala.sys.process.processInternal.OutputStream" id="586635">out</a>: =&gt; OutputStream<span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <a href="#585980" title="(b: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder">#&gt;</a> <span class="delimiter">(</span><span title="scala.sys.process.ProcessBuilder.OStreamBuilder" class="keyword">new</span> <a href="ProcessBuilderImpl.scala.html#585571" title="scala.sys.process.ProcessBuilder.OStreamBuilder">OStreamBuilder</a><span class="delimiter">(</span><a href="#586635" title="=&gt; scala.sys.process.processInternal.OutputStream">out</a>, <span title="String(&quot;&lt;output stream&gt;&quot;)" class="string">&quot;&lt;output stream&gt;&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    /** Writes the output stream of this process to a [[scala.sys.process.ProcessBuilder]]. */
+    <span class="keyword">def</span> <a title="(b: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder" id="585980">#&gt;</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessBuilder" id="586634">b</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <span title="scala.sys.process.ProcessBuilder.PipedBuilder" class="keyword">new</span> <a href="ProcessBuilderImpl.scala.html#585580" title="scala.sys.process.ProcessBuilder.PipedBuilder">PipedBuilder</a><span class="delimiter">(</span><a href="#585976" title="=&gt; scala.sys.process.ProcessBuilder">toSource</a>, <a href="#586634" title="scala.sys.process.ProcessBuilder">b</a>, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+
+    /** Returnes a [[scala.sys.process.ProcessBuilder]] representing this `Source`. */
+    <span class="keyword">def</span> <a title="=&gt; scala.sys.process.ProcessBuilder" id="585981">cat</a> = <a href="#585976" title="=&gt; scala.sys.process.ProcessBuilder">toSource</a>
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="(f: scala.sys.process.processInternal.File, append: Boolean)scala.sys.process.ProcessBuilder" id="585982">toFile</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.File" id="586628">f</a>: <span title="scala.sys.process.processInternal.File">File</span>, <a title="Boolean" id="586629">append</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a><span class="delimiter">)</span> = <a href="#585980" title="(b: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder">#&gt;</a> <span class="delimiter">(</span><span title="scala.sys.process.ProcessBuilder.FileOutput" class="keyword">new</span> <a href="ProcessBuilderImpl.scala.html#585570" title="scala.sys.process.ProcessBuilder.FileOutput">FileOutput</a><span class="delimiter">(</span><a href="#586628" title="scala.sys.process.processInternal.File">f</a>, <a href="#586629" title="Boolean">append</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Represents everything that can receive an output from a
+    * [[scala.sys.process.ProcessBuilder]].
+    */
+  <span class="keyword">trait</span> <a title="trait Sink extends Object" id="585588">Sink</a> <a href="../../Unit.scala.html#1515" title="Unit" class="delimiter">{</a>
+    <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; scala.sys.process.ProcessBuilder" id="586234">toSink</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a>
+
+    /** Reads the given file into the input stream of this process. */
+    <span class="keyword">def</span> <a title="(f: scala.sys.process.processInternal.File)scala.sys.process.ProcessBuilder" id="586235">#&lt;</a> <span class="delimiter">(</span><a title="scala.sys.process.processInternal.File" id="586691">f</a>: <span title="scala.sys.process.processInternal.File">File</span><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <a href="#586238" title="(b: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder">#&lt;</a> <span class="delimiter">(</span><span title="scala.sys.process.ProcessBuilder.FileInput" class="keyword">new</span> <a href="ProcessBuilderImpl.scala.html#585569" title="scala.sys.process.ProcessBuilder.FileInput">FileInput</a><span class="delimiter">(</span><a href="#586691" title="scala.sys.process.processInternal.File">f</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    /** Reads the given URL into the input stream of this process. */
+    <span class="keyword">def</span> <a title="(f: scala.sys.process.processInternal.URL)scala.sys.process.ProcessBuilder" id="586236">#&lt;</a> <span class="delimiter">(</span><a title="scala.sys.process.processInternal.URL" id="586698">f</a>: <span title="scala.sys.process.processInternal.URL">URL</span><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <a href="#586238" title="(b: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder">#&lt;</a> <span class="delimiter">(</span><span title="scala.sys.process.ProcessBuilder.URLInput" class="keyword">new</span> <a href="ProcessBuilderImpl.scala.html#585568" title="scala.sys.process.ProcessBuilder.URLInput">URLInput</a><span class="delimiter">(</span><a href="#586698" title="scala.sys.process.processInternal.URL">f</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    /** Reads the given InputStream into the input stream of this process. The
+      * argument is call-by-name, so the stream is recreated, read, and closed each
+      * time this process is executed.
+      */
+    <span class="keyword">def</span> <a title="(in: =&gt; scala.sys.process.processInternal.InputStream)scala.sys.process.ProcessBuilder" id="586237">#&lt;</a><span class="delimiter">(</span><a title="=&gt; scala.sys.process.processInternal.InputStream" id="586697">in</a>: =&gt; InputStream<span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <a href="#586238" title="(b: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder">#&lt;</a> <span class="delimiter">(</span><span title="scala.sys.process.ProcessBuilder.IStreamBuilder" class="keyword">new</span> <a href="ProcessBuilderImpl.scala.html#585572" title="scala.sys.process.ProcessBuilder.IStreamBuilder">IStreamBuilder</a><span class="delimiter">(</span><a href="#586697" title="=&gt; scala.sys.process.processInternal.InputStream">in</a>, <span title="String(&quot;&lt;input stream&gt;&quot;)" class="string">&quot;&lt;input stream&gt;&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    /** Reads the output of a [[scala.sys.process.ProcessBuilder]] into the input stream of this process. */
+    <span class="keyword">def</span> <a title="(b: scala.sys.process.ProcessBuilder)scala.sys.process.ProcessBuilder" id="586238">#&lt;</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessBuilder" id="586696">b</a>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a><span class="delimiter">)</span>: <a href="#25943" title="scala.sys.process.ProcessBuilder">ProcessBuilder</a> = <span title="scala.sys.process.ProcessBuilder.PipedBuilder" class="keyword">new</span> <a href="ProcessBuilderImpl.scala.html#585580" title="scala.sys.process.ProcessBuilder.PipedBuilder">PipedBuilder</a><span class="delimiter">(</span><a href="#586696" title="scala.sys.process.ProcessBuilder">b</a>, <a href="#586234" title="=&gt; scala.sys.process.ProcessBuilder">toSink</a>, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span title="Object" class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

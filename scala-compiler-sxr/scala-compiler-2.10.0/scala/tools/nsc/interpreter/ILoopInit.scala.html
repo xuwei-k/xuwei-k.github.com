@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/tools/nsc/interpreter/ILoopInit.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/* NSC -- new Scala compiler
+ * Copyright 2005-2013 LAMP/EPFL
+ * @author Paul Phillips
+ */
+
+<span class="keyword">package</span> scala.tools.nsc
+<span class="keyword">package</span> interpreter
+
+<span class="keyword">import</span> scala.reflect.internal.util.Position
+<span class="keyword">import</span> scala.util.control.<a href="../../../util/control/Exception.scala.html#52177" title="scala.util.control.Exception.type">Exception</a>.ignoring
+<span class="keyword">import</span> scala.tools.nsc.util.stackTraceString
+
+/**
+ *  Machinery for the asynchronous initialization of the repl.
+ */
+<span class="keyword">trait</span> <a title="trait ILoopInit extends Object" id="38673">ILoopInit</a> <a href="../../../Unit.scala.html#1515" title="Unit" class="delimiter">{</a>
+  self: ILoop =&gt;
+
+  /** Print a welcome message */
+  <span class="keyword">def</span> <a title="()Unit" id="632916">printWelcome</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">import</span> <a href="../Properties.scala.html#27455" title="scala.tools.nsc.Properties.type">Properties</a>._
+    <span class="keyword">val</span> <a title="String" id="881121">welcomeMsg</a> =
+     <a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;&quot;&quot;|Welcome to Scala %s (%s, Java %s).
+        |Type in expressions to have them evaluated.
+        |Type :help for more information.&quot;&quot;&quot;</a> .
+    <a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">stripMargin</a>.<a href="../../../collection/immutable/StringLike.scala.html#59882" title="(args: Any*)String">format</a><span class="delimiter">(</span><a href="../../../util/Properties.scala.html#80174" title="=&gt; String">versionString</a>, <a href="../../../util/Properties.scala.html#80187" title="=&gt; String">javaVmName</a>, <a href="../../../util/Properties.scala.html#80185" title="=&gt; String">javaVersion</a><span class="delimiter">)</span>
+    <a href="ILoop.scala.html#632830" title="(msg: String)Unit">echo</a><span class="delimiter">(</span><a href="#881121" title="String">welcomeMsg</a><span class="delimiter">)</span>
+    <a href="ReplConfig.scala.html#55706" title="(msg: =&gt; String)Unit">replinfo</a><span class="delimiter">(</span><span title="String(&quot;[info] started at &quot;)" class="string">&quot;[info] started at &quot;</span> <span title="(x$1: Any)String">+</span> <span title="java.util.Date" class="keyword">new</span> java.util.<span title="java.util.Date">Date</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(msg: String)Unit" id="632917">asyncMessage</a><span class="delimiter">(</span><a title="String" id="879873">msg</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="ReplConfig.scala.html#55719" title="=&gt; Boolean">isReplInfo</a> <a href="../../../Boolean.scala.html#57825" title="(x: Boolean)Boolean">||</a> <a href="ReplConfig.scala.html#55720" title="=&gt; Boolean">isReplPower</a><span class="delimiter">)</span>
+      <a href="ILoop.scala.html#632829" title="(msg: String)Unit">echoAndRefresh</a><span class="delimiter">(</span><a href="#879873" title="String">msg</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.locks.ReentrantLock" id="632918">initLock</a> = <span title="java.util.concurrent.locks.ReentrantLock" class="keyword">new</span> java.util.concurrent.locks.<span title="java.util.concurrent.locks.ReentrantLock">ReentrantLock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.locks.Condition" id="632920">initCompilerCondition</a> = <a href="#632918" title="=&gt; java.util.concurrent.locks.ReentrantLock">initLock</a>.<span title="()java.util.concurrent.locks.Condition">newCondition</span><span class="delimiter">(</span><span class="delimiter">)</span> // signal the compiler is initialized
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.locks.Condition" id="632922">initLoopCondition</a> = <a href="#632918" title="=&gt; java.util.concurrent.locks.ReentrantLock">initLock</a>.<span title="()java.util.concurrent.locks.Condition">newCondition</span><span class="delimiter">(</span><span class="delimiter">)</span>     // signal the whole repl is initialized
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Long" id="632924">initStart</a> = <span title="System.type">System</span>.<span title="()Long">nanoTime</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="[T](body: =&gt; T)T" id="632926">withLock</a><span class="delimiter">[</span><a title="" id="632928">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="880466">body</a>: =&gt; T<span class="delimiter">)</span>: <a href="#632928" title="T">T</a> = <span class="delimiter">{</span>
+    <a href="#632918" title="=&gt; java.util.concurrent.locks.ReentrantLock">initLock</a>.<span title="()Unit">lock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="keyword">try</span> <a href="#880466" title="=&gt; T">body</a>
+    <span class="keyword">finally</span> <a href="#632918" title="=&gt; java.util.concurrent.locks.ReentrantLock">initLock</a>.<span title="()Unit">unlock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  // a condition used to ensure serial access to the compiler.
+  @volatile <span class="keyword">private</span> <span class="keyword">var</span> <a title="Boolean" id="632930">initIsComplete</a> = <span title="Boolean(false)" class="keyword">false</span>
+  @volatile <span class="keyword">private</span> <span class="keyword">var</span> <a title="String" id="632933">initError</a>: <span title="String">String</span> = <span title="Null(null)" class="keyword">null</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()String" id="632935">elapsed</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;%.3f&quot;</a>.<a href="../../../collection/immutable/StringLike.scala.html#59882" title="(args: Any*)String">format</a><span class="delimiter">(</span><span class="delimiter">(</span><span title="System.type">System</span>.<span title="()Long">nanoTime</span> <a href="../../../Long.scala.html#57528" title="(x: Long)Long">-</a> <a href="#632924" title="=&gt; Long">initStart</a><span class="delimiter">)</span>.<a href="../../../Long.scala.html#57449" title="=&gt; Double">toDouble</a> <a href="../../../Double.scala.html#57773" title="(x: Long)Double">/</a> <span title="Long(1000000000L)" class="long">1000000000L</span><span class="delimiter">)</span>
+
+  // the method to be called when the interpreter is initialized.
+  // Very important this method does nothing synchronous (i.e. do
+  // not try to use the interpreter) because until it returns, the
+  // repl's lazy val `global` is still locked.
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="()Unit" id="632936">initializedCallback</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#632926" title="(body: =&gt; Unit)Unit">withLock</a><span class="delimiter">(</span><a href="#632920" title="=&gt; java.util.concurrent.locks.Condition">initCompilerCondition</a>.<span title="()Unit">signal</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  // Spins off a thread which awaits a single message once the interpreter
+  // has been initialized.
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="()java.util.concurrent.Future[Unit]" id="632937">createAsyncListener</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    io.<a href="../io/package.scala.html#55797" title="(body: =&gt; Unit)java.util.concurrent.Future[Unit]">spawn</a> <span class="delimiter">{</span>
+      <a href="#632926" title="(body: =&gt; Unit)Unit">withLock</a><span class="delimiter">(</span><a href="#632920" title="=&gt; java.util.concurrent.locks.Condition">initCompilerCondition</a>.<span title="()Unit">await</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#632917" title="(msg: String)Unit">asyncMessage</a><span class="delimiter">(</span><span title="String(&quot;[info] compiler init time: &quot;)" class="string">&quot;[info] compiler init time: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#632935" title="()String">elapsed</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot; s.&quot;)" class="string">&quot; s.&quot;</span><span class="delimiter">)</span>
+      <a href="#632940" title="()Unit">postInitialization</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  // called from main repl loop
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="()Boolean" id="632938">awaitInitialized</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../../Boolean.scala.html#1425" title="Boolean">Boolean</a> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../../../Boolean.scala.html#57822" title="=&gt; Boolean">!</a><a href="#632930" title="=&gt; Boolean">initIsComplete</a><span class="delimiter">)</span>
+      <a href="#632926" title="(body: =&gt; Unit)Unit">withLock</a> <span class="delimiter">{</span> <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="../../../Boolean.scala.html#57822" title="=&gt; Boolean">!</a><a href="#632930" title="=&gt; Boolean">initIsComplete</a><span class="delimiter">)</span> <a href="#632922" title="=&gt; java.util.concurrent.locks.Condition">initLoopCondition</a>.<span title="()Unit">await</span><a href="#881140" title="()Unit" class="delimiter">(</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+    <span title="Boolean" class="keyword">if</span> <span class="delimiter">(</span><a href="#632933" title="=&gt; String">initError</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../../../Predef.scala.html#7514" title="(x: Any)Unit">println</a><span class="delimiter">(</span><a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;&quot;&quot;
+        |Failed to initialize the REPL due to an unexpected error.
+        |This is a bug, please, report it along with the error diagnostics printed below.
+        |%s.&quot;&quot;&quot;</a>.<a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps">stripMargin</a>.<a href="../../../collection/immutable/StringLike.scala.html#59882" title="(args: Any*)String">format</a><span class="delimiter">(</span><a href="#632933" title="=&gt; String">initError</a><span class="delimiter">)</span>
+      <span class="delimiter">)</span>
+      <span title="Boolean(false)" class="keyword">false</span>
+    <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Boolean(true)" class="keyword">true</span>
+  <span class="delimiter">}</span>
+  // private def warningsThunks = List(
+  //   () =&gt; intp.bind(&quot;lastWarnings&quot;, &quot;&quot; + typeTag[List[(Position, String)]], intp.lastWarnings _),
+  // )
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="=&gt; List[() =&gt; Unit]" id="632939">postInitThunks</a> = <a href="../../../collection/immutable/List.scala.html#62451" title="[A](xs: A*)List[A]">List</a><span title="(xs: Option[() =&gt; Unit]*)List[Option[() =&gt; Unit]]" class="delimiter">[</span><a href="../../../Option.scala.html#978" title="Option[() =&gt; Unit]">Option</a><span class="delimiter">[</span><span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Unit<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span>
+    <a href="../../../Option.scala.html#63128" title="(x: () =&gt; Unit)Some[() =&gt; Unit]">Some</a><span class="delimiter">(</span><a href="ILoop.scala.html#632786" title="=&gt; scala.tools.nsc.interpreter.IMain">intp</a>.<a href="IMain.scala.html#632531" title="()Unit">setContextClassLoader</a> _<span class="delimiter">)</span>,
+    <span title="Option[() =&gt; Unit]" class="keyword">if</span> <span class="delimiter">(</span><a href="ReplConfig.scala.html#55720" title="=&gt; Boolean">isReplPower</a><span class="delimiter">)</span> <a href="../../../Option.scala.html#63128" title="(x: () =&gt; Unit)Some[() =&gt; Unit]">Some</a><span class="delimiter">(</span><span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="ILoop.scala.html#632876" title="(isDuringInit: Boolean)Unit">enablePowerMode</a><span class="delimiter">(</span><span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">else</span> <a href="../../../Option.scala.html#1585" title="None.type">None</a>
+  <span class="delimiter">)</span>.<a href="../../../collection/generic/GenericTraversableTemplate.scala.html#58488" title="(implicit asTraversable: Option[() =&gt; Unit] =&gt; scala.collection.GenTraversableOnce[() =&gt; Unit])List[() =&gt; Unit]">flatten</a>
+  // ++ (
+  //   warningsThunks
+  // )
+  // called once after init condition is signalled
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="()Unit" id="632940">postInitialization</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">try</span> <span class="delimiter">{</span>
+      <a href="#632939" title="=&gt; List[() =&gt; Unit]">postInitThunks</a> <a href="../../../collection/immutable/List.scala.html#62719" title="(f: (() =&gt; Unit) =&gt; Unit)Unit">foreach</a> <span class="delimiter">(</span><a title="() =&gt; Unit" id="881217">f</a> =&gt; <a href="#632944" title="(body: =&gt; Unit)Unit">addThunk</a><span class="delimiter">(</span><a href="../../../Function0.scala.html#65930" title="()Unit">f</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#632945" title="()Unit">runThunks</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a title="Nothing" id="881219">ex</a>: <span title="Throwable">Throwable</span> =&gt;
+        <a href="#632933" title="(x$1: String)Unit">initError</a> = <a href="../util/package.scala.html#55855" title="(ex: Throwable)String">stackTraceString</a><span class="delimiter">(</span><a href="#881219" title="Throwable">ex</a><span class="delimiter">)</span>
+        <span title="Nothing" class="keyword">throw</span> <a href="#881219" title="Throwable">ex</a>
+    <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+      <a href="#632930" title="(x$1: Boolean)Unit">initIsComplete</a> = <span title="Boolean(true)" class="keyword">true</span>
+
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="ILoop.scala.html#632799" title="=&gt; Boolean">isAsync</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#632917" title="(msg: String)Unit">asyncMessage</a><span class="delimiter">(</span><span title="String(&quot;[info] total init time: &quot;)" class="string">&quot;[info] total init time: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#632935" title="()String">elapsed</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot; s.&quot;)" class="string">&quot; s.&quot;</span><span class="delimiter">)</span>
+        <a href="#632926" title="(body: =&gt; Unit)Unit">withLock</a><span class="delimiter">(</span><a href="#632922" title="=&gt; java.util.concurrent.locks.Condition">initLoopCondition</a>.<span title="()Unit">signal</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  // code to be executed only after the interpreter is initialized
+  // and the lazy val `global` can be accessed without risk of deadlock.
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="List[() =&gt; Unit]" id="632942">pendingThunks</a>: <a href="../../../collection/immutable/List.scala.html#11952" title="List[() =&gt; Unit]">List</a><span class="delimiter">[</span><span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Unit<span class="delimiter">]</span> = <a href="../../../collection/immutable/List.scala.html#11188" title="scala.collection.immutable.Nil.type">Nil</a>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(body: =&gt; Unit)Unit" id="632944">addThunk</a><span class="delimiter">(</span><a title="=&gt; Unit" id="880305">body</a>: =&gt; Unit<span class="delimiter">)</span> = <a href="#38673" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <a href="#632942" title="(x$1: List[() =&gt; Unit])Unit">pendingThunks</a> <a href="../../../collection/SeqLike.scala.html#58855" title="(elem: () =&gt; Unit)(implicit bf: scala.collection.generic.CanBuildFrom[List[() =&gt; Unit],() =&gt; Unit,List[() =&gt; Unit]])List[() =&gt; Unit]">:+=</a> <span class="delimiter">(</span><span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="#880305" title="=&gt; Unit">body</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="()Unit" id="632945">runThunks</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../../Unit.scala.html#1515" title="Unit">Unit</a> = <a href="#38673" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#632942" title="=&gt; List[() =&gt; Unit]">pendingThunks</a>.<a href="../../../collection/TraversableOnce.scala.html#58191" title="=&gt; Boolean">nonEmpty</a><span class="delimiter">)</span>
+      <a href="ReplConfig.scala.html#55704" title="(msg: =&gt; String)Unit">repldbg</a><span class="delimiter">(</span><span title="String(&quot;Clearing &quot;)" class="string">&quot;Clearing &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#632942" title="=&gt; List[() =&gt; Unit]">pendingThunks</a>.<a href="../../../collection/SeqLike.scala.html#58788" title="=&gt; Int">size</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; thunks.&quot;)" class="string">&quot; thunks.&quot;</span><span class="delimiter">)</span>
+
+    <span title="Unit" class="keyword">while</span> <span class="delimiter">(</span><a href="#632942" title="=&gt; List[() =&gt; Unit]">pendingThunks</a>.<a href="../../../collection/TraversableOnce.scala.html#58191" title="=&gt; Boolean">nonEmpty</a><span class="delimiter">)</span> <a href="#881227" title="()Unit" class="delimiter">{</a>
+      <span class="keyword">val</span> <a title="() =&gt; Unit" id="881229">thunk</a> = <a href="#632942" title="=&gt; List[() =&gt; Unit]">pendingThunks</a>.<a href="../../../collection/IterableLike.scala.html#58577" title="=&gt; () =&gt; Unit">head</a>
+      <a href="#632942" title="(x$1: List[() =&gt; Unit])Unit">pendingThunks</a> = <a href="#632942" title="=&gt; List[() =&gt; Unit]">pendingThunks</a>.<a href="../../../collection/TraversableLike.scala.html#58104" title="=&gt; List[() =&gt; Unit]">tail</a>
+      <a href="../../../Function0.scala.html#65930" title="()Unit">thunk</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/reflect/reify/phases/Metalevels.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="keyword">package</span> scala.reflect.reify
+<span class="keyword">package</span> phases
+
+<span class="keyword">trait</span> <a title="trait Metalevels extends Object" id="23988">Metalevels</a> <a href="../../../Unit.scala.html#1515" title="Unit" class="delimiter">{</a>
+  self: Reifier =&gt;
+
+  <span class="keyword">import</span> <a href="../Reifier.scala.html#541941" title="=&gt; scala.tools.nsc.Global">global</a>._
+  <span class="keyword">import</span> <a href="../../internal/Definitions.scala.html#407777" title="Metalevels.this.global.definitions.type">definitions</a>._
+
+  /**
+   *  Makes sense of cross-stage bindings.
+   *
+   *  ================
+   *
+   *  Analysis of cross-stage bindings becomes convenient if we introduce the notion of metalevels.
+   *  Metalevel of a tree is a number that gets incremented every time you reify something and gets decremented when you splice something.
+   *  Metalevel of a symbol is equal to the metalevel of its definition.
+   *
+   *  Example 1. Consider the following snippet:
+   *
+   *    reify {
+   *      val x = 2             // metalevel of symbol x is 1, because it's declared inside reify
+   *      val y = reify{x}      // metalevel of symbol y is 1, because it's declared inside reify
+   *                            // metalevel of Ident(x) is 2, because it's inside two reifies
+   *      y.splice              // metalevel of Ident(y) is 0, because it's inside a designator of a splice
+   *    }
+   *
+   *  Cross-stage bindings are introduced when symbol.metalevel != curr_metalevel.
+   *  Both bindings introduced in Example 1 are cross-stage.
+   *
+   *  Depending on what side of the inequality is greater, the following situations might occur:
+   *
+   *  1) symbol.metalevel &lt; curr_metalevel. In this case reifier will generate a free variable
+   *  that captures both the name of the symbol (to be compiled successfully) and its value (to be run successfully).
+   *  For example, x in Example 1 will be reified as follows: Ident(newFreeVar(&quot;x&quot;, IntClass.tpe, x))
+   *
+   *  2) symbol.metalevel &gt; curr_metalevel. This leads to a metalevel breach that violates intuitive perception of splicing.
+   *  As defined in macro spec, splicing takes a tree and inserts it into another tree - as simple as that.
+   *  However, how exactly do we do that in the case of y.splice? In this very scenario we can use dataflow analysis and inline it,
+   *  but what if y were a var, and what if it were calculated randomly at runtime?
+   *
+   *  This question has a genuinely simple answer. Sure, we cannot resolve such splices statically (i.e. during macro expansion of ``reify''),
+   *  but now we have runtime toolboxes, so noone stops us from picking up that reified tree and evaluating it at runtime
+   *  (in fact, this is something that ``Expr.splice'' does transparently).
+   *
+   *  This is akin to early vs late binding dilemma.
+   *  The prior is faster, plus, the latter (implemented with reflection) might not work because of visibility issues or might be not available on all platforms.
+   *  But the latter still has its uses, so I'm allowing metalevel breaches, but introducing the -Xlog-runtime-evals to log them.
+   *
+   *  upd. We no longer do that. In case of a runaway ``splice'' inside a `reify`, one will get a static error.
+   *  Why? Unfortunately, the cute idea of transparently converting between static and dynamic splices has failed.
+   *  1) Runtime eval that services dynamic splices requires scala-compiler.jar, which might not be on library classpath
+   *  2) Runtime eval incurs a severe performance penalty, so it'd better to be explicit about it
+   *
+   *  ================
+   *
+   *  As we can see, the only problem is the fact that lhs'es of `splice` can be code blocks that can capture variables from the outside.
+   *  Code inside the lhs of an `splice` is not reified, while the code from the enclosing reify is.
+   *
+   *  Hence some bindings become cross-stage, which is not bad per se (in fact, some cross-stage bindings have sane semantics, as in the example above).
+   *  However this affects freevars, since they are delicate inter-dimensional beings that refer to both current and next planes of existence.
+   *  When splicing tears the fabric of the reality apart, some freevars have to go single-dimensional to retain their sanity.
+   *
+   *  Example 2. Consider the following snippet:
+   *
+   *    reify {
+   *      val x = 2
+   *      reify{x}.splice
+   *    }
+   *
+   *  Since the result of the inner reify is wrapped in a splice, it won't be reified
+   *  together with the other parts of the outer reify, but will be inserted into that result verbatim.
+   *
+   *  The inner reify produces an Expr[Int] that wraps Ident(freeVar(&quot;x&quot;, IntClass.tpe, x)).
+   *  However the freevar the reification points to will vanish when the compiler processes the outer reify.
+   *  That's why we need to replace that freevar with a regular symbol that will point to reified x.
+   *
+   *  Example 3. Consider the following fragment:
+   *
+   *    reify {
+   *      val x = 2
+   *      val y = reify{x}
+   *      y.splice
+   *    }
+   *
+   *  In this case the inner reify doesn't appear next to splice, so it will be reified together with x.
+   *  This means that no special processing is needed here.
+   *
+   *  Example 4. Consider the following fragment:
+   *
+   *    reify {
+   *      val x = 2
+   *      {
+   *        val y = 2
+   *        val z = reify{reify{x + y}}
+   *        z.splice
+   *      }.splice
+   *    }
+   *
+   *  The reasoning from Example 2 still holds here - we do need to inline the freevar that refers to x.
+   *  However, we must not touch anything inside the splice'd block, because it's not getting reified.
+   */
+  <span class="keyword">val</span> <a title="metalevels extends Metalevels.this.global.Transformer" id="541985">metalevels</a> = <a href="#545493" title="Metalevels.this.global.Transformer{def insideSplice: Boolean; def insideSplice_=(x$1: Boolean): Unit; def inlineableBindings: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]; def inlineableBindings_=(x$1: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]): Unit; def withinSplice[T](op: =&gt; T): T}" class="keyword">new</a> <a href="../../../tools/nsc/ast/Trees.scala.html#537817" title="anonymous class $anon extends Metalevels.this.global.Transformer" id="545493">Transformer</a> <span class="delimiter">{</span>
+    <span class="keyword">var</span> <a title="Boolean" id="545496">insideSplice</a> = <span title="Boolean(false)" class="keyword">false</span>
+    <span class="keyword">var</span> <a title="scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]" id="545499">inlineableBindings</a> = scala.collection.mutable.<a href="../../../collection/generic/GenMapFactory.scala.html#60744" title="[A, B](elems: (A, B)*)scala.collection.mutable.Map[A,B]">Map</a><span title="(elems: (Metalevels.this.global.TermName, Metalevels.this.global.Tree)*)scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]" class="delimiter">[</span><a href="../../internal/Names.scala.html#406879" title="Metalevels.this.global.TermName">TermName</a>, <a href="../../internal/Trees.scala.html#407938" title="Metalevels.this.global.Tree">Tree</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="[T](op: =&gt; T)T" id="545501">withinSplice</a><span class="delimiter">[</span><a title="" id="545503">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="545508">op</a>: =&gt; T<span class="delimiter">)</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Boolean" id="545509">old</a> = <a href="#545496" title="=&gt; Boolean">insideSplice</a>
+      <a href="#545496" title="(x$1: Boolean)Unit">insideSplice</a> = <span title="Boolean(true)" class="keyword">true</span>
+      <span class="keyword">try</span> <a href="#545508" title="=&gt; T">op</a>
+      <span class="keyword">finally</span> <a href="#545496" title="(x$1: Boolean)Unit">insideSplice</a> = <a href="#545509" title="Boolean">old</a>
+    <span class="delimiter">}</span>
+
+    // Q: here we deal with all sorts of reified trees. what about ReifiedType(_, _, _, _, _, _)?
+    // A: nothing. reified trees give us problems because they sometimes create dimensional rifts as described above
+    //    to the contrast, reified types (i.e. synthetic typetags materialized by Implicits.scala) always stay on the same metalevel as their enclosing code
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="(tree: Metalevels.this.global.Tree)Metalevels.this.global.Tree" id="545504">transform</a><span class="delimiter">(</span><a title="Metalevels.this.global.Tree" id="545511">tree</a>: <a href="../../internal/Trees.scala.html#407938" title="Metalevels.this.global.Tree">Tree</a><span class="delimiter">)</span>: <a href="../../internal/Trees.scala.html#407938" title="Metalevels.this.global.Tree">Tree</a> = <a href="#545511" title="Metalevels.this.global.Tree">tree</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a href="../utils/Extractors.scala.html#542369" title="Option[Metalevels.this.global.Tree]" id="3294409">TreeSplice</a><span class="delimiter">(</span><a href="../utils/Extractors.scala.html#541143" title="Option[(Metalevels.this.global.Tree, Metalevels.this.global.Tree, Metalevels.this.SymbolTable, Metalevels.this.global.Tree, Metalevels.this.global.Type, Metalevels.this.global.Tree, Boolean)]" id="3294408">ReifiedTree</a><a title="Metalevels.this.global.Tree" id="3294397" class="delimiter">(</a><a href="../../../Tuple7.scala.html#82862" title="Metalevels.this.global.Tree" id="545520">universe</a>, <a href="../../../Tuple7.scala.html#82864" title="Metalevels.this.global.Tree" id="545521">mirror</a>, <a href="../../../Tuple7.scala.html#82866" title="Metalevels.this.SymbolTable" id="545522">symtab</a>, <a href="../../../Tuple7.scala.html#82868" title="Metalevels.this.global.Tree" id="545523">rtree</a>, <a href="../../../Tuple7.scala.html#82870" title="Metalevels.this.global.Type" id="545524">tpe</a>, <a href="../../../Tuple7.scala.html#82872" title="Metalevels.this.global.Tree" id="545525">rtpe</a>, <a href="../../../Tuple7.scala.html#82874" title="Boolean" id="545526">concrete</a><span class="delimiter">)</span><span class="delimiter">)</span> =&gt;
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../utils/Utils.scala.html#540837" title="=&gt; Boolean">reifyDebug</a><span class="delimiter">)</span> <a href="../../../Predef.scala.html#7514" title="(x: Any)Unit">println</a><span class="delimiter">(</span><span title="String(&quot;entering inlineable splice: &quot;)" class="string">&quot;entering inlineable splice: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#545511" title="Metalevels.this.global.Tree">tree</a><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="List[Metalevels.this.global.Symbol]" id="545527">inlinees</a> = <a href="#545522" title="Metalevels.this.SymbolTable">symtab</a>.<a href="../utils/SymbolTables.scala.html#540923" title="=&gt; List[Metalevels.this.global.Symbol]">syms</a> <a href="../../../collection/TraversableLike.scala.html#58073" title="(p: Metalevels.this.global.Symbol =&gt; Boolean)List[Metalevels.this.global.Symbol]">filter</a> <span class="delimiter">(</span><a href="Calculate.scala.html#541973" title="implicit scala.reflect.reify.phases.Calculate.RichCalculateSymbol : (sym: Metalevels.this.global.Symbol)Metalevels.this.RichCalculateSymbol">_</a>.<a href="Calculate.scala.html#542174" title="=&gt; Boolean">isLocalToReifee</a><span class="delimiter">)</span>
+        <a href="#545527" title="List[Metalevels.this.global.Symbol]">inlinees</a> <a href="../../../collection/immutable/List.scala.html#62719" title="(f: Metalevels.this.global.Symbol =&gt; Unit)Unit">foreach</a> <span class="delimiter">(</span><a title="Metalevels.this.global.Symbol" id="545588">inlinee</a> =&gt; <a href="#545522" title="Metalevels.this.SymbolTable">symtab</a>.<a href="../utils/SymbolTables.scala.html#540927" title="(sym: Metalevels.this.global.Symbol)List[Metalevels.this.global.TermName]">symAliases</a><span class="delimiter">(</span><a href="#545588" title="Metalevels.this.global.Symbol">inlinee</a><span class="delimiter">)</span> <a href="../../../collection/immutable/List.scala.html#62719" title="(f: Metalevels.this.global.TermName =&gt; Unit)Unit">foreach</a> <span class="delimiter">(</span><a title="Metalevels.this.global.TermName" id="545617">alias</a> =&gt; <a href="../../../collection/mutable/MapLike.scala.html#87611" title="(key: Metalevels.this.global.TermName, value: Metalevels.this.global.Tree)Unit">inlineableBindings</a><span class="delimiter">(</span><a href="#545617" title="Metalevels.this.global.TermName">alias</a><span class="delimiter">)</span> = <a href="#545522" title="Metalevels.this.SymbolTable">symtab</a>.<a href="../utils/SymbolTables.scala.html#540928" title="(sym: Metalevels.this.global.Symbol)Metalevels.this.global.Tree">symBinding</a><span class="delimiter">(</span><a href="#545588" title="Metalevels.this.global.Symbol">inlinee</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="Metalevels.this.SymbolTable" id="545528">symtab1</a> = <a href="#545522" title="Metalevels.this.SymbolTable">symtab</a> <a href="../utils/SymbolTables.scala.html#540937" title="(syms: scala.collection.GenTraversableOnce[Metalevels.this.global.Symbol])Metalevels.this.SymbolTable">--</a> <a href="#545527" title="List[Metalevels.this.global.Symbol]">inlinees</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../utils/Utils.scala.html#540837" title="=&gt; Boolean">reifyDebug</a><span class="delimiter">)</span> <a href="../../../Predef.scala.html#7514" title="(x: Any)Unit">println</a><span class="delimiter">(</span><a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;trimmed %s inlineable free defs from its symbol table: %s&quot;</a>.<a href="../../../collection/immutable/StringLike.scala.html#59882" title="(args: Any*)String">format</a><span class="delimiter">(</span><a href="#545527" title="List[Metalevels.this.global.Symbol]">inlinees</a>.<a href="../../../collection/LinearSeqOptimized.scala.html#86373" title="=&gt; Int">length</a>, <a href="#545527" title="List[Metalevels.this.global.Symbol]">inlinees</a> <a href="../../../collection/TraversableLike.scala.html#58063" title="(f: Metalevels.this.global.Symbol =&gt; Metalevels.this.global.TermName)(implicit bf: scala.collection.generic.CanBuildFrom[List[Metalevels.this.global.Symbol],Metalevels.this.global.TermName,List[Metalevels.this.global.TermName]])List[Metalevels.this.global.TermName]">map</a> <span class="delimiter">(</span><a title="Metalevels.this.global.Symbol" id="545657">inlinee</a> =&gt; <a href="#545522" title="Metalevels.this.SymbolTable">symtab</a>.<a href="../utils/SymbolTables.scala.html#540926" title="(sym: Metalevels.this.global.Symbol)Metalevels.this.global.TermName">symName</a><span class="delimiter">(</span><a href="#545657" title="Metalevels.this.global.Symbol">inlinee</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="../../../collection/TraversableOnce.scala.html#58283" title="(sep: String)String">mkString</a><span class="delimiter">(</span><span title="String(&quot;, &quot;)" class="string">&quot;, &quot;</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <a href="#545501" title="(op: =&gt; Metalevels.this.global.Tree)Metalevels.this.global.Tree">withinSplice</a> <span class="delimiter">{</span> <a href="#545493" title="Metalevels.this.global.Transformer{def insideSplice: Boolean; def insideSplice_=(x$1: Boolean): Unit; def inlineableBindings: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]; def inlineableBindings_=(x$1: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]): Unit; def withinSplice[T](op: =&gt; T): T}" class="keyword">super</a>.<a href="../../api/Trees.scala.html#405652" title="(tree: Metalevels.this.global.Tree)Metalevels.this.global.Tree">transform</a><span class="delimiter">(</span><a href="../utils/Extractors.scala.html#542368" title="(splicee: Metalevels.this.global.Tree)Metalevels.this.global.Tree">TreeSplice</a><span class="delimiter">(</span><a href="../utils/Extractors.scala.html#541142" title="(universe: Metalevels.this.global.Tree, mirror: Metalevels.this.global.Tree, symtab: Metalevels.this.SymbolTable, rtree: Metalevels.this.global.Tree, tpe: Metalevels.this.global.Type, rtpe: Metalevels.this.global.Tree, concrete: Boolean)Metalevels.this.global.Tree">ReifiedTree</a><span class="delimiter">(</span><a href="#545520" title="Metalevels.this.global.Tree">universe</a>, <a href="#545521" title="Metalevels.this.global.Tree">mirror</a>, <a href="#545528" title="Metalevels.this.SymbolTable">symtab1</a>, <a href="#545523" title="Metalevels.this.global.Tree">rtree</a>, <a href="#545524" title="Metalevels.this.global.Type">tpe</a>, <a href="#545525" title="Metalevels.this.global.Tree">rtpe</a>, <a href="#545526" title="Boolean">concrete</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+      <span class="keyword">case</span> <a href="../utils/Extractors.scala.html#542369" title="Option[Metalevels.this.global.Tree]" id="3294411">TreeSplice</a><span class="delimiter">(</span><a title="Metalevels.this.global.Tree" id="545714">splicee</a><span class="delimiter">)</span> =&gt;
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../utils/Utils.scala.html#540837" title="=&gt; Boolean">reifyDebug</a><span class="delimiter">)</span> <a href="../../../Predef.scala.html#7514" title="(x: Any)Unit">println</a><span class="delimiter">(</span><span title="String(&quot;entering splice: &quot;)" class="string">&quot;entering splice: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#545714" title="Metalevels.this.global.Tree">splicee</a><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="List[Metalevels.this.global.Tree]" id="545715">breaches</a> = <a href="#545714" title="Metalevels.this.global.Tree">splicee</a> <a href="../../internal/Trees.scala.html#408540" title="(f: Metalevels.this.global.Tree =&gt; Boolean)List[Metalevels.this.global.Tree]">filter</a> <span class="delimiter">(</span><a title="Metalevels.this.global.Tree" id="545721">sub</a> =&gt; <a href="#545721" title="Metalevels.this.global.Tree">sub</a>.<a href="../../internal/Trees.scala.html#408580" title="=&gt; Boolean">hasSymbol</a> <a href="../../../Boolean.scala.html#57826" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#545721" title="Metalevels.this.global.Tree">sub</a>.<a href="../../internal/Trees.scala.html#408577" title="=&gt; Metalevels.this.global.Symbol">symbol</a> <span title="(x$1: AnyRef)Boolean">!=</span> <a href="../../internal/Symbols.scala.html#407184" title="=&gt; Metalevels.this.global.NoSymbol">NoSymbol</a> <a href="../../../Boolean.scala.html#57826" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#545721" title="Metalevels.this.global.Tree">sub</a>.<a href="Calculate.scala.html#541973" title="implicit scala.reflect.reify.phases.Calculate.RichCalculateSymbol : (sym: Metalevels.this.global.Symbol)Metalevels.this.RichCalculateSymbol">symbol</a>.<a href="Calculate.scala.html#542173" title="=&gt; Int">metalevel</a> <a href="../../../Int.scala.html#57125" title="(x: Int)Boolean">&gt;</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+        <span title="Metalevels.this.global.Tree" class="keyword">if</span> <span class="delimiter">(</span><a href="../../../Boolean.scala.html#57822" title="=&gt; Boolean">!</a><a href="#545496" title="=&gt; Boolean">insideSplice</a> <a href="../../../Boolean.scala.html#57826" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#545715" title="List[Metalevels.this.global.Tree]">breaches</a>.<a href="../../../collection/TraversableOnce.scala.html#58191" title="=&gt; Boolean">nonEmpty</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          // we used to convert dynamic splices into runtime evals transparently, but we no longer do that
+          // why? see comments above
+          // if (settings.logRuntimeSplices.value) reporter.echo(tree.pos, &quot;this splice cannot be resolved statically&quot;)
+          // withinSplice { super.transform(tree) }
+          <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../utils/Utils.scala.html#540837" title="=&gt; Boolean">reifyDebug</a><span class="delimiter">)</span> <a href="../../../Predef.scala.html#7514" title="(x: Any)Unit">println</a><span class="delimiter">(</span><a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;metalevel breach in %s: %s&quot;</a>.<a href="../../../collection/immutable/StringLike.scala.html#59882" title="(args: Any*)String">format</a><span class="delimiter">(</span><a href="#545511" title="Metalevels.this.global.Tree">tree</a>, <span class="delimiter">(</span><a href="#545715" title="List[Metalevels.this.global.Tree]">breaches</a> <a href="../../../collection/TraversableLike.scala.html#58063" title="(f: Metalevels.this.global.Tree =&gt; Metalevels.this.global.Symbol)(implicit bf: scala.collection.generic.CanBuildFrom[List[Metalevels.this.global.Tree],Metalevels.this.global.Symbol,List[Metalevels.this.global.Symbol]])List[Metalevels.this.global.Symbol]">map</a> <span class="delimiter">(</span><a href="#545756" title="Metalevels.this.global.Tree">_</a>.<a href="../../internal/Trees.scala.html#408577" title="=&gt; Metalevels.this.global.Symbol">symbol</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="../../../collection/SeqLike.scala.html#58839" title="=&gt; List[Metalevels.this.global.Symbol]">distinct</a> <a href="../../../collection/TraversableOnce.scala.html#58283" title="(sep: String)String">mkString</a> <span title="String(&quot;, &quot;)" class="string">&quot;, &quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+          <a href="../Errors.scala.html#541927" title="(tree: Metalevels.this.global.Tree)Nothing">CannotReifyRuntimeSplice</a><span class="delimiter">(</span><a href="#545511" title="Metalevels.this.global.Tree">tree</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+          <a href="#545501" title="(op: =&gt; Metalevels.this.global.Tree)Metalevels.this.global.Tree">withinSplice</a> <span class="delimiter">{</span> <a href="#545493" title="Metalevels.this.global.Transformer{def insideSplice: Boolean; def insideSplice_=(x$1: Boolean): Unit; def inlineableBindings: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]; def inlineableBindings_=(x$1: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]): Unit; def withinSplice[T](op: =&gt; T): T}" class="keyword">super</a>.<a href="../../api/Trees.scala.html#405652" title="(tree: Metalevels.this.global.Tree)Metalevels.this.global.Tree">transform</a><span class="delimiter">(</span><a href="#545511" title="Metalevels.this.global.Tree">tree</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+      // todo. also inline usages of ``inlineableBindings'' in the symtab itself
+      // e.g. a free$Foo can well use free$x, if Foo is path-dependent w.r.t x
+      // FreeRef(_, _) check won't work, because metalevels of symbol table and body are different, hence, freerefs in symbol table look different from freerefs in body
+      <span class="keyword">case</span> <a href="../utils/Extractors.scala.html#545794" title="Option[(Metalevels.this.global.Tree, Metalevels.this.global.TermName)]" id="3294413">FreeRef</a><span class="delimiter">(</span><a href="../../../Tuple2.scala.html#60635" title="Metalevels.this.global.Tree" id="3294401">_</a>, <a href="../../../Tuple2.scala.html#60637" title="Metalevels.this.global.TermName" id="545799">name</a><span class="delimiter">)</span> <span class="keyword">if</span> <a href="#545499" title="=&gt; scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]">inlineableBindings</a> <a href="../../../collection/MapLike.scala.html#87536" title="(key: Metalevels.this.global.TermName)Boolean">contains</a> <a href="#545799" title="Metalevels.this.global.TermName">name</a> =&gt;
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../utils/Utils.scala.html#540837" title="=&gt; Boolean">reifyDebug</a><span class="delimiter">)</span> <a href="../../../Predef.scala.html#7514" title="(x: Any)Unit">println</a><span class="delimiter">(</span><a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;inlineable free ref: %s in %s&quot;</a>.<a href="../../../collection/immutable/StringLike.scala.html#59882" title="(args: Any*)String">format</a><span class="delimiter">(</span><a href="#545799" title="Metalevels.this.global.TermName">name</a>, <a href="../../api/Printers.scala.html#56608" title="(any: Any, printTypes: Metalevels.this.global.BooleanFlag, printIds: Metalevels.this.global.BooleanFlag, printKinds: Metalevels.this.global.BooleanFlag, printMirrors: Metalevels.this.global.BooleanFlag)String">showRaw</a><span class="delimiter">(</span><a href="#545511" title="Metalevels.this.global.Tree">tree</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">val</span> <a title="Metalevels.this.global.Tree" id="545804">inlined</a> = <a href="Reify.scala.html#542009" title="(reifee: Any)Metalevels.this.global.Tree">reify</a><span class="delimiter">(</span><a href="../../../collection/MapLike.scala.html#87535" title="(key: Metalevels.this.global.TermName)Metalevels.this.global.Tree">inlineableBindings</a><span class="delimiter">(</span><a href="#545799" title="Metalevels.this.global.TermName">name</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="../utils/Utils.scala.html#540837" title="=&gt; Boolean">reifyDebug</a><span class="delimiter">)</span> <a href="../../../Predef.scala.html#7514" title="(x: Any)Unit">println</a><span class="delimiter">(</span><a href="../../../Predef.scala.html#7604" title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;verdict: inlined as %s&quot;</a>.<a href="../../../collection/immutable/StringLike.scala.html#59882" title="(args: Any*)String">format</a><span class="delimiter">(</span><a href="../../api/Printers.scala.html#56608" title="(any: Any, printTypes: Metalevels.this.global.BooleanFlag, printIds: Metalevels.this.global.BooleanFlag, printKinds: Metalevels.this.global.BooleanFlag, printMirrors: Metalevels.this.global.BooleanFlag)String">showRaw</a><span class="delimiter">(</span><a href="#545804" title="Metalevels.this.global.Tree">inlined</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <a href="#545804" title="Metalevels.this.global.Tree">inlined</a>
+      <span class="keyword">case</span> _ =&gt;
+        <a href="#545493" title="Metalevels.this.global.Transformer{def insideSplice: Boolean; def insideSplice_=(x$1: Boolean): Unit; def inlineableBindings: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]; def inlineableBindings_=(x$1: scala.collection.mutable.Map[Metalevels.this.global.TermName,Metalevels.this.global.Tree]): Unit; def withinSplice[T](op: =&gt; T): T}" class="keyword">super</a>.<a href="../../api/Trees.scala.html#405652" title="(tree: Metalevels.this.global.Tree)Metalevels.this.global.Tree">transform</a><a href="#3294404" title="(x: Metalevels.this.global.Tree)Metalevels.this.global.Tree" class="delimiter">(</a><a href="#545511" title="Metalevels.this.global.Tree">tree</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

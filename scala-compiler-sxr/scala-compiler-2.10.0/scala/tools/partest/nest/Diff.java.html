@@ -1,0 +1,890 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/tools/partest/nest/Diff.java</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+
+<span class="keyword">package</span> scala.tools.partest.nest;
+
+<span class="keyword">import</span> java.util.Hashtable;
+
+/** A class to compare IndexedSeqs of objects.  The result of comparison
+    is a list of &lt;code&gt;change&lt;/code&gt; objects which form an
+    edit script.  The objects compared are traditionally lines
+    of text from two files.  Comparison options such as &quot;ignore
+    whitespace&quot; are implemented by modifying the &lt;code&gt;equals&lt;/code&gt;
+    and &lt;code&gt;hashcode&lt;/code&gt; methods for the objects compared.
+&lt;p&gt;
+   The basic algorithm is described in: &lt;/br&gt;
+   &quot;An O(ND) Difference Algorithm and its Variations&quot;, Eugene Myers,
+   Algorithmica Vol. 1 No. 2, 1986, p 251.
+&lt;p&gt;
+   This class outputs different results from GNU diff 1.15 on some
+   inputs.  Our results are actually better (smaller change list, smaller
+   total size of changes), but it would be nice to know why.  Perhaps
+   there is a memory overwrite bug in GNU diff 1.15.
+
+  @author Stuart D. Gathman, translated from GNU diff 1.15
+    Copyright (C) 2000  Business Management Systems, Inc.
+&lt;p&gt;
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 1, or (at your option)
+    any later version.
+&lt;p&gt;
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+&lt;p&gt;
+    You should have received a copy of the &lt;a href=COPYING.txt&gt;
+    GNU General Public License&lt;/a&gt;
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+ */
+
+public <span class="keyword">class</span> <a title="scala.tools.partest.nest.Diff.type" id="50782">Diff</a> <span class="delimiter">{</span>
+
+  /** Prepare to find differences between two arrays.  Each element of
+      the arrays is translated to an &quot;equivalence number&quot; based on
+      the result of &lt;code&gt;equals&lt;/code&gt;.  The original Object arrays
+      are no longer needed for computing the differences.  They will
+      be needed again later to print the results of the comparison as
+      an edit script, if desired.
+   */
+  public Diff<a href="#50782" title="scala.tools.partest.nest.Diff" class="delimiter">(</a>Object<span class="delimiter">[</span><a href="../../../Array.scala.html#174" title="Array" class="delimiter">]</a> <a title="Array[Object]" id="1164669">a</a>,Object<span class="delimiter">[</span><a href="../../../Array.scala.html#174" title="Array" class="delimiter">]</a> <a title="Array[Object]" id="1164670">b</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    Hashtable&lt;Object, Integer&gt; h = <span class="keyword">new</span> Hashtable&lt;Object, Integer&gt;<span class="delimiter">(</span>a.length + b.length<span class="delimiter">)</span>;
+    filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span> = <span class="keyword">new</span> file_data<span class="delimiter">(</span>a,h<span class="delimiter">)</span>;
+    filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span> = <span class="keyword">new</span> file_data<span class="delimiter">(</span>b,h<span class="delimiter">)</span>;
+  <span class="delimiter">}</span>
+
+  /** 1 more than the maximum equivalence value used for this or its
+     sibling file. */
+  <span class="keyword">private</span> int <a title="Int" id="1164648">equiv_max</a> = <span class="int">1</span>;
+
+  /** When set to true, the comparison uses a heuristic to speed it up.
+    With this heuristic, for files with a constant small density
+    of changes, the algorithm is linear in the file size.  */
+  public boolean <a title="Boolean" id="1164649">heuristic</a> = <span class="keyword">false</span>;
+
+  /** When set to true, the algorithm returns a guarranteed minimal
+      set of changes.  This makes things slower, sometimes much slower. */
+  public boolean <a title="Boolean" id="1164650">no_discards</a> = <span class="keyword">false</span>;
+
+  <span class="keyword">private</span> int<span class="delimiter">[</span><a href="../../../Array.scala.html#174" title="Array" class="delimiter">]</a> <a title="Array[Int]" id="1164651">xvec</a>, yvec;	/* IndexedSeqs being compared. */
+  <span class="keyword">private</span> int<span class="delimiter">[</span><a href="../../../Array.scala.html#174" title="Array" class="delimiter">]</a> <a title="Array[Int]" id="1164653">fdiag</a>;		/* IndexedSeq, indexed by diagonal, containing
+				   the X coordinate of the point furthest
+				   along the given diagonal in the forward
+				   search of the edit matrix. */
+  <span class="keyword">private</span> int<span class="delimiter">[</span><a href="../../../Array.scala.html#174" title="Array" class="delimiter">]</a> <a title="Array[Int]" id="1164654">bdiag</a>;		/* IndexedSeq, indexed by diagonal, containing
+				   the X coordinate of the point furthest
+				   along the given diagonal in the backward
+				   search of the edit matrix. */
+  <span class="keyword">private</span> int <a title="Int" id="1164655">fdiagoff</a>, bdiagoff;
+  <span class="keyword">private</span> <span class="keyword">final</span> file_data<span class="delimiter">[</span><a href="../../../Array.scala.html#174" title="Array" class="delimiter">]</a> <a title="Array[Diff.this.file_data]" id="1164657">filevec</a> = <span class="keyword">new</span> file_data<span class="delimiter">[</span><span class="int">2</span><span class="delimiter">]</span>;
+  <span class="keyword">private</span> int <a title="Int" id="1164658">cost</a>;
+
+  /** Find the midpoint of the shortest edit script for a specified
+     portion of the two files.
+
+     We scan from the beginnings of the files, and simultaneously from the ends,
+     doing a breadth-first search through the space of edit-sequence.
+     When the two searches meet, we have found the midpoint of the shortest
+     edit sequence.
+
+     The value returned is the number of the diagonal on which the midpoint lies.
+     The diagonal number equals the number of inserted lines minus the number
+     of deleted lines (counting only lines before the midpoint).
+     The edit cost is stored into COST; this is the total number of
+     lines inserted or deleted (counting only lines before the midpoint).
+
+     This function assumes that the first lines of the specified portions
+     of the two files do not match, and likewise that the last lines do not
+     match.  The caller must trim matching lines from the beginning and end
+     of the portions it is going to specify.
+
+     Note that if we return the &quot;wrong&quot; diagonal value, or if
+     the value of bdiag at that diagonal is &quot;wrong&quot;,
+     the worst this can do is cause suboptimal diff output.
+     It cannot cause incorrect diff output.  */
+
+  <span class="keyword">private</span> int <a title="(xoff: Int, xlim: Int, yoff: Int, ylim: Int)Int" id="1164659">diag</a> <span class="delimiter">(</span>int <a title="Int" id="3426914">xoff</a>, int <a title="Int" id="3426915">xlim</a>, int <a title="Int" id="3426916">yoff</a>, int <a title="Int" id="3426917">ylim</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span> fd = fdiag;	// Give the compiler a chance.
+    <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span> bd = bdiag;	// Additional help for the compiler.
+    <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span> xv = xvec;		// Still more help for the compiler.
+    <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span> yv = yvec;		// And more and more . . .
+    <span class="keyword">final</span> int dmin = xoff - ylim;	// Minimum valid diagonal.
+    <span class="keyword">final</span> int dmax = xlim - yoff;	// Maximum valid diagonal.
+    <span class="keyword">final</span> int fmid = xoff - yoff;	// Center diagonal of top-down search.
+    <span class="keyword">final</span> int bmid = xlim - ylim;	// Center diagonal of bottom-up search.
+    int fmin = fmid, fmax = fmid;	// Limits of top-down search.
+    int bmin = bmid, bmax = bmid;	// Limits of bottom-up search.
+    /* True if southeast corner is on an odd
+				     diagonal with respect to the northwest. */
+    <span class="keyword">final</span> boolean odd = <span class="delimiter">(</span>fmid - bmid &amp; <span class="int">1</span><span class="delimiter">)</span> != <span class="int">0</span>;
+
+    fd<span class="delimiter">[</span>fdiagoff + fmid<span class="delimiter">]</span> = xoff;
+    bd<span class="delimiter">[</span>bdiagoff + bmid<span class="delimiter">]</span> = xlim;
+
+    <span class="keyword">for</span> <span class="delimiter">(</span>int c = <span class="int">1</span>;; ++c<span class="delimiter">)</span>
+      <span class="delimiter">{</span>
+	int d;			/* Active diagonal. */
+	boolean big_snake = <span class="keyword">false</span>;
+
+	/* Extend the top-down search by an edit step in each diagonal. */
+	<span class="keyword">if</span> <span class="delimiter">(</span>fmin &gt; dmin<span class="delimiter">)</span>
+	  fd<span class="delimiter">[</span>fdiagoff + --fmin - <span class="int">1</span><span class="delimiter">]</span> = -<span class="int">1</span>;
+	<span class="keyword">else</span>
+	  ++fmin;
+	<span class="keyword">if</span> <span class="delimiter">(</span>fmax &lt; dmax<span class="delimiter">)</span>
+	  fd<span class="delimiter">[</span>fdiagoff + ++fmax + <span class="int">1</span><span class="delimiter">]</span> = -<span class="int">1</span>;
+	<span class="keyword">else</span>
+	  --fmax;
+	<span class="keyword">for</span> <span class="delimiter">(</span>d = fmax; d &gt;= fmin; d -= <span class="int">2</span><span class="delimiter">)</span>
+	  <span class="delimiter">{</span>
+	    int x, y, oldx, tlo = fd<span class="delimiter">[</span>fdiagoff + d - <span class="int">1</span><span class="delimiter">]</span>, thi = fd<span class="delimiter">[</span>fdiagoff + d + <span class="int">1</span><span class="delimiter">]</span>;
+
+	    <span class="keyword">if</span> <span class="delimiter">(</span>tlo &gt;= thi<span class="delimiter">)</span>
+	      x = tlo + <span class="int">1</span>;
+	    <span class="keyword">else</span>
+	      x = thi;
+	    oldx = x;
+	    y = x - d;
+	    <span class="keyword">while</span> <span class="delimiter">(</span>x &lt; xlim &amp;&amp; y &lt; ylim &amp;&amp; xv<span class="delimiter">[</span>x<span class="delimiter">]</span> == yv<span class="delimiter">[</span>y<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+	      ++x; ++y;
+	    <span class="delimiter">}</span>
+	    <span class="keyword">if</span> <span class="delimiter">(</span>x - oldx &gt; <span class="int">20</span><span class="delimiter">)</span>
+	      big_snake = <span class="keyword">true</span>;
+	    fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span> = x;
+	    <span class="keyword">if</span> <span class="delimiter">(</span>odd &amp;&amp; bmin &lt;= d &amp;&amp; d &lt;= bmax &amp;&amp; bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span> &lt;= fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span><span class="delimiter">)</span>
+	      <span class="delimiter">{</span>
+		cost = <span class="int">2</span> * c - <span class="int">1</span>;
+		<span class="keyword">return</span> d;
+	      <span class="delimiter">}</span>
+	  <span class="delimiter">}</span>
+
+	/* Similar extend the bottom-up search. */
+	<span class="keyword">if</span> <span class="delimiter">(</span>bmin &gt; dmin<span class="delimiter">)</span>
+	  bd<span class="delimiter">[</span>bdiagoff + --bmin - <span class="int">1</span><span class="delimiter">]</span> = Integer.MAX_VALUE;
+	<span class="keyword">else</span>
+	  ++bmin;
+	<span class="keyword">if</span> <span class="delimiter">(</span>bmax &lt; dmax<span class="delimiter">)</span>
+	  bd<span class="delimiter">[</span>bdiagoff + ++bmax + <span class="int">1</span><span class="delimiter">]</span> = Integer.MAX_VALUE;
+	<span class="keyword">else</span>
+	  --bmax;
+	<span class="keyword">for</span> <span class="delimiter">(</span>d = bmax; d &gt;= bmin; d -= <span class="int">2</span><span class="delimiter">)</span>
+	  <span class="delimiter">{</span>
+	    int x, y, oldx, tlo = bd<span class="delimiter">[</span>bdiagoff + d - <span class="int">1</span><span class="delimiter">]</span>, thi = bd<span class="delimiter">[</span>bdiagoff + d + <span class="int">1</span><span class="delimiter">]</span>;
+
+	    <span class="keyword">if</span> <span class="delimiter">(</span>tlo &lt; thi<span class="delimiter">)</span>
+	      x = tlo;
+	    <span class="keyword">else</span>
+	      x = thi - <span class="int">1</span>;
+	    oldx = x;
+	    y = x - d;
+	    <span class="keyword">while</span> <span class="delimiter">(</span>x &gt; xoff &amp;&amp; y &gt; yoff &amp;&amp; xv<span class="delimiter">[</span>x - <span class="int">1</span><span class="delimiter">]</span> == yv<span class="delimiter">[</span>y - <span class="int">1</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+	      --x; --y;
+	    <span class="delimiter">}</span>
+	    <span class="keyword">if</span> <span class="delimiter">(</span>oldx - x &gt; <span class="int">20</span><span class="delimiter">)</span>
+	      big_snake = <span class="keyword">true</span>;
+	    bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span> = x;
+	    <span class="keyword">if</span> <span class="delimiter">(</span>!odd &amp;&amp; fmin &lt;= d &amp;&amp; d &lt;= fmax &amp;&amp; bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span> &lt;= fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span><span class="delimiter">)</span>
+	      <span class="delimiter">{</span>
+		cost = <span class="int">2</span> * c;
+		<span class="keyword">return</span> d;
+	      <span class="delimiter">}</span>
+	  <span class="delimiter">}</span>
+
+	/* Heuristic: check occasionally for a diagonal that has made
+	   lots of progress compared with the edit distance.
+	   If we have any such, find the one that has made the most
+	   progress and return it as if it had succeeded.
+
+	   With this heuristic, for files with a constant small density
+	   of changes, the algorithm is linear in the file size.  */
+
+	<span class="keyword">if</span> <span class="delimiter">(</span>c &gt; <span class="int">200</span> &amp;&amp; big_snake &amp;&amp; heuristic<span class="delimiter">)</span>
+	  <span class="delimiter">{</span>
+	    int best = <span class="int">0</span>;
+	    int bestpos = -<span class="int">1</span>;
+
+	    <span class="keyword">for</span> <span class="delimiter">(</span>d = fmax; d &gt;= fmin; d -= <span class="int">2</span><span class="delimiter">)</span>
+	      <span class="delimiter">{</span>
+		int dd = d - fmid;
+		<span class="keyword">if</span> <span class="delimiter">(</span><span class="delimiter">(</span>fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span> - xoff<span class="delimiter">)</span>*<span class="int">2</span> - dd &gt; <span class="int">12</span> * <span class="delimiter">(</span>c + <span class="delimiter">(</span>dd &gt; <span class="int">0</span> ? dd : -dd<span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		  <span class="delimiter">{</span>
+		    <span class="keyword">if</span> <span class="delimiter">(</span>fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span> * <span class="int">2</span> - dd &gt; best
+			&amp;&amp; fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span> - xoff &gt; <span class="int">20</span>
+			&amp;&amp; fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span> - d - yoff &gt; <span class="int">20</span><span class="delimiter">)</span>
+		      <span class="delimiter">{</span>
+			int k;
+			int x = fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span>;
+
+			/* We have a good enough best diagonal;
+			   now insist that it end with a significant snake.  */
+			<span class="keyword">for</span> <span class="delimiter">(</span>k = <span class="int">1</span>; k &lt;= <span class="int">20</span>; k++<span class="delimiter">)</span>
+			  <span class="keyword">if</span> <span class="delimiter">(</span>xvec<span class="delimiter">[</span>x - k<span class="delimiter">]</span> != yvec<span class="delimiter">[</span>x - d - k<span class="delimiter">]</span><span class="delimiter">)</span>
+			    break;
+
+			<span class="keyword">if</span> <span class="delimiter">(</span>k == <span class="int">21</span><span class="delimiter">)</span>
+			  <span class="delimiter">{</span>
+			    best = fd<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span> * <span class="int">2</span> - dd;
+			    bestpos = d;
+			  <span class="delimiter">}</span>
+		      <span class="delimiter">}</span>
+		  <span class="delimiter">}</span>
+	      <span class="delimiter">}</span>
+	    <span class="keyword">if</span> <span class="delimiter">(</span>best &gt; <span class="int">0</span><span class="delimiter">)</span>
+	      <span class="delimiter">{</span>
+		cost = <span class="int">2</span> * c - <span class="int">1</span>;
+		<span class="keyword">return</span> bestpos;
+	      <span class="delimiter">}</span>
+
+	    best = <span class="int">0</span>;
+	    <span class="keyword">for</span> <span class="delimiter">(</span>d = bmax; d &gt;= bmin; d -= <span class="int">2</span><span class="delimiter">)</span>
+	      <span class="delimiter">{</span>
+		int dd = d - bmid;
+		<span class="keyword">if</span> <span class="delimiter">(</span><span class="delimiter">(</span>xlim - bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span><span class="delimiter">)</span>*<span class="int">2</span> + dd &gt; <span class="int">12</span> * <span class="delimiter">(</span>c + <span class="delimiter">(</span>dd &gt; <span class="int">0</span> ? dd : -dd<span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		  <span class="delimiter">{</span>
+		    <span class="keyword">if</span> <span class="delimiter">(</span><span class="delimiter">(</span>xlim - bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span><span class="delimiter">)</span> * <span class="int">2</span> + dd &gt; best
+			&amp;&amp; xlim - bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span> &gt; <span class="int">20</span>
+			&amp;&amp; ylim - <span class="delimiter">(</span>bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span> - d<span class="delimiter">)</span> &gt; <span class="int">20</span><span class="delimiter">)</span>
+		      <span class="delimiter">{</span>
+			/* We have a good enough best diagonal;
+			   now insist that it end with a significant snake.  */
+			int k;
+			int x = bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span>;
+
+			<span class="keyword">for</span> <span class="delimiter">(</span>k = <span class="int">0</span>; k &lt; <span class="int">20</span>; k++<span class="delimiter">)</span>
+			  <span class="keyword">if</span> <span class="delimiter">(</span>xvec<span class="delimiter">[</span>x + k<span class="delimiter">]</span> != yvec<span class="delimiter">[</span>x - d + k<span class="delimiter">]</span><span class="delimiter">)</span>
+			    break;
+			<span class="keyword">if</span> <span class="delimiter">(</span>k == <span class="int">20</span><span class="delimiter">)</span>
+			  <span class="delimiter">{</span>
+			    best = <span class="delimiter">(</span>xlim - bd<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span><span class="delimiter">)</span> * <span class="int">2</span> + dd;
+			    bestpos = d;
+			  <span class="delimiter">}</span>
+		      <span class="delimiter">}</span>
+		  <span class="delimiter">}</span>
+	      <span class="delimiter">}</span>
+	    <span class="keyword">if</span> <span class="delimiter">(</span>best &gt; <span class="int">0</span><span class="delimiter">)</span>
+	      <span class="delimiter">{</span>
+		cost = <span class="int">2</span> * c - <span class="int">1</span>;
+		<span class="keyword">return</span> bestpos;
+	      <span class="delimiter">}</span>
+	  <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Compare in detail contiguous subsequences of the two files
+     which are known, as a whole, to match each other.
+
+     The results are recorded in the IndexedSeqs filevec[N].changed_flag, by
+     storing a 1 in the element for each line that is an insertion or deletion.
+
+     The subsequence of file 0 is [XOFF, XLIM) and likewise for file 1.
+
+     Note that XLIM, YLIM are exclusive bounds.
+     All line numbers are origin-0 and discarded lines are not counted.  */
+
+  <span class="keyword">private</span> void <a title="(xoff: Int, xlim: Int, yoff: Int, ylim: Int)Unit" id="1164660">compareseq</a> <span class="delimiter">(</span>int <a title="Int" id="3426918">xoff</a>, int <a title="Int" id="3426919">xlim</a>, int <a title="Int" id="3426920">yoff</a>, int <a title="Int" id="3426921">ylim</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    /* Slide down the bottom initial diagonal. */
+    <span class="keyword">while</span> <span class="delimiter">(</span>xoff &lt; xlim &amp;&amp; yoff &lt; ylim &amp;&amp; xvec<span class="delimiter">[</span>xoff<span class="delimiter">]</span> == yvec<span class="delimiter">[</span>yoff<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      ++xoff; ++yoff;
+    <span class="delimiter">}</span>
+    /* Slide up the top initial diagonal. */
+    <span class="keyword">while</span> <span class="delimiter">(</span>xlim &gt; xoff &amp;&amp; ylim &gt; yoff &amp;&amp; xvec<span class="delimiter">[</span>xlim - <span class="int">1</span><span class="delimiter">]</span> == yvec<span class="delimiter">[</span>ylim - <span class="int">1</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      --xlim; --ylim;
+    <span class="delimiter">}</span>
+
+    /* Handle simple cases. */
+    <span class="keyword">if</span> <span class="delimiter">(</span>xoff == xlim<span class="delimiter">)</span>
+      <span class="keyword">while</span> <span class="delimiter">(</span>yoff &lt; ylim<span class="delimiter">)</span>
+	filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.changed_flag<span class="delimiter">[</span><span class="int">1</span>+filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.realindexes<span class="delimiter">[</span>yoff++<span class="delimiter">]</span><span class="delimiter">]</span> = <span class="keyword">true</span>;
+    <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>yoff == ylim<span class="delimiter">)</span>
+      <span class="keyword">while</span> <span class="delimiter">(</span>xoff &lt; xlim<span class="delimiter">)</span>
+	filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.changed_flag<span class="delimiter">[</span><span class="int">1</span>+filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.realindexes<span class="delimiter">[</span>xoff++<span class="delimiter">]</span><span class="delimiter">]</span> = <span class="keyword">true</span>;
+    <span class="keyword">else</span>
+      <span class="delimiter">{</span>
+	/* Find a point of correspondence in the middle of the files.  */
+
+	int d = diag <span class="delimiter">(</span>xoff, xlim, yoff, ylim<span class="delimiter">)</span>;
+	int c = cost;
+	int f = fdiag<span class="delimiter">[</span>fdiagoff + d<span class="delimiter">]</span>;
+	int b = bdiag<span class="delimiter">[</span>bdiagoff + d<span class="delimiter">]</span>;
+
+	<span class="keyword">if</span> <span class="delimiter">(</span>c == <span class="int">1</span><span class="delimiter">)</span>
+	  <span class="delimiter">{</span>
+	    /* This should be impossible, because it implies that
+	       one of the two subsequences is empty,
+	       and that case was handled above without calling `diag'.
+	       Let's verify that this is true.  */
+	    <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="string">&quot;Empty subsequence&quot;</span><span class="delimiter">)</span>;
+	  <span class="delimiter">}</span>
+	<span class="keyword">else</span>
+	  <span class="delimiter">{</span>
+	    /* Use that point to split this problem into two subproblems.  */
+	    compareseq <span class="delimiter">(</span>xoff, b, yoff, b - d<span class="delimiter">)</span>;
+	    /* This used to use f instead of b,
+	       but that is incorrect!
+	       It is not necessarily the case that diagonal d
+	       has a snake from b to f.  */
+	    compareseq <span class="delimiter">(</span>b, xlim, b - d, ylim<span class="delimiter">)</span>;
+	  <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Discard lines from one file that have no matches in the other file.
+   */
+
+  <span class="keyword">private</span> void <a title="()Unit" id="1164661">discard_confusing_lines</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.discard_confusing_lines<span class="delimiter">(</span>filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span><span class="delimiter">)</span>;
+    filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.discard_confusing_lines<span class="delimiter">(</span>filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span><span class="delimiter">)</span>;
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> boolean <a title="Boolean" id="1164662">inhibit</a> = <span class="keyword">false</span>;
+
+  /** Adjust inserts/deletes of blank lines to join changes
+     as much as possible.
+   */
+
+  <span class="keyword">private</span> void <a title="()Unit" id="1164663">shift_boundaries</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">if</span> <span class="delimiter">(</span>inhibit<span class="delimiter">)</span>
+      <span class="keyword">return</span>;
+    filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.shift_boundaries<span class="delimiter">(</span>filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span><span class="delimiter">)</span>;
+    filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.shift_boundaries<span class="delimiter">(</span>filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span><span class="delimiter">)</span>;
+  <span class="delimiter">}</span>
+
+  public interface <a title="scala.tools.partest.nest.Diff.ScriptBuilder.type" id="1164674">ScriptBuilder</a> <span class="delimiter">{</span>
+  /** Scan the tables of which lines are inserted and deleted,
+     producing an edit script.
+   @param changed0 true for lines in first file which do not match 2nd
+   @param len0 number of lines in first file
+   @param changed1 true for lines in 2nd file which do not match 1st
+   @param len1 number of lines in 2nd file
+   @return a linked list of changes - or null
+   */
+    public change build_script<span class="delimiter">(</span>
+      boolean<span class="delimiter">[</span><span class="delimiter">]</span> changed0,int len0,
+      boolean<span class="delimiter">[</span><span class="delimiter">]</span> changed1,int len1
+    <span class="delimiter">)</span>;
+  <span class="delimiter">}</span>
+
+  /** Scan the tables of which lines are inserted and deleted,
+     producing an edit script in reverse order.  */
+
+  static <span class="keyword">class</span> <a title="scala.tools.partest.nest.Diff.ReverseScript.type" id="1164677">ReverseScript</a> implements ScriptBuilder <span class="delimiter">{</span>
+    public  change build_script<span class="delimiter">(</span>
+	<span class="keyword">final</span> boolean<span class="delimiter">[</span><span class="delimiter">]</span> changed0,int len0,
+	<span class="keyword">final</span> boolean<span class="delimiter">[</span><span class="delimiter">]</span> changed1,int len1<span class="delimiter">)</span>
+    <span class="delimiter">{</span>
+      change script = <span class="keyword">null</span>;
+      int i0 = <span class="int">0</span>, i1 = <span class="int">0</span>;
+      <span class="keyword">while</span> <span class="delimiter">(</span>i0 &lt; len0 || i1 &lt; len1<span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">if</span> <span class="delimiter">(</span>changed0<span class="delimiter">[</span><span class="int">1</span>+i0<span class="delimiter">]</span> || changed1<span class="delimiter">[</span><span class="int">1</span>+i1<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+	    int line0 = i0, line1 = i1;
+
+	    /* Find # lines changed here in each file.  */
+	    <span class="keyword">while</span> <span class="delimiter">(</span>changed0<span class="delimiter">[</span><span class="int">1</span>+i0<span class="delimiter">]</span><span class="delimiter">)</span> ++i0;
+	    <span class="keyword">while</span> <span class="delimiter">(</span>changed1<span class="delimiter">[</span><span class="int">1</span>+i1<span class="delimiter">]</span><span class="delimiter">)</span> ++i1;
+
+	    /* Record this change.  */
+	    script = <span class="keyword">new</span> change<span class="delimiter">(</span>line0, line1, i0 - line0, i1 - line1, script<span class="delimiter">)</span>;
+	<span class="delimiter">}</span>
+
+	/* We have reached lines in the two files that match each other.  */
+	i0++; i1++;
+      <span class="delimiter">}</span>
+
+      <span class="keyword">return</span> script;
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  static <span class="keyword">class</span> <a title="scala.tools.partest.nest.Diff.ForwardScript.type" id="1164680">ForwardScript</a> implements ScriptBuilder <span class="delimiter">{</span>
+    /** Scan the tables of which lines are inserted and deleted,
+       producing an edit script in forward order.  */
+    public change build_script<span class="delimiter">(</span>
+	  <span class="keyword">final</span> boolean<span class="delimiter">[</span><span class="delimiter">]</span> changed0,int len0,
+	  <span class="keyword">final</span> boolean<span class="delimiter">[</span><span class="delimiter">]</span> changed1,int len1<span class="delimiter">)</span>
+    <span class="delimiter">{</span>
+      change script = <span class="keyword">null</span>;
+      int i0 = len0, i1 = len1;
+
+      <span class="keyword">while</span> <span class="delimiter">(</span>i0 &gt;= <span class="int">0</span> || i1 &gt;= <span class="int">0</span><span class="delimiter">)</span>
+	<span class="delimiter">{</span>
+	  <span class="keyword">if</span> <span class="delimiter">(</span>changed0<span class="delimiter">[</span>i0<span class="delimiter">]</span> || changed1<span class="delimiter">[</span>i1<span class="delimiter">]</span><span class="delimiter">)</span>
+	    <span class="delimiter">{</span>
+	      int line0 = i0, line1 = i1;
+
+	      /* Find # lines changed here in each file.  */
+	      <span class="keyword">while</span> <span class="delimiter">(</span>changed0<span class="delimiter">[</span>i0<span class="delimiter">]</span><span class="delimiter">)</span> --i0;
+	      <span class="keyword">while</span> <span class="delimiter">(</span>changed1<span class="delimiter">[</span>i1<span class="delimiter">]</span><span class="delimiter">)</span> --i1;
+
+	      /* Record this change.  */
+	      script = <span class="keyword">new</span> change<span class="delimiter">(</span>i0, i1, line0 - i0, line1 - i1, script<span class="delimiter">)</span>;
+	    <span class="delimiter">}</span>
+
+	  /* We have reached lines in the two files that match each other.  */
+	  i0--; i1--;
+	<span class="delimiter">}</span>
+
+      <span class="keyword">return</span> script;
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Standard ScriptBuilders. */
+  public <span class="keyword">final</span> static ScriptBuilder
+    <a title="scala.tools.partest.nest.Diff.ScriptBuilder" id="1164681">forwardScript</a> = <span class="keyword">new</span> ForwardScript<span class="delimiter">(</span><span class="delimiter">)</span>,
+    reverseScript = <span class="keyword">new</span> ReverseScript<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+  /* Report the differences of two files.  DEPTH is the current directory
+     depth. */
+  public <span class="keyword">final</span> change <a title="(reverse: Boolean)scala.tools.partest.nest.Diff.change" id="1164664">diff_2</a><span class="delimiter">(</span><span class="keyword">final</span> boolean <a title="Boolean" id="1164686">reverse</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">return</span> diff<span class="delimiter">(</span>reverse ? reverseScript : forwardScript<span class="delimiter">)</span>;
+  <span class="delimiter">}</span>
+
+  /** Get the results of comparison as an edit script.  The script
+     is described by a list of changes.  The standard ScriptBuilder
+     implementations provide for forward and reverse edit scripts.
+     Alternate implementations could, for instance, list common elements
+     instead of differences.
+     @param bld	an object to build the script from change flags
+     @return the head of a list of changes
+   */
+  public change <a title="(bld: scala.tools.partest.nest.Diff.ScriptBuilder)scala.tools.partest.nest.Diff.change" id="1164665">diff</a><span class="delimiter">(</span><span class="keyword">final</span> ScriptBuilder <a title="scala.tools.partest.nest.Diff.ScriptBuilder" id="3426922">bld</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    /* Some lines are obviously insertions or deletions
+       because they don't match anything.  Detect them now,
+       and avoid even thinking about them in the main comparison algorithm.  */
+
+    discard_confusing_lines <span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    /* Now do the main comparison algorithm, considering just the
+       undiscarded lines.  */
+
+    xvec = filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.undiscarded;
+    yvec = filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.undiscarded;
+
+    int diags =
+      filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.nondiscarded_lines + filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.nondiscarded_lines + <span class="int">3</span>;
+    fdiag = <span class="keyword">new</span> int<span class="delimiter">[</span>diags<span class="delimiter">]</span>;
+    fdiagoff = filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.nondiscarded_lines + <span class="int">1</span>;
+    bdiag = <span class="keyword">new</span> int<span class="delimiter">[</span>diags<span class="delimiter">]</span>;
+    bdiagoff = filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.nondiscarded_lines + <span class="int">1</span>;
+
+    compareseq <span class="delimiter">(</span><span class="int">0</span>, filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.nondiscarded_lines,
+		<span class="int">0</span>, filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.nondiscarded_lines<span class="delimiter">)</span>;
+    fdiag = <span class="keyword">null</span>;
+    bdiag = <span class="keyword">null</span>;
+
+    /* Modify the results slightly to make them prettier
+       in cases where that can validly be done.  */
+
+    shift_boundaries <span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    /* Get the results of comparison in the form of a chain
+       of `struct change's -- an edit script.  */
+    <span class="keyword">return</span> bld.build_script<span class="delimiter">(</span>
+      filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.changed_flag,
+      filevec<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span>.buffered_lines,
+      filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.changed_flag,
+      filevec<span class="delimiter">[</span><span class="int">1</span><span class="delimiter">]</span>.buffered_lines
+    <span class="delimiter">)</span>;
+
+  <span class="delimiter">}</span>
+
+  /** The result of comparison is an &quot;edit script&quot;: a chain of change objects.
+     Each change represents one place where some lines are deleted
+     and some are inserted.
+
+     LINE0 and LINE1 are the first affected lines in the two files (origin 0).
+     DELETED is the number of lines deleted here from file 0.
+     INSERTED is the number of lines inserted here in file 1.
+
+     If DELETED is 0 then LINE0 is the number of the line before
+     which the insertion was done; vice versa for INSERTED and LINE1.  */
+
+  public static <span class="keyword">class</span> <a title="scala.tools.partest.nest.Diff.change.type" id="1164685">change</a> <span class="delimiter">{</span>
+    /** Previous or next edit command. */
+    public change <a title="scala.tools.partest.nest.Diff.change" id="1164687">link</a>;
+    /** # lines of file 1 changed here.  */
+    public <span class="keyword">final</span> int <a title="Int" id="1164688">inserted</a>;
+    /** # lines of file 0 changed here.  */
+    public <span class="keyword">final</span> int <a title="Int" id="1164689">deleted</a>;
+    /** Line number of 1st deleted line.  */
+    public <span class="keyword">final</span> int <a title="Int" id="1164690">line0</a>;
+    /** Line number of 1st inserted line.  */
+    public <span class="keyword">final</span> int <a title="Int" id="1164691">line1</a>;
+
+    /** Cons an additional entry onto the front of an edit script OLD.
+       LINE0 and LINE1 are the first affected lines in the two files (origin 0).
+       DELETED is the number of lines deleted here from file 0.
+       INSERTED is the number of lines inserted here in file 1.
+
+       If DELETED is 0 then LINE0 is the number of the line before
+       which the insertion was done; vice versa for INSERTED and LINE1.  */
+    public change<span class="delimiter">(</span>int line0, int line1, int deleted, int inserted, change old<span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">this</span>.line0 = line0;
+      <span class="keyword">this</span>.line1 = line1;
+      <span class="keyword">this</span>.inserted = inserted;
+      <span class="keyword">this</span>.deleted = deleted;
+      <span class="keyword">this</span>.link = old;
+      //System.err.println(line0+&quot;,&quot;+line1+&quot;,&quot;+inserted+&quot;,&quot;+deleted);
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  /** Data on one input file being compared.
+   */
+
+  <span class="keyword">class</span> <a title="Diff.this.file_data.type" id="1164668">file_data</a> <span class="delimiter">{</span>
+
+    /** Allocate changed array for the results of comparison.  */
+    void clear<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      /* Allocate a flag for each line of each file, saying whether that line
+	 is an insertion or deletion.
+	 Allocate an extra element, always zero, at each end of each IndexedSeq.
+       */
+      changed_flag = <span class="keyword">new</span> boolean<span class="delimiter">[</span>buffered_lines + <span class="int">2</span><span class="delimiter">]</span>;
+    <span class="delimiter">}</span>
+
+    /** Return equiv_count[I] as the number of lines in this file
+       that fall in equivalence class I.
+         @return the array of equivalence class counts.
+     */
+    int<span class="delimiter">[</span><span class="delimiter">]</span> equivCount<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      int<span class="delimiter">[</span><span class="delimiter">]</span> equiv_count = <span class="keyword">new</span> int<span class="delimiter">[</span>equiv_max<span class="delimiter">]</span>;
+      <span class="keyword">for</span> <span class="delimiter">(</span>int i = <span class="int">0</span>; i &lt; buffered_lines; ++i<span class="delimiter">)</span>
+	++equiv_count<span class="delimiter">[</span>equivs<span class="delimiter">[</span>i<span class="delimiter">]</span><span class="delimiter">]</span>;
+      <span class="keyword">return</span> equiv_count;
+    <span class="delimiter">}</span>
+
+    /** Discard lines that have no matches in another file.
+
+       A line which is discarded will not be considered by the actual
+       comparison algorithm; it will be as if that line were not in the file.
+       The file's `realindexes' table maps virtual line numbers
+       (which don't count the discarded lines) into real line numbers;
+       this is how the actual comparison algorithm produces results
+       that are comprehensible when the discarded lines are counted.
+&lt;p&gt;
+       When we discard a line, we also mark it as a deletion or insertion
+       so that it will be printed in the output.
+      @param f the other file
+     */
+    void discard_confusing_lines<span class="delimiter">(</span>file_data f<span class="delimiter">)</span> <span class="delimiter">{</span>
+      clear<span class="delimiter">(</span><span class="delimiter">)</span>;
+    /* Set up table of which lines are going to be discarded. */
+      <span class="keyword">final</span> byte<span class="delimiter">[</span><span class="delimiter">]</span> discarded = discardable<span class="delimiter">(</span>f.equivCount<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+
+    /* Don't really discard the provisional lines except when they occur
+       in a run of discardables, with nonprovisionals at the beginning
+       and end.  */
+      filterDiscards<span class="delimiter">(</span>discarded<span class="delimiter">)</span>;
+
+    /* Actually discard the lines. */
+      discard<span class="delimiter">(</span>discarded<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /** Mark to be discarded each line that matches no line of another file.
+       If a line matches many lines, mark it as provisionally discardable.
+       @see equivCount()
+       @param counts The count of each equivalence number for the other file.
+       @return 0=nondiscardable, 1=discardable or 2=provisionally discardable
+       	for each line
+     */
+
+    <span class="keyword">private</span> byte<span class="delimiter">[</span><span class="delimiter">]</span> discardable<span class="delimiter">(</span><span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span> counts<span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">final</span> int end = buffered_lines;
+      <span class="keyword">final</span> byte<span class="delimiter">[</span><span class="delimiter">]</span> discards = <span class="keyword">new</span> byte<span class="delimiter">[</span>end<span class="delimiter">]</span>;
+      <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span> equivs = <span class="keyword">this</span>.equivs;
+      int many = <span class="int">5</span>;
+      int tem = end / <span class="int">64</span>;
+
+      /* Multiply MANY by approximate square root of number of lines.
+	 That is the threshold for provisionally discardable lines.  */
+      <span class="keyword">while</span> <span class="delimiter">(</span><span class="delimiter">(</span>tem = tem &gt;&gt; <span class="int">2</span><span class="delimiter">)</span> &gt; <span class="int">0</span><span class="delimiter">)</span>
+	many *= <span class="int">2</span>;
+
+      <span class="keyword">for</span> <span class="delimiter">(</span>int i = <span class="int">0</span>; i &lt; end; i++<span class="delimiter">)</span>
+	<span class="delimiter">{</span>
+	  int nmatch;
+	  <span class="keyword">if</span> <span class="delimiter">(</span>equivs<span class="delimiter">[</span>i<span class="delimiter">]</span> == <span class="int">0</span><span class="delimiter">)</span>
+	    continue;
+	  nmatch = counts<span class="delimiter">[</span>equivs<span class="delimiter">[</span>i<span class="delimiter">]</span><span class="delimiter">]</span>;
+	  <span class="keyword">if</span> <span class="delimiter">(</span>nmatch == <span class="int">0</span><span class="delimiter">)</span>
+	    discards<span class="delimiter">[</span>i<span class="delimiter">]</span> = <span class="int">1</span>;
+	  <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>nmatch &gt; many<span class="delimiter">)</span>
+	    discards<span class="delimiter">[</span>i<span class="delimiter">]</span> = <span class="int">2</span>;
+	<span class="delimiter">}</span>
+      <span class="keyword">return</span> discards;
+    <span class="delimiter">}</span>
+
+    /** Don't really discard the provisional lines except when they occur
+       in a run of discardables, with nonprovisionals at the beginning
+       and end.  */
+
+    <span class="keyword">private</span> void filterDiscards<span class="delimiter">(</span><span class="keyword">final</span> byte<span class="delimiter">[</span><span class="delimiter">]</span> discards<span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">final</span> int end = buffered_lines;
+
+	<span class="keyword">for</span> <span class="delimiter">(</span>int i = <span class="int">0</span>; i &lt; end; i++<span class="delimiter">)</span>
+	  <span class="delimiter">{</span>
+	    /* Cancel provisional discards not in middle of run of discards.  */
+	    <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>i<span class="delimiter">]</span> == <span class="int">2</span><span class="delimiter">)</span>
+	      discards<span class="delimiter">[</span>i<span class="delimiter">]</span> = <span class="int">0</span>;
+	    <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>i<span class="delimiter">]</span> != <span class="int">0</span><span class="delimiter">)</span>
+	      <span class="delimiter">{</span>
+		/* We have found a nonprovisional discard.  */
+		int j;
+		int length;
+		int provisional = <span class="int">0</span>;
+
+		/* Find end of this run of discardable lines.
+		   Count how many are provisionally discardable.  */
+		<span class="keyword">for</span> <span class="delimiter">(</span>j = i; j &lt; end; j++<span class="delimiter">)</span>
+		  <span class="delimiter">{</span>
+		    <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>j<span class="delimiter">]</span> == <span class="int">0</span><span class="delimiter">)</span>
+		      break;
+		    <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>j<span class="delimiter">]</span> == <span class="int">2</span><span class="delimiter">)</span>
+		      ++provisional;
+		  <span class="delimiter">}</span>
+
+		/* Cancel provisional discards at end, and shrink the run.  */
+		<span class="keyword">while</span> <span class="delimiter">(</span>j &gt; i &amp;&amp; discards<span class="delimiter">[</span>j - <span class="int">1</span><span class="delimiter">]</span> == <span class="int">2</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+		  discards<span class="delimiter">[</span>--j<span class="delimiter">]</span> = <span class="int">0</span>; --provisional;
+		<span class="delimiter">}</span>
+
+		/* Now we have the length of a run of discardable lines
+		   whose first and last are not provisional.  */
+		length = j - i;
+
+		/* If 1/4 of the lines in the run are provisional,
+		   cancel discarding of all provisional lines in the run.  */
+		<span class="keyword">if</span> <span class="delimiter">(</span>provisional * <span class="int">4</span> &gt; length<span class="delimiter">)</span>
+		  <span class="delimiter">{</span>
+		    <span class="keyword">while</span> <span class="delimiter">(</span>j &gt; i<span class="delimiter">)</span>
+		      <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>--j<span class="delimiter">]</span> == <span class="int">2</span><span class="delimiter">)</span>
+			discards<span class="delimiter">[</span>j<span class="delimiter">]</span> = <span class="int">0</span>;
+		  <span class="delimiter">}</span>
+		<span class="keyword">else</span>
+		  <span class="delimiter">{</span>
+		    int consec;
+		    int minimum = <span class="int">1</span>;
+		    int tem = length / <span class="int">4</span>;
+
+		    /* MINIMUM is approximate square root of LENGTH/4.
+		       A subrun of two or more provisionals can stand
+		       when LENGTH is at least 16.
+		       A subrun of 4 or more can stand when LENGTH &gt;= 64.  */
+		    <span class="keyword">while</span> <span class="delimiter">(</span><span class="delimiter">(</span>tem = tem &gt;&gt; <span class="int">2</span><span class="delimiter">)</span> &gt; <span class="int">0</span><span class="delimiter">)</span>
+		      minimum *= <span class="int">2</span>;
+		    minimum++;
+
+		    /* Cancel any subrun of MINIMUM or more provisionals
+		       within the larger run.  */
+		    <span class="keyword">for</span> <span class="delimiter">(</span>j = <span class="int">0</span>, consec = <span class="int">0</span>; j &lt; length; j++<span class="delimiter">)</span>
+		      <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>i + j<span class="delimiter">]</span> != <span class="int">2</span><span class="delimiter">)</span>
+			consec = <span class="int">0</span>;
+		      <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>minimum == ++consec<span class="delimiter">)</span>
+			/* Back up to start of subrun, to cancel it all.  */
+			j -= consec;
+		      <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>minimum &lt; consec<span class="delimiter">)</span>
+			discards<span class="delimiter">[</span>i + j<span class="delimiter">]</span> = <span class="int">0</span>;
+
+		    /* Scan from beginning of run
+		       until we find 3 or more nonprovisionals in a row
+		       or until the first nonprovisional at least 8 lines in.
+		       Until that point, cancel any provisionals.  */
+		    <span class="keyword">for</span> <span class="delimiter">(</span>j = <span class="int">0</span>, consec = <span class="int">0</span>; j &lt; length; j++<span class="delimiter">)</span>
+		      <span class="delimiter">{</span>
+			<span class="keyword">if</span> <span class="delimiter">(</span>j &gt;= <span class="int">8</span> &amp;&amp; discards<span class="delimiter">[</span>i + j<span class="delimiter">]</span> == <span class="int">1</span><span class="delimiter">)</span>
+			  break;
+			<span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>i + j<span class="delimiter">]</span> == <span class="int">2</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+			  consec = <span class="int">0</span>; discards<span class="delimiter">[</span>i + j<span class="delimiter">]</span> = <span class="int">0</span>;
+			<span class="delimiter">}</span>
+			<span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>i + j<span class="delimiter">]</span> == <span class="int">0</span><span class="delimiter">)</span>
+			  consec = <span class="int">0</span>;
+			<span class="keyword">else</span>
+			  consec++;
+			<span class="keyword">if</span> <span class="delimiter">(</span>consec == <span class="int">3</span><span class="delimiter">)</span>
+			  break;
+		      <span class="delimiter">}</span>
+
+		    /* I advances to the last line of the run.  */
+		    i += length - <span class="int">1</span>;
+
+		    /* Same thing, from end.  */
+		    <span class="keyword">for</span> <span class="delimiter">(</span>j = <span class="int">0</span>, consec = <span class="int">0</span>; j &lt; length; j++<span class="delimiter">)</span>
+		      <span class="delimiter">{</span>
+			<span class="keyword">if</span> <span class="delimiter">(</span>j &gt;= <span class="int">8</span> &amp;&amp; discards<span class="delimiter">[</span>i - j<span class="delimiter">]</span> == <span class="int">1</span><span class="delimiter">)</span>
+			  break;
+			<span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>i - j<span class="delimiter">]</span> == <span class="int">2</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+			  consec = <span class="int">0</span>; discards<span class="delimiter">[</span>i - j<span class="delimiter">]</span> = <span class="int">0</span>;
+			<span class="delimiter">}</span>
+			<span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>discards<span class="delimiter">[</span>i - j<span class="delimiter">]</span> == <span class="int">0</span><span class="delimiter">)</span>
+			  consec = <span class="int">0</span>;
+			<span class="keyword">else</span>
+			  consec++;
+			<span class="keyword">if</span> <span class="delimiter">(</span>consec == <span class="int">3</span><span class="delimiter">)</span>
+			  break;
+		      <span class="delimiter">}</span>
+		  <span class="delimiter">}</span>
+	      <span class="delimiter">}</span>
+	  <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+
+    /** Actually discard the lines.
+      @param discards flags lines to be discarded
+     */
+    <span class="keyword">private</span> void discard<span class="delimiter">(</span><span class="keyword">final</span> byte<span class="delimiter">[</span><span class="delimiter">]</span> discards<span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">final</span> int end = buffered_lines;
+      int j = <span class="int">0</span>;
+      <span class="keyword">for</span> <span class="delimiter">(</span>int i = <span class="int">0</span>; i &lt; end; ++i<span class="delimiter">)</span>
+	<span class="keyword">if</span> <span class="delimiter">(</span>no_discards || discards<span class="delimiter">[</span>i<span class="delimiter">]</span> == <span class="int">0</span><span class="delimiter">)</span>
+	  <span class="delimiter">{</span>
+	    undiscarded<span class="delimiter">[</span>j<span class="delimiter">]</span> = equivs<span class="delimiter">[</span>i<span class="delimiter">]</span>;
+	    realindexes<span class="delimiter">[</span>j++<span class="delimiter">]</span> = i;
+	  <span class="delimiter">}</span>
+	<span class="keyword">else</span>
+	  changed_flag<span class="delimiter">[</span><span class="int">1</span>+i<span class="delimiter">]</span> = <span class="keyword">true</span>;
+      nondiscarded_lines = j;
+    <span class="delimiter">}</span>
+
+    file_data<span class="delimiter">(</span>Object<span class="delimiter">[</span><span class="delimiter">]</span> data, Hashtable&lt;Object, Integer&gt; h<span class="delimiter">)</span> <span class="delimiter">{</span>
+      buffered_lines = data.length;
+
+      equivs = <span class="keyword">new</span> int<span class="delimiter">[</span>buffered_lines<span class="delimiter">]</span>;
+      undiscarded = <span class="keyword">new</span> int<span class="delimiter">[</span>buffered_lines<span class="delimiter">]</span>;
+      realindexes = <span class="keyword">new</span> int<span class="delimiter">[</span>buffered_lines<span class="delimiter">]</span>;
+
+      <span class="keyword">for</span> <span class="delimiter">(</span>int i = <span class="int">0</span>; i &lt; data.length; ++i<span class="delimiter">)</span> <span class="delimiter">{</span>
+        Integer ir = h.get<span class="delimiter">(</span>data<span class="delimiter">[</span>i<span class="delimiter">]</span><span class="delimiter">)</span>;
+	<span class="keyword">if</span> <span class="delimiter">(</span>ir == <span class="keyword">null</span><span class="delimiter">)</span>
+	  h.put<span class="delimiter">(</span>data<span class="delimiter">[</span>i<span class="delimiter">]</span>, <span class="keyword">new</span> Integer<span class="delimiter">(</span>equivs<span class="delimiter">[</span>i<span class="delimiter">]</span> = equiv_max++<span class="delimiter">)</span><span class="delimiter">)</span>;
+	<span class="keyword">else</span>
+	  equivs<span class="delimiter">[</span>i<span class="delimiter">]</span> = ir.intValue<span class="delimiter">(</span><span class="delimiter">)</span>;
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /** Adjust inserts/deletes of blank lines to join changes
+       as much as possible.
+
+       We do something when a run of changed lines include a blank
+       line at one end and have an excluded blank line at the other.
+       We are free to choose which blank line is included.
+       `compareseq' always chooses the one at the beginning,
+       but usually it is cleaner to consider the following blank line
+       to be the &quot;change&quot;.  The only exception is if the preceding blank line
+       would join this change to other changes.
+      @param f the file being compared against
+    */
+
+    void shift_boundaries<span class="delimiter">(</span>file_data f<span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">final</span> boolean<span class="delimiter">[</span><span class="delimiter">]</span> changed = changed_flag;
+      <span class="keyword">final</span> boolean<span class="delimiter">[</span><span class="delimiter">]</span> other_changed = f.changed_flag;
+      int i = <span class="int">0</span>;
+      int j = <span class="int">0</span>;
+      int i_end = buffered_lines;
+      int preceding = -<span class="int">1</span>;
+      int other_preceding = -<span class="int">1</span>;
+
+      <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span>
+	<span class="delimiter">{</span>
+	  int start, end, other_start;
+
+	  /* Scan forwards to find beginning of another run of changes.
+	     Also keep track of the corresponding point in the other file.  */
+
+	  <span class="keyword">while</span> <span class="delimiter">(</span>i &lt; i_end &amp;&amp; !changed<span class="delimiter">[</span><span class="int">1</span>+i<span class="delimiter">]</span><span class="delimiter">)</span>
+	    <span class="delimiter">{</span>
+	      <span class="keyword">while</span> <span class="delimiter">(</span>other_changed<span class="delimiter">[</span><span class="int">1</span>+j++<span class="delimiter">]</span><span class="delimiter">)</span>
+		/* Non-corresponding lines in the other file
+		   will count as the preceding batch of changes.  */
+		other_preceding = j;
+	      i++;
+	    <span class="delimiter">}</span>
+
+	  <span class="keyword">if</span> <span class="delimiter">(</span>i == i_end<span class="delimiter">)</span>
+	    break;
+
+	  start = i;
+	  other_start = j;
+
+	  <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span>
+	    <span class="delimiter">{</span>
+	      /* Now find the end of this run of changes.  */
+
+	      <span class="keyword">while</span> <span class="delimiter">(</span>i &lt; i_end &amp;&amp; changed<span class="delimiter">[</span><span class="int">1</span>+i<span class="delimiter">]</span><span class="delimiter">)</span> i++;
+	      end = i;
+
+	      /* If the first changed line matches the following unchanged one,
+		 and this run does not follow right after a previous run,
+		 and there are no lines deleted from the other file here,
+		 then classify the first changed line as unchanged
+		 and the following line as changed in its place.  */
+
+	      /* You might ask, how could this run follow right after another?
+		 Only because the previous run was shifted here.  */
+
+	      <span class="keyword">if</span> <span class="delimiter">(</span>end != i_end
+		  &amp;&amp; equivs<span class="delimiter">[</span>start<span class="delimiter">]</span> == equivs<span class="delimiter">[</span>end<span class="delimiter">]</span>
+		  &amp;&amp; !other_changed<span class="delimiter">[</span><span class="int">1</span>+j<span class="delimiter">]</span>
+		  &amp;&amp; end != i_end
+		  &amp;&amp; !<span class="delimiter">(</span><span class="delimiter">(</span>preceding &gt;= <span class="int">0</span> &amp;&amp; start == preceding<span class="delimiter">)</span>
+		       || <span class="delimiter">(</span>other_preceding &gt;= <span class="int">0</span>
+			   &amp;&amp; other_start == other_preceding<span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		<span class="delimiter">{</span>
+		  changed<span class="delimiter">[</span><span class="int">1</span>+end++<span class="delimiter">]</span> = <span class="keyword">true</span>;
+		  changed<span class="delimiter">[</span><span class="int">1</span>+start++<span class="delimiter">]</span> = <span class="keyword">false</span>;
+		  ++i;
+		  /* Since one line-that-matches is now before this run
+		     instead of after, we must advance in the other file
+		     to keep in synch.  */
+		  ++j;
+		<span class="delimiter">}</span>
+	      <span class="keyword">else</span>
+		break;
+	    <span class="delimiter">}</span>
+
+	  preceding = i;
+	  other_preceding = j;
+	<span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /** Number of elements (lines) in this file. */
+    <span class="keyword">final</span> int buffered_lines;
+
+    /** IndexedSeq, indexed by line number, containing an equivalence code for
+       each line.  It is this IndexedSeq that is actually compared with that
+       of another file to generate differences. */
+    <span class="keyword">private</span> <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span>	    equivs;
+
+    /** IndexedSeq, like the previous one except that
+       the elements for discarded lines have been squeezed out.  */
+    <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span>	   undiscarded;
+
+    /** IndexedSeq mapping virtual line numbers (not counting discarded lines)
+       to real ones (counting those lines).  Both are origin-0.  */
+    <span class="keyword">final</span> int<span class="delimiter">[</span><span class="delimiter">]</span>	   realindexes;
+
+    /** Total number of nondiscarded lines. */
+    int		    nondiscarded_lines;
+
+    /** Array, indexed by real origin-1 line number,
+       containing true for a line that is an insertion or a deletion.
+       The results of comparison are stored here.  */
+    boolean<span class="delimiter">[</span><span class="delimiter">]</span>	    changed_flag;
+
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

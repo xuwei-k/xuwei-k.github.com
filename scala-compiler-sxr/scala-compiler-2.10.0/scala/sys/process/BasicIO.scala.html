@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/sys/process/BasicIO.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */
+
+<span class="keyword">package</span> scala.sys
+<span class="keyword">package</span> process
+
+<span class="keyword">import</span> <a href="package.scala.html#25755" title="scala.sys.process.processInternal.type">processInternal</a>._
+<span class="keyword">import</span> java.io.<span class="delimiter">{</span> BufferedReader, InputStreamReader, FilterInputStream, FilterOutputStream <span class="delimiter">}</span>
+<span class="keyword">import</span> java.util.concurrent.LinkedBlockingQueue
+<span class="keyword">import</span> scala.collection.immutable.Stream
+<span class="keyword">import</span> scala.annotation.tailrec
+
+/**
+  * This object contains factories for [[scala.sys.process.ProcessIO]],
+  * which can be used to control the I/O of a [[scala.sys.process.Process]]
+  * when a [[scala.sys.process.ProcessBuilder]] is started with the `run`
+  * command.
+  *
+  * It also contains some helper methods that can be used to in the creation of
+  * `ProcessIO`.
+  *
+  * It is used by other classes in the package in the implementation of various
+  * features, but can also be used by client code.
+  */
+<span class="keyword">object</span> <a title="scala.sys.process.BasicIO.type" id="25731">BasicIO</a> <a href="#25732" title="scala.sys.process.BasicIO.type" class="delimiter">{</a>
+  /** Size of the buffer used in all the functions that copy data */
+  <span class="keyword">final</span> <span class="keyword">val</span> <a title="Int(8192)" id="585444">BufferSize</a> = <span title="Int(8192)" class="int">8192</span>
+
+  /** Used to separate lines in the `processFully` function that takes `Appendable`. */
+  <span class="keyword">final</span> <span class="keyword">val</span> <a title="String" id="585446">Newline</a>    = <a href="../../collection/MapLike.scala.html#87535" title="(key: String)String">props</a><span class="delimiter">(</span><span title="String(&quot;line.separator&quot;)" class="string">&quot;line.separator&quot;</span><span class="delimiter">)</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>process<span class="delimiter">]</span> <span class="keyword">final</span> <span class="keyword">class</span> <a title="class Streamed[T] extends Object" id="585448">Streamed</a><span class="delimiter">[</span><a title="" id="585449">T</a><span class="delimiter">]</span><a href="#585448" title="scala.sys.process.BasicIO.Streamed[T]" class="delimiter">(</a>
+    <span class="keyword">val</span> <a title="T =&gt; Unit" id="585506">process</a>:   T =&gt; Unit,
+    <span class="keyword">val</span>    <a title="Int =&gt; Unit" id="585507">done</a>: Int =&gt; Unit,
+    <span class="keyword">val</span>  <a title="() =&gt; scala.collection.immutable.Stream[T]" id="585508">stream</a>:  <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Stream<span class="delimiter">[</span>T<span class="delimiter">]</span>
+  <span class="delimiter">)</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>process<span class="delimiter">]</span> <span class="keyword">object</span> <a title="scala.sys.process.BasicIO.Streamed.type" id="585450">Streamed</a> <a href="#585451" title="scala.sys.process.BasicIO.Streamed.type" class="delimiter">{</a>
+    <span class="keyword">def</span> <a title="[T](nonzeroException: Boolean)scala.sys.process.BasicIO.Streamed[T]" id="585510">apply</a><span class="delimiter">[</span><a title="" id="585512">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Boolean" id="585514">nonzeroException</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a><span class="delimiter">)</span>: <a href="#585448" title="scala.sys.process.BasicIO.Streamed[T]">Streamed</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="java.util.concurrent.LinkedBlockingQueue[Either[Int,T]]" id="585515">q</a> = <span title="java.util.concurrent.LinkedBlockingQueue[Either[Int,T]]" class="keyword">new</span> <span title="java.util.concurrent.LinkedBlockingQueue[Either[Int,T]]">LinkedBlockingQueue</span><span class="delimiter">[</span>Either<span class="delimiter">[</span>Int, T<span class="delimiter">]</span><span class="delimiter">]</span>
+      <span class="keyword">def</span> <a title="()scala.collection.immutable.Stream[T]" id="585516">next</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../collection/immutable/Stream.scala.html#11226" title="scala.collection.immutable.Stream[T]">Stream</a><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#585515" title="java.util.concurrent.LinkedBlockingQueue[Either[Int,T]]">q</a>.<a href="#3297757" title="()Either[Int,T]">take</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> Left<a href="#3297755" title="Boolean" id="3297757" class="delimiter">(</a><a href="../../util/Either.scala.html#97650" title="Int" id="3297762" class="int">0</a><span class="delimiter">)</span>    =&gt; <a href="../../collection/immutable/Stream.scala.html#11227" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="#3297765" title="(x: scala.collection.immutable.Stream[T])scala.collection.immutable.Stream[T]">empty</a>
+        <span class="keyword">case</span> Left<span class="delimiter">(</span><a href="../../util/Either.scala.html#97650" title="Int" id="585725">code</a><span class="delimiter">)</span> =&gt; <a href="#3297765" title="(x: scala.collection.immutable.Stream[T])scala.collection.immutable.Stream[T]" class="keyword">if</a> <span class="delimiter">(</span><a href="#585514" title="Boolean">nonzeroException</a><span class="delimiter">)</span> scala.sys.<a href="../package.scala.html#55658" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="String(&quot;Nonzero exit code: &quot;)" class="string">&quot;Nonzero exit code: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#585725" title="Int">code</a><span class="delimiter">)</span> <span class="keyword">else</span> <a href="../../collection/immutable/Stream.scala.html#11227" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="../../collection/immutable/Stream.scala.html#143242" title="scala.collection.immutable.Stream[Nothing]">empty</a>
+        <span class="keyword">case</span> Right<a href="#3297755" title="scala.collection.immutable.Stream[T]" id="3297761" class="delimiter">(</a><a href="../../util/Either.scala.html#97679" title="T" id="585731">s</a><span class="delimiter">)</span>   =&gt; <a href="../../collection/immutable/Stream.scala.html#11227" title="scala.collection.immutable.Stream.type">Stream</a>.<a href="../../collection/immutable/Stream.scala.html#148552" title="(hd: T, tl: =&gt; scala.collection.immutable.Stream[T])scala.collection.immutable.Stream.Cons[T]">cons</a><a href="#3297765" title="(x: scala.collection.immutable.Stream[T])scala.collection.immutable.Stream[T]" class="delimiter">(</a><a href="#585731" title="T">s</a>, <a href="#585516" title="()scala.collection.immutable.Stream[T]">next</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <span title="scala.sys.process.BasicIO.Streamed[T]" class="keyword">new</span> <a href="#585448" title="scala.sys.process.BasicIO.Streamed[T]">Streamed</a><span class="delimiter">(</span><span class="delimiter">(</span>s: <a href="#585512" title="T">T</a><span class="delimiter">)</span> =&gt; <a href="#585515" title="java.util.concurrent.LinkedBlockingQueue[Either[Int,T]]">q</a> <span title="(x$1: Either[Int,T])Unit">put</span> <a href="../../util/Either.scala.html#97673" title="(b: T)scala.util.Right[Nothing,T]">Right</a><span class="delimiter">(</span><a href="#585744" title="T">s</a><span class="delimiter">)</span>, <a title="Int" id="585752">code</a> =&gt; <a href="#585515" title="java.util.concurrent.LinkedBlockingQueue[Either[Int,T]]">q</a> <span title="(x$1: Either[Int,T])Unit">put</span> <a href="../../util/Either.scala.html#97621" title="(a: Int)scala.util.Left[Int,Nothing]">Left</a><span class="delimiter">(</span><a href="#585752" title="Int">code</a><span class="delimiter">)</span>, <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; <a href="#585516" title="()scala.collection.immutable.Stream[T]">next</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span>process<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait Uncloseable extends Object with java.io.Closeable" id="585452">Uncloseable</a> <a href="../../Unit.scala.html#1515" title="Unit" class="keyword">extends</a> <span title="java.io.Closeable">Closeable</span> <span class="delimiter">{</span>
+    <span class="keyword">final</span> <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="585762">close</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span> <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>process<span class="delimiter">]</span> <span class="keyword">object</span> <a title="scala.sys.process.BasicIO.Uncloseable.type" id="585453">Uncloseable</a> <a href="#585454" title="scala.sys.process.BasicIO.Uncloseable.type" class="delimiter">{</a>
+    <span class="keyword">def</span> <a title="(in: scala.sys.process.processInternal.InputStream)scala.sys.process.processInternal.InputStream" id="585767">apply</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.InputStream" id="585772">in</a>: <span title="scala.sys.process.processInternal.InputStream">InputStream</span><span class="delimiter">)</span>: <span title="scala.sys.process.processInternal.InputStream">InputStream</span>      = <a href="#585773" title="java.io.FilterInputStream with scala.sys.process.BasicIO.Uncloseable" class="keyword">new</a> <a title="anonymous class $anon extends java.io.FilterInputStream with scala.sys.process.BasicIO.Uncloseable" id="585773">FilterInputStream</a><span class="delimiter">(</span><a href="#585772" title="scala.sys.process.processInternal.InputStream">in</a><span class="delimiter">)</span> <span class="keyword">with</span> <a href="#585452" title="scala.sys.process.BasicIO.Uncloseable">Uncloseable</a> <span class="delimiter">{</span> <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="(out: scala.sys.process.processInternal.OutputStream)scala.sys.process.processInternal.OutputStream" id="585768">apply</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.OutputStream" id="585778">out</a>: <span title="scala.sys.process.processInternal.OutputStream">OutputStream</span><span class="delimiter">)</span>: <span title="scala.sys.process.processInternal.OutputStream">OutputStream</span>   = <a href="#585779" title="java.io.FilterOutputStream with scala.sys.process.BasicIO.Uncloseable" class="keyword">new</a> <a title="anonymous class $anon extends java.io.FilterOutputStream with scala.sys.process.BasicIO.Uncloseable" id="585779">FilterOutputStream</a><span class="delimiter">(</span><a href="#585778" title="scala.sys.process.processInternal.OutputStream">out</a><span class="delimiter">)</span> <span class="keyword">with</span> <a href="#585452" title="scala.sys.process.BasicIO.Uncloseable">Uncloseable</a> <span class="delimiter">{</span> <span class="delimiter">}</span>
+    <span class="keyword">def</span> <a title="(in: scala.sys.process.processInternal.InputStream)scala.sys.process.processInternal.InputStream" id="585769">protect</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.InputStream" id="585784">in</a>: <span title="scala.sys.process.processInternal.InputStream">InputStream</span><span class="delimiter">)</span>: <span title="scala.sys.process.processInternal.InputStream">InputStream</span>    = <span title="scala.sys.process.processInternal.InputStream" class="keyword">if</span> <span class="delimiter">(</span><a href="#585784" title="scala.sys.process.processInternal.InputStream">in</a> <span title="(x$1: AnyRef)Boolean">eq</span> <a href="package.scala.html#55680" title="=&gt; java.io.InputStream">stdin</a><span class="delimiter">)</span> <a href="#585767" title="(in: scala.sys.process.processInternal.InputStream)scala.sys.process.processInternal.InputStream">Uncloseable</a><span class="delimiter">(</span><a href="#585784" title="scala.sys.process.processInternal.InputStream">in</a><span class="delimiter">)</span> <span class="keyword">else</span> <a href="#585784" title="scala.sys.process.processInternal.InputStream">in</a>
+    <span class="keyword">def</span> <a title="(out: scala.sys.process.processInternal.OutputStream)scala.sys.process.processInternal.OutputStream" id="585770">protect</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.OutputStream" id="585794">out</a>: <span title="scala.sys.process.processInternal.OutputStream">OutputStream</span><span class="delimiter">)</span>: <span title="scala.sys.process.processInternal.OutputStream">OutputStream</span> = <span title="scala.sys.process.processInternal.OutputStream" class="keyword">if</span> <span class="delimiter">(</span><span class="delimiter">(</span><a href="#585794" title="scala.sys.process.processInternal.OutputStream">out</a> <span title="(x$1: AnyRef)Boolean">eq</span> <a href="package.scala.html#55681" title="=&gt; java.io.PrintStream">stdout</a><span class="delimiter">)</span> <a href="../../Boolean.scala.html#57825" title="(x: Boolean)Boolean">||</a> <span class="delimiter">(</span><a href="#585794" title="scala.sys.process.processInternal.OutputStream">out</a> <span title="(x$1: AnyRef)Boolean">eq</span> <a href="package.scala.html#55682" title="=&gt; java.io.PrintStream">stderr</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#585768" title="(out: scala.sys.process.processInternal.OutputStream)scala.sys.process.processInternal.OutputStream">Uncloseable</a><span class="delimiter">(</span><a href="#585794" title="scala.sys.process.processInternal.OutputStream">out</a><span class="delimiter">)</span> <span class="keyword">else</span> <a href="#585794" title="scala.sys.process.processInternal.OutputStream">out</a>
+  <span class="delimiter">}</span>
+
+  /** Creates a `ProcessIO` from a function `String =&gt; Unit`. It can attach the
+    * process input to stdin, and it will either send the error stream to
+    * stderr, or to a `ProcessLogger`.
+    *
+    * For example, the `ProcessIO` created below will print all normal output
+    * while ignoring all error output. No input will be provided.
+    * {{{
+    * import scala.sys.process.BasicIO
+    * val errToDevNull = BasicIO(false, println(_), None)
+    * }}}
+    *
+    * @param withIn True if the process input should be attached to stdin.
+    * @param output A function that will be called with the process output.
+    * @param log    An optional `ProcessLogger` to which the output should be
+    *               sent. If `None`, output will be sent to stderr.
+    * @return A `ProcessIO` with the characteristics above.
+    */
+  <span class="keyword">def</span> <a title="(withIn: Boolean, output: String =&gt; Unit, log: Option[scala.sys.process.ProcessLogger])scala.sys.process.ProcessIO" id="585455">apply</a><span class="delimiter">(</span><a title="Boolean" id="585807">withIn</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a>, <a title="String =&gt; Unit" id="585808">output</a>: String =&gt; Unit, <a title="Option[scala.sys.process.ProcessLogger]" id="585809">log</a>: <a href="../../Option.scala.html#978" title="Option[scala.sys.process.ProcessLogger]">Option</a><span class="delimiter">[</span>ProcessLogger<span class="delimiter">]</span><span class="delimiter">)</span> =
+    <a href="ProcessIO.scala.html#585823" title="(in: scala.sys.process.processInternal.OutputStream =&gt; Unit, out: scala.sys.process.processInternal.InputStream =&gt; Unit, err: scala.sys.process.processInternal.InputStream =&gt; Unit)scala.sys.process.ProcessIO" class="keyword">new</a> <a href="ProcessIO.scala.html#25832" title="scala.sys.process.ProcessIO">ProcessIO</a><span class="delimiter">(</span><a href="#585466" title="(connect: Boolean)scala.sys.process.processInternal.OutputStream =&gt; Unit">input</a><span class="delimiter">(</span><a href="#585807" title="Boolean">withIn</a><span class="delimiter">)</span>, <a href="#585463" title="(processLine: String =&gt; Unit)scala.sys.process.processInternal.InputStream =&gt; Unit">processFully</a><span class="delimiter">(</span><a href="#585808" title="String =&gt; Unit">output</a><span class="delimiter">)</span>, <a href="#585458" title="(log: Option[scala.sys.process.ProcessLogger])scala.sys.process.processInternal.InputStream =&gt; Unit">getErr</a><span class="delimiter">(</span><a href="#585809" title="Option[scala.sys.process.ProcessLogger]">log</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Creates a `ProcessIO` that appends its output to a `StringBuffer`. It can
+    * attach the process input to stdin, and it will either send the error
+    * stream to stderr, or to a `ProcessLogger`.
+    *
+    * For example, the `ProcessIO` created by the function below will store the
+    * normal output on the buffer provided, and print all error on stderr. The
+    * input will be read from stdin.
+    * {{{
+    * import scala.sys.process.{BasicIO, ProcessLogger}
+    * val printer = ProcessLogger(println(_))
+    * def appendToBuffer(b: StringBuffer) = BasicIO(true, b, Some(printer))
+    * }}}
+    *
+    * @param withIn True if the process input should be attached to stdin.
+    * @param buffer A `StringBuffer` which will receive the process normal
+    *               output.
+    * @param log    An optional `ProcessLogger` to which the output should be
+    *               sent. If `None`, output will be sent to stderr.
+    * @return A `ProcessIO` with the characteristics above.
+    */
+  <span class="keyword">def</span> <a title="(withIn: Boolean, buffer: StringBuffer, log: Option[scala.sys.process.ProcessLogger])scala.sys.process.ProcessIO" id="585456">apply</a><span class="delimiter">(</span><a title="Boolean" id="585866">withIn</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a>, <a title="StringBuffer" id="585867">buffer</a>: <span title="StringBuffer">StringBuffer</span>, <a title="Option[scala.sys.process.ProcessLogger]" id="585868">log</a>: <a href="../../Option.scala.html#978" title="Option[scala.sys.process.ProcessLogger]">Option</a><span class="delimiter">[</span>ProcessLogger<span class="delimiter">]</span><span class="delimiter">)</span> =
+    <a href="ProcessIO.scala.html#585823" title="(in: scala.sys.process.processInternal.OutputStream =&gt; Unit, out: scala.sys.process.processInternal.InputStream =&gt; Unit, err: scala.sys.process.processInternal.InputStream =&gt; Unit)scala.sys.process.ProcessIO" class="keyword">new</a> <a href="ProcessIO.scala.html#25832" title="scala.sys.process.ProcessIO">ProcessIO</a><span class="delimiter">(</span><a href="#585466" title="(connect: Boolean)scala.sys.process.processInternal.OutputStream =&gt; Unit">input</a><span class="delimiter">(</span><a href="#585866" title="Boolean">withIn</a><span class="delimiter">)</span>, <a href="#585462" title="(buffer: Appendable)scala.sys.process.processInternal.InputStream =&gt; Unit">processFully</a><span class="delimiter">(</span><a href="#585867" title="StringBuffer">buffer</a><span class="delimiter">)</span>, <a href="#585458" title="(log: Option[scala.sys.process.ProcessLogger])scala.sys.process.processInternal.InputStream =&gt; Unit">getErr</a><span class="delimiter">(</span><a href="#585868" title="Option[scala.sys.process.ProcessLogger]">log</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Creates a `ProcessIO` from a `ProcessLogger` . It can attach the
+    * process input to stdin.
+    *
+    * @param withIn True if the process input should be attached to stdin.
+    * @param log    A `ProcessLogger` to receive all output, normal and error.
+    * @return A `ProcessIO` with the characteristics above.
+    */
+  <span class="keyword">def</span> <a title="(withIn: Boolean, log: scala.sys.process.ProcessLogger)scala.sys.process.ProcessIO" id="585457">apply</a><span class="delimiter">(</span><a title="Boolean" id="585877">withIn</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a>, <a title="scala.sys.process.ProcessLogger" id="585878">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span> =
+    <a href="ProcessIO.scala.html#585823" title="(in: scala.sys.process.processInternal.OutputStream =&gt; Unit, out: scala.sys.process.processInternal.InputStream =&gt; Unit, err: scala.sys.process.processInternal.InputStream =&gt; Unit)scala.sys.process.ProcessIO" class="keyword">new</a> <a href="ProcessIO.scala.html#25832" title="scala.sys.process.ProcessIO">ProcessIO</a><span class="delimiter">(</span><a href="#585466" title="(connect: Boolean)scala.sys.process.processInternal.OutputStream =&gt; Unit">input</a><span class="delimiter">(</span><a href="#585877" title="Boolean">withIn</a><span class="delimiter">)</span>, <a href="#585460" title="(log: scala.sys.process.ProcessLogger)scala.sys.process.processInternal.InputStream =&gt; Unit">processOutFully</a><span class="delimiter">(</span><a href="#585878" title="scala.sys.process.ProcessLogger">log</a><span class="delimiter">)</span>, <a href="#585459" title="(log: scala.sys.process.ProcessLogger)scala.sys.process.processInternal.InputStream =&gt; Unit">processErrFully</a><span class="delimiter">(</span><a href="#585878" title="scala.sys.process.ProcessLogger">log</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Returns a function `InputStream =&gt; Unit` given an optional
+    * `ProcessLogger`. If no logger is passed, the function will send the output
+    * to stderr. This function can be used to create a
+    * [[scala.sys.process.ProcessIO]].
+    *
+    * @param log An optional `ProcessLogger` to which the contents of
+    *            the `InputStream` will be sent.
+    * @return A function `InputStream =&gt; Unit` (used by
+    *          [[scala.sys.process.ProcessIO]]) which will send the data to
+    *          either the provided `ProcessLogger` or, if `None`, to stderr.
+    */
+  <span class="keyword">def</span> <a title="(log: Option[scala.sys.process.ProcessLogger])scala.sys.process.processInternal.InputStream =&gt; Unit" id="585458">getErr</a><span class="delimiter">(</span><a title="Option[scala.sys.process.ProcessLogger]" id="585846">log</a>: <a href="../../Option.scala.html#978" title="Option[scala.sys.process.ProcessLogger]">Option</a><span class="delimiter">[</span>ProcessLogger<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="#585846" title="Option[scala.sys.process.ProcessLogger]">log</a> <span class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> Some<a href="#3297774" title="scala.sys.process.processInternal.InputStream =&gt; Unit" id="3297775" class="delimiter">(</a><a href="../../Option.scala.html#63132" title="scala.sys.process.ProcessLogger" id="585848">lg</a><span class="delimiter">)</span> =&gt; <a href="#585459" title="(log: scala.sys.process.ProcessLogger)scala.sys.process.processInternal.InputStream =&gt; Unit">processErrFully</a><a href="#3297779" title="(x: scala.sys.process.processInternal.InputStream =&gt; Unit)scala.sys.process.processInternal.InputStream =&gt; Unit" class="delimiter">(</a><a href="#585848" title="scala.sys.process.ProcessLogger">lg</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a href="../../Option.scala.html#1585" title="scala.sys.process.processInternal.InputStream =&gt; Unit" id="3297777">None</a>     =&gt; <a href="#3297779" title="(x: scala.sys.process.processInternal.InputStream =&gt; Unit)scala.sys.process.processInternal.InputStream =&gt; Unit">toStdErr</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)scala.sys.process.processInternal.InputStream =&gt; Unit" id="585459">processErrFully</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="585849">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span> = <a href="#585463" title="(processLine: String =&gt; Unit)scala.sys.process.processInternal.InputStream =&gt; Unit">processFully</a><span class="delimiter">(</span><a href="#585849" title="scala.sys.process.ProcessLogger">log</a> <a href="ProcessLogger.scala.html#585857" title="(s: =&gt; String)Unit">err</a> <a href="#585855" title="String">_</a><span class="delimiter">)</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(log: scala.sys.process.ProcessLogger)scala.sys.process.processInternal.InputStream =&gt; Unit" id="585460">processOutFully</a><span class="delimiter">(</span><a title="scala.sys.process.ProcessLogger" id="585881">log</a>: <a href="ProcessLogger.scala.html#25763" title="scala.sys.process.ProcessLogger">ProcessLogger</a><span class="delimiter">)</span> = <a href="#585463" title="(processLine: String =&gt; Unit)scala.sys.process.processInternal.InputStream =&gt; Unit">processFully</a><span class="delimiter">(</span><a href="#585881" title="scala.sys.process.ProcessLogger">log</a> <a href="ProcessLogger.scala.html#585856" title="(s: =&gt; String)Unit">out</a> <a href="#585887" title="String">_</a><span class="delimiter">)</span>
+
+  /** Closes a `Closeable` without throwing an exception */
+  <span class="keyword">def</span> <a title="(c: scala.sys.process.processInternal.Closeable)Unit" id="585461">close</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.Closeable" id="585889">c</a>: <span title="scala.sys.process.processInternal.Closeable">Closeable</span><span class="delimiter">)</span> = <span class="keyword">try</span> <a href="#585889" title="scala.sys.process.processInternal.Closeable">c</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span> <span class="keyword">catch</span> <span class="delimiter">{</span> <span class="keyword">case</span> <span title="Unit">_</span>: <span title="scala.sys.process.processInternal.IOException">IOException</span> =&gt; <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+
+  /** Returns a function `InputStream =&gt; Unit` that appends all data read to the
+    * provided `Appendable`. This function can be used to create a
+    * [[scala.sys.process.ProcessIO]]. The buffer will be appended line by line.
+    *
+    * @param buffer An `Appendable` such as `StringBuilder` or `StringBuffer`.
+    * @return A function `InputStream =&gt; Unit` (used by
+    *          [[scala.sys.process.ProcessIO]] which will append all data read
+    *          from the stream to the buffer.
+    */
+  <span class="keyword">def</span> <a title="(buffer: Appendable)scala.sys.process.processInternal.InputStream =&gt; Unit" id="585462">processFully</a><span class="delimiter">(</span><a title="Appendable" id="585843">buffer</a>: <span title="Appendable">Appendable</span><span class="delimiter">)</span>: InputStream =&gt; Unit = <a href="#585463" title="(processLine: String =&gt; Unit)scala.sys.process.processInternal.InputStream =&gt; Unit">processFully</a><span class="delimiter">(</span><a href="#585472" title="(buffer: Appendable)String =&gt; Unit">appendLine</a><span class="delimiter">(</span><a href="#585843" title="Appendable">buffer</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Returns a function `InputStream =&gt; Unit` that will call the passed
+    * function with all data read. This function can be used to create a
+    * [[scala.sys.process.ProcessIO]]. The `processLine` function will be called
+    * with each line read, and `Newline` will be appended after each line.
+    *
+    * @param processLine A function that will be called with all data read from
+    *                    the stream.
+    * @return A function `InputStream =&gt; Unit` (used by
+    *          [[scala.sys.process.ProcessIO]] which will call `processLine`
+    *          with all data read from the stream.
+    */
+  <span class="keyword">def</span> <a title="(processLine: String =&gt; Unit)scala.sys.process.processInternal.InputStream =&gt; Unit" id="585463">processFully</a><span class="delimiter">(</span><a title="String =&gt; Unit" id="585842">processLine</a>: String =&gt; Unit<span class="delimiter">)</span>: InputStream =&gt; Unit = <a title="scala.sys.process.processInternal.InputStream" id="585898">in</a> =&gt; <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="java.io.BufferedReader" id="585899">reader</a> = <span title="(x$1: java.io.Reader)java.io.BufferedReader" class="keyword">new</span> <span title="java.io.BufferedReader">BufferedReader</span><span class="delimiter">(</span><span title="java.io.InputStreamReader" class="keyword">new</span> <span title="java.io.InputStreamReader">InputStreamReader</span><span class="delimiter">(</span><a href="#585898" title="scala.sys.process.processInternal.InputStream">in</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#585464" title="(processLine: String =&gt; Unit)(readLine: () =&gt; String)Unit">processLinesFully</a><span class="delimiter">(</span><a href="#585842" title="String =&gt; Unit">processLine</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#585899" title="java.io.BufferedReader">reader</a>.<span title="()String">readLine</span><span class="delimiter">)</span>
+    <a href="#585899" title="java.io.BufferedReader">reader</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Calls `processLine` with the result of `readLine` until the latter returns
+    * `null`.
+    */
+  <span class="keyword">def</span> <a title="(processLine: String =&gt; Unit)(readLine: () =&gt; String)Unit" id="585464">processLinesFully</a><span class="delimiter">(</span><a title="String =&gt; Unit" id="585904">processLine</a>: String =&gt; Unit<span class="delimiter">)</span><span class="delimiter">(</span><a title="() =&gt; String" id="585905">readLine</a>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; String<span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="()Unit" id="585909">readFully</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="String" id="585910">line</a> = <a href="../../Function0.scala.html#65930" title="()String">readLine</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#585910" title="String">line</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="../../Function1.scala.html#58642" title="(v1: String)Unit">processLine</a><span class="delimiter">(</span><a href="#585910" title="String">line</a><span class="delimiter">)</span>
+        <a href="#585909" title="()Unit">readFully</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <a href="#585909" title="()Unit">readFully</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Copy contents of stdin to the `OutputStream`. */
+  <span class="keyword">def</span> <a title="(o: scala.sys.process.processInternal.OutputStream)Unit" id="585465">connectToIn</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.OutputStream" id="585916">o</a>: <span title="scala.sys.process.processInternal.OutputStream">OutputStream</span><span class="delimiter">)</span>: <a href="../../Unit.scala.html#1515" title="Unit">Unit</a> = <a href="#585471" title="(in: scala.sys.process.processInternal.InputStream, out: scala.sys.process.processInternal.OutputStream)Unit">transferFully</a><span class="delimiter">(</span><a href="#585453" title="scala.sys.process.BasicIO.Uncloseable.type">Uncloseable</a> <a href="#585769" title="(in: scala.sys.process.processInternal.InputStream)scala.sys.process.processInternal.InputStream">protect</a> <a href="package.scala.html#55680" title="=&gt; java.io.InputStream">stdin</a>, <a href="#585916" title="scala.sys.process.processInternal.OutputStream">o</a><span class="delimiter">)</span>
+
+  /** Returns a function `OutputStream =&gt; Unit` that either reads the content
+    * from stdin or does nothing. This function can be used by
+    * [[scala.sys.process.ProcessIO]].
+    */
+  <span class="keyword">def</span> <a title="(connect: Boolean)scala.sys.process.processInternal.OutputStream =&gt; Unit" id="585466">input</a><span class="delimiter">(</span><a title="Boolean" id="585837">connect</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a><span class="delimiter">)</span>: OutputStream =&gt; Unit = <span class="delimiter">{</span> <a title="scala.sys.process.processInternal.OutputStream" id="585920">outputToProcess</a> =&gt;
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#585837" title="Boolean">connect</a><span class="delimiter">)</span> <a href="#585465" title="(o: scala.sys.process.processInternal.OutputStream)Unit">connectToIn</a><span class="delimiter">(</span><a href="#585920" title="scala.sys.process.processInternal.OutputStream">outputToProcess</a><span class="delimiter">)</span>
+    <a href="#585920" title="scala.sys.process.processInternal.OutputStream">outputToProcess</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  /** Returns a `ProcessIO` connected to stdout and stderr, and, optionally, stdin. */
+  <span class="keyword">def</span> <a title="(connectInput: Boolean)scala.sys.process.ProcessIO" id="585467">standard</a><span class="delimiter">(</span><a title="Boolean" id="585921">connectInput</a>: <a href="../../Boolean.scala.html#1425" title="Boolean">Boolean</a><span class="delimiter">)</span>: <a href="ProcessIO.scala.html#25832" title="scala.sys.process.ProcessIO">ProcessIO</a> = <a href="#585468" title="(in: scala.sys.process.processInternal.OutputStream =&gt; Unit)scala.sys.process.ProcessIO">standard</a><span class="delimiter">(</span><a href="#585466" title="(connect: Boolean)scala.sys.process.processInternal.OutputStream =&gt; Unit">input</a><span class="delimiter">(</span><a href="#585921" title="Boolean">connectInput</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  /** Retruns a `ProcessIO` connected to stdout, stderr and the provided `in` */
+  <span class="keyword">def</span> <a title="(in: scala.sys.process.processInternal.OutputStream =&gt; Unit)scala.sys.process.ProcessIO" id="585468">standard</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.OutputStream =&gt; Unit" id="585926">in</a>: OutputStream =&gt; Unit<span class="delimiter">)</span>: <a href="ProcessIO.scala.html#25832" title="scala.sys.process.ProcessIO">ProcessIO</a> = <a href="ProcessIO.scala.html#585823" title="(in: scala.sys.process.processInternal.OutputStream =&gt; Unit, out: scala.sys.process.processInternal.InputStream =&gt; Unit, err: scala.sys.process.processInternal.InputStream =&gt; Unit)scala.sys.process.ProcessIO" class="keyword">new</a> <a href="ProcessIO.scala.html#25832" title="scala.sys.process.ProcessIO">ProcessIO</a><span class="delimiter">(</span><a href="#585926" title="scala.sys.process.processInternal.OutputStream =&gt; Unit">in</a>, <a href="#585470" title="=&gt; scala.sys.process.processInternal.InputStream =&gt; Unit">toStdOut</a>, <a href="#585469" title="=&gt; scala.sys.process.processInternal.InputStream =&gt; Unit">toStdErr</a><span class="delimiter">)</span>
+
+  /** Send all the input from the stream to stderr, and closes the input stream
+   * afterwards.
+   */
+  <span class="keyword">def</span> <a title="=&gt; scala.sys.process.processInternal.InputStream =&gt; Unit" id="585469">toStdErr</a> = <span class="delimiter">(</span>in: <span title="scala.sys.process.processInternal.InputStream">InputStream</span><span class="delimiter">)</span> =&gt; <a href="#585471" title="(in: scala.sys.process.processInternal.InputStream, out: scala.sys.process.processInternal.OutputStream)Unit">transferFully</a><span class="delimiter">(</span><a href="#585863" title="scala.sys.process.processInternal.InputStream">in</a>, <a href="package.scala.html#55682" title="=&gt; java.io.PrintStream">stderr</a><span class="delimiter">)</span>
+
+  /** Send all the input from the stream to stdout, and closes the input stream
+   * afterwards.
+   */
+  <span class="keyword">def</span> <a title="=&gt; scala.sys.process.processInternal.InputStream =&gt; Unit" id="585470">toStdOut</a> = <span class="delimiter">(</span>in: <span title="scala.sys.process.processInternal.InputStream">InputStream</span><span class="delimiter">)</span> =&gt; <a href="#585471" title="(in: scala.sys.process.processInternal.InputStream, out: scala.sys.process.processInternal.OutputStream)Unit">transferFully</a><span class="delimiter">(</span><a href="#585932" title="scala.sys.process.processInternal.InputStream">in</a>, <a href="package.scala.html#55681" title="=&gt; java.io.PrintStream">stdout</a><span class="delimiter">)</span>
+
+  /** Copy all input from the input stream to the output stream. Closes the
+    * input stream once it's all read.
+    */
+  <span class="keyword">def</span> <a title="(in: scala.sys.process.processInternal.InputStream, out: scala.sys.process.processInternal.OutputStream)Unit" id="585471">transferFully</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.InputStream" id="585864">in</a>: <span title="scala.sys.process.processInternal.InputStream">InputStream</span>, <a title="scala.sys.process.processInternal.OutputStream" id="585865">out</a>: <span title="scala.sys.process.processInternal.OutputStream">OutputStream</span><span class="delimiter">)</span>: <a href="../../Unit.scala.html#1515" title="Unit">Unit</a> =
+    <a title="Unit" id="585935" class="keyword">try</a> <a href="#585473" title="(in: scala.sys.process.processInternal.InputStream, out: scala.sys.process.processInternal.OutputStream)Unit">transferFullyImpl</a><span class="delimiter">(</span><a href="#585864" title="scala.sys.process.processInternal.InputStream">in</a>, <a href="#585865" title="scala.sys.process.processInternal.OutputStream">out</a><span class="delimiter">)</span>
+    <span class="keyword">catch</span> <a href="package.scala.html#585436" title="(handler: =&gt; Unit)scala.sys.process.processInternal.=?&gt;[Throwable,Unit]">onInterrupt</a><a href="../../PartialFunction.scala.html#58653" title="scala.sys.process.processInternal.=?&gt;[Throwable,Unit]" id="585936" class="delimiter">(</a><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">def</span> <a title="(buffer: Appendable)String =&gt; Unit" id="585472">appendLine</a><span class="delimiter">(</span><a title="Appendable" id="585896">buffer</a>: <span title="Appendable">Appendable</span><span class="delimiter">)</span>: String =&gt; Unit = <a title="String" id="585945">line</a> =&gt; <span class="delimiter">{</span>
+    <a href="#585896" title="Appendable">buffer</a> <span title="(x$1: CharSequence)Appendable">append</span> <a href="#585945" title="String">line</a>
+    <a href="#585896" title="Appendable">buffer</a> <span title="(x$1: CharSequence)Appendable">append</span> <a href="#585446" title="=&gt; String">Newline</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span><span class="delimiter">[</span><span class="keyword">this</span><span class="delimiter">]</span> <span class="keyword">def</span> <a title="(in: scala.sys.process.processInternal.InputStream, out: scala.sys.process.processInternal.OutputStream)Unit" id="585473">transferFullyImpl</a><span class="delimiter">(</span><a title="scala.sys.process.processInternal.InputStream" id="585933">in</a>: <span title="scala.sys.process.processInternal.InputStream">InputStream</span>, <a title="scala.sys.process.processInternal.OutputStream" id="585934">out</a>: <span title="scala.sys.process.processInternal.OutputStream">OutputStream</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="Array[Byte]" id="585954">buffer</a> = <span title="Array[Byte]" class="keyword">new</span> <a href="../../Array.scala.html#174" title="Array[Byte]">Array</a><span class="delimiter">[</span>Byte<span class="delimiter">]</span><span class="delimiter">(</span><span title="Int(8192)">BufferSize</span><span class="delimiter">)</span>
+    @tailrec <span class="keyword">def</span> <a title="()Unit" id="585955">loop</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Int" id="585956">byteCount</a> = <a href="#585933" title="scala.sys.process.processInternal.InputStream">in</a>.<span title="(x$1: Array[Byte])Int">read</span><span class="delimiter">(</span><a href="#585954" title="Array[Byte]">buffer</a><span class="delimiter">)</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#585956" title="Int">byteCount</a> <a href="../../Int.scala.html#57125" title="(x: Int)Boolean">&gt;</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#585934" title="scala.sys.process.processInternal.OutputStream">out</a>.<span title="(x$1: Array[Byte], x$2: Int, x$3: Int)Unit">write</span><span class="delimiter">(</span><a href="#585954" title="Array[Byte]">buffer</a>, <span title="Int(0)" class="int">0</span>, <a href="#585956" title="Int">byteCount</a><span class="delimiter">)</span>
+        // flush() will throw an exception once the process has terminated
+        <span class="keyword">val</span> <a title="Boolean" id="585963">available</a> = <span class="keyword">try</span> <span class="delimiter">{</span> <a href="#585934" title="scala.sys.process.processInternal.OutputStream">out</a>.<span title="()Unit">flush</span><span class="delimiter">(</span><span class="delimiter">)</span>; <span title="Boolean(true)" class="keyword">true</span> <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span> <span class="keyword">case</span> <span title="Boolean(false)">_</span>: <span title="scala.sys.process.processInternal.IOException">IOException</span> =&gt; <span title="Boolean(false)" class="keyword">false</span> <span class="delimiter">}</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#585963" title="Boolean">available</a><span class="delimiter">)</span> <a href="#585955" title="()Unit">loop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <a href="#585955" title="()Unit">loop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#585933" title="scala.sys.process.processInternal.InputStream">in</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

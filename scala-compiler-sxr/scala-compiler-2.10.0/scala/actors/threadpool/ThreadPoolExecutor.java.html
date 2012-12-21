@@ -1,0 +1,1985 @@
+<?xml version="1.0" encoding="utf-8"?>
+      <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <meta http-equiv="Expires" content="0" />
+        <title>scala/actors/threadpool/ThreadPoolExecutor.java</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Written by Doug Lea with assistance from members of JCP JSR-166
+ * Expert Group and released to the public domain, as explained at
+ * http://creativecommons.org/licenses/publicdomain
+ */
+
+<span class="keyword">package</span> scala.actors.threadpool;
+<span class="keyword">import</span> scala.actors.threadpool.locks.*;
+<span class="keyword">import</span> scala.actors.threadpool.helpers.Utils;
+<span class="keyword">import</span> java.util.HashSet;
+<span class="keyword">import</span> java.util.List;
+<span class="keyword">import</span> java.util.Iterator;
+<span class="keyword">import</span> java.util.ArrayList;
+<span class="keyword">import</span> java.util.ConcurrentModificationException;
+
+/**
+ * An {@link ExecutorService} that executes each submitted task using
+ * one of possibly several pooled threads, normally configured
+ * using {@link Executors} factory methods.
+ *
+ * &lt;p&gt;Thread pools address two different problems: they usually
+ * provide improved performance when executing large numbers of
+ * asynchronous tasks, due to reduced per-task invocation overhead,
+ * and they provide a means of bounding and managing the resources,
+ * including threads, consumed when executing a collection of tasks.
+ * Each {@code ThreadPoolExecutor} also maintains some basic
+ * statistics, such as the number of completed tasks.
+ *
+ * &lt;p&gt;To be useful across a wide range of contexts, this class
+ * provides many adjustable parameters and extensibility
+ * hooks. However, programmers are urged to use the more convenient
+ * {@link Executors} factory methods {@link
+ * Executors#newCachedThreadPool} (unbounded thread pool, with
+ * automatic thread reclamation), {@link Executors#newFixedThreadPool}
+ * (fixed size thread pool) and {@link
+ * Executors#newSingleThreadExecutor} (single background thread), that
+ * preconfigure settings for the most common usage
+ * scenarios. Otherwise, use the following guide when manually
+ * configuring and tuning this class:
+ *
+ * &lt;dl&gt;
+ *
+ * &lt;dt&gt;Core and maximum pool sizes&lt;/dt&gt;
+ *
+ * &lt;dd&gt;A {@code ThreadPoolExecutor} will automatically adjust the
+ * pool size (see {@link #getPoolSize})
+ * according to the bounds set by
+ * corePoolSize (see {@link #getCorePoolSize}) and
+ * maximumPoolSize (see {@link #getMaximumPoolSize}).
+ *
+ * When a new task is submitted in method {@link #execute}, and fewer
+ * than corePoolSize threads are running, a new thread is created to
+ * handle the request, even if other worker threads are idle.  If
+ * there are more than corePoolSize but less than maximumPoolSize
+ * threads running, a new thread will be created only if the queue is
+ * full.  By setting corePoolSize and maximumPoolSize the same, you
+ * create a fixed-size thread pool. By setting maximumPoolSize to an
+ * essentially unbounded value such as {@code Integer.MAX_VALUE}, you
+ * allow the pool to accommodate an arbitrary number of concurrent
+ * tasks. Most typically, core and maximum pool sizes are set only
+ * upon construction, but they may also be changed dynamically using
+ * {@link #setCorePoolSize} and {@link #setMaximumPoolSize}. &lt;/dd&gt;
+ *
+ * &lt;dt&gt;On-demand construction&lt;/dt&gt;
+ *
+ * &lt;dd&gt; By default, even core threads are initially created and
+ * started only when new tasks arrive, but this can be overridden
+ * dynamically using method {@link #prestartCoreThread} or {@link
+ * #prestartAllCoreThreads}.  You probably want to prestart threads if
+ * you construct the pool with a non-empty queue. &lt;/dd&gt;
+ *
+ * &lt;dt&gt;Creating new threads&lt;/dt&gt;
+ *
+ * &lt;dd&gt;New threads are created using a {@link ThreadFactory}.  If not
+ * otherwise specified, a {@link Executors#defaultThreadFactory} is
+ * used, that creates threads to all be in the same {@link
+ * ThreadGroup} and with the same {@code NORM_PRIORITY} priority and
+ * non-daemon status. By supplying a different ThreadFactory, you can
+ * alter the thread's name, thread group, priority, daemon status,
+ * etc. If a {@code ThreadFactory} fails to create a thread when asked
+ * by returning null from {@code newThread}, the executor will
+ * continue, but might not be able to execute any tasks. Threads
+ * should possess the &quot;modifyThread&quot; {@code RuntimePermission}. If
+ * worker threads or other threads using the pool do not possess this
+ * permission, service may be degraded: configuration changes may not
+ * take effect in a timely manner, and a shutdown pool may remain in a
+ * state in which termination is possible but not completed.&lt;/dd&gt;
+ *
+ * &lt;dt&gt;Keep-alive times&lt;/dt&gt;
+ *
+ * &lt;dd&gt;If the pool currently has more than corePoolSize threads,
+ * excess threads will be terminated if they have been idle for more
+ * than the keepAliveTime (see {@link #getKeepAliveTime}). This
+ * provides a means of reducing resource consumption when the pool is
+ * not being actively used. If the pool becomes more active later, new
+ * threads will be constructed. This parameter can also be changed
+ * dynamically using method {@link #setKeepAliveTime}. Using a value
+ * of {@code Long.MAX_VALUE} {@link TimeUnit#NANOSECONDS} effectively
+ * disables idle threads from ever terminating prior to shut down. By
+ * default, the keep-alive policy applies only when there are more
+ * than corePoolSizeThreads. But method {@link
+ * #allowCoreThreadTimeOut(boolean)} can be used to apply this
+ * time-out policy to core threads as well, so long as the
+ * keepAliveTime value is non-zero. &lt;/dd&gt;
+ *
+ * &lt;dt&gt;Queuing&lt;/dt&gt;
+ *
+ * &lt;dd&gt;Any {@link BlockingQueue} may be used to transfer and hold
+ * submitted tasks.  The use of this queue interacts with pool sizing:
+ *
+ * &lt;ul&gt;
+ *
+ * &lt;li&gt; If fewer than corePoolSize threads are running, the Executor
+ * always prefers adding a new thread
+ * rather than queuing.&lt;/li&gt;
+ *
+ * &lt;li&gt; If corePoolSize or more threads are running, the Executor
+ * always prefers queuing a request rather than adding a new
+ * thread.&lt;/li&gt;
+ *
+ * &lt;li&gt; If a request cannot be queued, a new thread is created unless
+ * this would exceed maximumPoolSize, in which case, the task will be
+ * rejected.&lt;/li&gt;
+ *
+ * &lt;/ul&gt;
+ *
+ * There are three general strategies for queuing:
+ * &lt;ol&gt;
+ *
+ * &lt;li&gt; &lt;em&gt; Direct handoffs.&lt;/em&gt; A good default choice for a work
+ * queue is a {@link SynchronousQueue} that hands off tasks to threads
+ * without otherwise holding them. Here, an attempt to queue a task
+ * will fail if no threads are immediately available to run it, so a
+ * new thread will be constructed. This policy avoids lockups when
+ * handling sets of requests that might have internal dependencies.
+ * Direct handoffs generally require unbounded maximumPoolSizes to
+ * avoid rejection of new submitted tasks. This in turn admits the
+ * possibility of unbounded thread growth when commands continue to
+ * arrive on average faster than they can be processed.  &lt;/li&gt;
+ *
+ * &lt;li&gt;&lt;em&gt; Unbounded queues.&lt;/em&gt; Using an unbounded queue (for
+ * example a {@link LinkedBlockingQueue} without a predefined
+ * capacity) will cause new tasks to wait in the queue when all
+ * corePoolSize threads are busy. Thus, no more than corePoolSize
+ * threads will ever be created. (And the value of the maximumPoolSize
+ * therefore doesn't have any effect.)  This may be appropriate when
+ * each task is completely independent of others, so tasks cannot
+ * affect each others execution; for example, in a web page server.
+ * While this style of queuing can be useful in smoothing out
+ * transient bursts of requests, it admits the possibility of
+ * unbounded work queue growth when commands continue to arrive on
+ * average faster than they can be processed.  &lt;/li&gt;
+ *
+ * &lt;li&gt;&lt;em&gt;Bounded queues.&lt;/em&gt; A bounded queue (for example, an
+ * {@link ArrayBlockingQueue}) helps prevent resource exhaustion when
+ * used with finite maximumPoolSizes, but can be more difficult to
+ * tune and control.  Queue sizes and maximum pool sizes may be traded
+ * off for each other: Using large queues and small pools minimizes
+ * CPU usage, OS resources, and context-switching overhead, but can
+ * lead to artificially low throughput.  If tasks frequently block (for
+ * example if they are I/O bound), a system may be able to schedule
+ * time for more threads than you otherwise allow. Use of small queues
+ * generally requires larger pool sizes, which keeps CPUs busier but
+ * may encounter unacceptable scheduling overhead, which also
+ * decreases throughput.  &lt;/li&gt;
+ *
+ * &lt;/ol&gt;
+ *
+ * &lt;/dd&gt;
+ *
+ * &lt;dt&gt;Rejected tasks&lt;/dt&gt;
+ *
+ * &lt;dd&gt; New tasks submitted in method {@link #execute} will be
+ * &lt;em&gt;rejected&lt;/em&gt; when the Executor has been shut down, and also
+ * when the Executor uses finite bounds for both maximum threads and
+ * work queue capacity, and is saturated.  In either case, the {@code
+ * execute} method invokes the {@link
+ * RejectedExecutionHandler#rejectedExecution} method of its {@link
+ * RejectedExecutionHandler}.  Four predefined handler policies are
+ * provided:
+ *
+ * &lt;ol&gt;
+ *
+ * &lt;li&gt; In the default {@link ThreadPoolExecutor.AbortPolicy}, the
+ * handler throws a runtime {@link RejectedExecutionException} upon
+ * rejection. &lt;/li&gt;
+ *
+ * &lt;li&gt; In {@link ThreadPoolExecutor.CallerRunsPolicy}, the thread
+ * that invokes {@code execute} itself runs the task. This provides a
+ * simple feedback control mechanism that will slow down the rate that
+ * new tasks are submitted. &lt;/li&gt;
+ *
+ * &lt;li&gt; In {@link ThreadPoolExecutor.DiscardPolicy}, a task that
+ * cannot be executed is simply dropped.  &lt;/li&gt;
+ *
+ * &lt;li&gt;In {@link ThreadPoolExecutor.DiscardOldestPolicy}, if the
+ * executor is not shut down, the task at the head of the work queue
+ * is dropped, and then execution is retried (which can fail again,
+ * causing this to be repeated.) &lt;/li&gt;
+ *
+ * &lt;/ol&gt;
+ *
+ * It is possible to define and use other kinds of {@link
+ * RejectedExecutionHandler} classes. Doing so requires some care
+ * especially when policies are designed to work only under particular
+ * capacity or queuing policies. &lt;/dd&gt;
+ *
+ * &lt;dt&gt;Hook methods&lt;/dt&gt;
+ *
+ * &lt;dd&gt;This class provides {@code protected} overridable {@link
+ * #beforeExecute} and {@link #afterExecute} methods that are called
+ * before and after execution of each task.  These can be used to
+ * manipulate the execution environment; for example, reinitializing
+ * ThreadLocals, gathering statistics, or adding log
+ * entries. Additionally, method {@link #terminated} can be overridden
+ * to perform any special processing that needs to be done once the
+ * Executor has fully terminated.
+ *
+ * &lt;p&gt;If hook or callback methods throw exceptions, internal worker
+ * threads may in turn fail and abruptly terminate.&lt;/dd&gt;
+ *
+ * &lt;dt&gt;Queue maintenance&lt;/dt&gt;
+ *
+ * &lt;dd&gt; Method {@link #getQueue} allows access to the work queue for
+ * purposes of monitoring and debugging.  Use of this method for any
+ * other purpose is strongly discouraged.  Two supplied methods,
+ * {@link #remove} and {@link #purge} are available to assist in
+ * storage reclamation when large numbers of queued tasks become
+ * cancelled.&lt;/dd&gt;
+ *
+ * &lt;dt&gt;Finalization&lt;/dt&gt;
+ *
+ * &lt;dd&gt; A pool that is no longer referenced in a program &lt;em&gt;AND&lt;/em&gt;
+ * has no remaining threads will be {@code shutdown} automatically. If
+ * you would like to ensure that unreferenced pools are reclaimed even
+ * if users forget to call {@link #shutdown}, then you must arrange
+ * that unused threads eventually die, by setting appropriate
+ * keep-alive times, using a lower bound of zero core threads and/or
+ * setting {@link #allowCoreThreadTimeOut(boolean)}.  &lt;/dd&gt;
+ *
+ * &lt;/dl&gt;
+ *
+ * &lt;p&gt; &lt;b&gt;Extension example&lt;/b&gt;. Most extensions of this class
+ * override one or more of the protected hook methods. For example,
+ * here is a subclass that adds a simple pause/resume feature:
+ *
+ *  &lt;pre&gt; {@code
+ * class PausableThreadPoolExecutor extends ThreadPoolExecutor {
+ *   private boolean isPaused;
+ *   private ReentrantLock pauseLock = new ReentrantLock();
+ *   private Condition unpaused = pauseLock.newCondition();
+ *
+ *   public PausableThreadPoolExecutor(...) { super(...); }
+ *
+ *   protected void beforeExecute(Thread t, Runnable r) {
+ *     super.beforeExecute(t, r);
+ *     pauseLock.lock();
+ *     try {
+ *       while (isPaused) unpaused.await();
+ *     } catch (InterruptedException ie) {
+ *       t.interrupt();
+ *     } finally {
+ *       pauseLock.unlock();
+ *     }
+ *   }
+ *
+ *   public void pause() {
+ *     pauseLock.lock();
+ *     try {
+ *       isPaused = true;
+ *     } finally {
+ *       pauseLock.unlock();
+ *     }
+ *   }
+ *
+ *   public void resume() {
+ *     pauseLock.lock();
+ *     try {
+ *       isPaused = false;
+ *       unpaused.signalAll();
+ *     } finally {
+ *       pauseLock.unlock();
+ *     }
+ *   }
+ * }}&lt;/pre&gt;
+ *
+ * @since 1.5
+ * @author Doug Lea
+ */
+public <span class="keyword">class</span> <a title="scala.actors.threadpool.ThreadPoolExecutor.type" id="9259">ThreadPoolExecutor</a> <span class="keyword">extends</span> <a href="AbstractExecutorService.java.html#9122" title="scala.actors.threadpool.AbstractExecutorService">AbstractExecutorService</a> <span class="delimiter">{</span>
+    /**
+     * The main pool control state, ctl, is an atomic integer packing
+     * two conceptual fields
+     *   workerCount, indicating the effective number of threads
+     *   runState,    indicating whether running, shutting down etc
+     *
+     * In order to pack them into one int, we limit workerCount to
+     * (2^29)-1 (about 500 million) threads rather than (2^31)-1 (2
+     * billion) otherwise representable. If this is ever an issue in
+     * the future, the variable can be changed to be an AtomicLong,
+     * and the shift/mask constants below adjusted. But until the need
+     * arises, this code is a bit faster and simpler using an int.
+     *
+     * The workerCount is the number of workers that have been
+     * permitted to start and not permitted to stop.  The value may be
+     * transiently different from the actual number of live threads,
+     * for example when a ThreadFactory fails to create a thread when
+     * asked, and when exiting threads are still performing
+     * bookkeeping before terminating. The user-visible pool size is
+     * reported as the current size of the workers set.
+     *
+     * The runState provides the main lifecyle control, taking on values:
+     *
+     *   RUNNING:  Accept new tasks and process queued tasks
+     *   SHUTDOWN: Don't accept new tasks, but process queued tasks
+     *   STOP:     Don't accept new tasks, don't process queued tasks,
+     *             and interrupt in-progress tasks
+     *   TIDYING:  All tasks have terminated, workerCount is zero,
+     *             the thread transitioning to state TIDYING
+     *             will run the terminated() hook method
+     *   TERMINATED: terminated() has completed
+     *
+     * The numerical order among these values matters, to allow
+     * ordered comparisons. The runState monotonically increases over
+     * time, but need not hit each state. The transitions are:
+     *
+     * RUNNING -&gt; SHUTDOWN
+     *    On invocation of shutdown(), perhaps implicitly in finalize()
+     * (RUNNING or SHUTDOWN) -&gt; STOP
+     *    On invocation of shutdownNow()
+     * SHUTDOWN -&gt; TIDYING
+     *    When both queue and pool are empty
+     * STOP -&gt; TIDYING
+     *    When pool is empty
+     * TIDYING -&gt; TERMINATED
+     *    When the terminated() hook method has completed
+     *
+     * Threads waiting in awaitTermination() will return when the
+     * state reaches TERMINATED.
+     *
+     * Detecting the transition from SHUTDOWN to TIDYING is less
+     * straightforward than you'd like because the queue may become
+     * empty after non-empty and vice versa during SHUTDOWN state, but
+     * we can only terminate if, after seeing that it is empty, we see
+     * that workerCount is 0 (which sometimes entails a recheck -- see
+     * below).
+     */
+    <span class="keyword">private</span> <span class="keyword">final</span> <a href="AtomicInteger.java.html#9141" title="scala.actors.threadpool.AtomicInteger">AtomicInteger</a> <a title="scala.actors.threadpool.AtomicInteger" id="121185">ctl</a> = <span class="keyword">new</span> AtomicInteger<span class="delimiter">(</span>ctlOf<span class="delimiter">(</span>RUNNING, <span class="int">0</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+    <span class="keyword">private</span> static <span class="keyword">final</span> int <a title="Int" id="127507">COUNT_BITS</a> = <span class="int">29</span>; // Integer.SIZE - 3;
+    <span class="keyword">private</span> static <span class="keyword">final</span> int <a title="Int" id="127508">CAPACITY</a>   = <span class="delimiter">(</span><span class="int">1</span> &lt;&lt; COUNT_BITS<span class="delimiter">)</span> - <span class="int">1</span>;
+
+    // runState is stored in the high-order bits
+    <span class="keyword">private</span> static <span class="keyword">final</span> int <a title="Int" id="127509">RUNNING</a>    = -<span class="int">1</span> &lt;&lt; COUNT_BITS;
+    <span class="keyword">private</span> static <span class="keyword">final</span> int <a title="Int" id="127510">SHUTDOWN</a>   =  <span class="int">0</span> &lt;&lt; COUNT_BITS;
+    <span class="keyword">private</span> static <span class="keyword">final</span> int <a title="Int" id="127511">STOP</a>       =  <span class="int">1</span> &lt;&lt; COUNT_BITS;
+    <span class="keyword">private</span> static <span class="keyword">final</span> int <a title="Int" id="127512">TIDYING</a>    =  <span class="int">2</span> &lt;&lt; COUNT_BITS;
+    <span class="keyword">private</span> static <span class="keyword">final</span> int <a title="Int" id="127513">TERMINATED</a> =  <span class="int">3</span> &lt;&lt; COUNT_BITS;
+
+    // Packing and unpacking ctl
+    <span class="keyword">private</span> static int <a title="(c: Int)Int" id="127514">runStateOf</a><span class="delimiter">(</span>int <a title="Int" id="3389297">c</a><span class="delimiter">)</span>     <span class="delimiter">{</span> <span class="keyword">return</span> c &amp; ~CAPACITY; <span class="delimiter">}</span>
+    <span class="keyword">private</span> static int <a title="(c: Int)Int" id="127515">workerCountOf</a><span class="delimiter">(</span>int <a title="Int" id="3389298">c</a><span class="delimiter">)</span>  <span class="delimiter">{</span> <span class="keyword">return</span> c &amp; CAPACITY; <span class="delimiter">}</span>
+    <span class="keyword">private</span> static int <a title="(rs: Int, wc: Int)Int" id="127516">ctlOf</a><span class="delimiter">(</span>int <a title="Int" id="3389299">rs</a>, int <a title="Int" id="3389300">wc</a><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="keyword">return</span> rs | wc; <span class="delimiter">}</span>
+
+    /*
+     * Bit field accessors that don't require unpacking ctl.
+     * These depend on the bit layout and on workerCount being never negative.
+     */
+
+    <span class="keyword">private</span> static boolean <a title="(c: Int, s: Int)Boolean" id="127517">runStateLessThan</a><span class="delimiter">(</span>int <a title="Int" id="3389301">c</a>, int <a title="Int" id="3389302">s</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">return</span> c &lt; s;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static boolean <a title="(c: Int, s: Int)Boolean" id="127518">runStateAtLeast</a><span class="delimiter">(</span>int <a title="Int" id="3389303">c</a>, int <a title="Int" id="3389304">s</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">return</span> c &gt;= s;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static boolean <a title="(c: Int)Boolean" id="127519">isRunning</a><span class="delimiter">(</span>int <a title="Int" id="3389305">c</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">return</span> c &lt; SHUTDOWN;
+    <span class="delimiter">}</span>
+
+    /**
+     * Attempt to CAS-increment the workerCount field of ctl.
+     */
+    <span class="keyword">private</span> boolean <a title="(expect: Int)Boolean" id="121186">compareAndIncrementWorkerCount</a><span class="delimiter">(</span>int <a title="Int" id="3389318">expect</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">return</span> ctl.compareAndSet<span class="delimiter">(</span>expect, expect + <span class="int">1</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Attempt to CAS-decrement the workerCount field of ctl.
+     */
+    <span class="keyword">private</span> boolean <a title="(expect: Int)Boolean" id="121187">compareAndDecrementWorkerCount</a><span class="delimiter">(</span>int <a title="Int" id="3389319">expect</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">return</span> ctl.compareAndSet<span class="delimiter">(</span>expect, expect - <span class="int">1</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Decrements the workerCount field of ctl. This is called only on
+     * abrupt termination of a thread (see processWorkerExit). Other
+     * decrements are performed within getTask.
+     */
+    <span class="keyword">private</span> void <a title="()Unit" id="121188">decrementWorkerCount</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+	<span class="keyword">do</span> <span class="delimiter">{</span><span class="delimiter">}</span> <span class="keyword">while</span> <span class="delimiter">(</span>! compareAndDecrementWorkerCount<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * The queue used for holding tasks and handing off to worker
+     * threads.  We do not require that workQueue.poll() returning
+     * null necessarily means that workQueue.isEmpty(), so rely
+     * solely on isEmpty to see if the queue is empty (which we must
+     * do for example when deciding whether to transition from
+     * SHUTDOWN to TIDYING).  This accommodates special-purpose
+     * queues such as DelayQueues for which poll() is allowed to
+     * return null even if it may later return non-null when delays
+     * expire.
+     */
+    <span class="keyword">private</span> <span class="keyword">final</span> <a href="BlockingQueue.java.html#9147" title="scala.actors.threadpool.BlockingQueue">BlockingQueue</a> <a title="scala.actors.threadpool.BlockingQueue" id="121189">workQueue</a>;
+
+    // TODO: DK: mainLock is used in lock(); try { ... } finally { unlock(); }
+    // Consider replacing with synchronized {} if performance reasons exist
+    /**
+     * Lock held on access to workers set and related bookkeeping.
+     * While we could use a concurrent set of some sort, it turns out
+     * to be generally preferable to use a lock. Among the reasons is
+     * that this serializes interruptIdleWorkers, which avoids
+     * unnecessary interrupt storms, especially during shutdown.
+     * Otherwise exiting threads would concurrently interrupt those
+     * that have not yet interrupted. It also simplifies some of the
+     * associated statistics bookkeeping of largestPoolSize etc. We
+     * also hold mainLock on shutdown and shutdownNow, for the sake of
+     * ensuring workers set is stable while separately checking
+     * permission to interrupt and actually interrupting.
+     */
+    public <span class="keyword">final</span> ReentrantLock <a title="scala.actors.threadpool.locks.ReentrantLock" id="121190">mainLock</a> = <span class="keyword">new</span> ReentrantLock<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    /**
+     * Set containing all worker threads in pool. Accessed only when
+     * holding mainLock.
+     */
+    public <span class="keyword">final</span> HashSet <a title="java.util.HashSet[_]" id="121191">workers</a> = <span class="keyword">new</span> HashSet<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    /**
+     * Wait condition to support awaitTermination
+     */
+    <span class="keyword">private</span> <span class="keyword">final</span> Condition <a title="scala.actors.threadpool.locks.Condition" id="121192">termination</a> = mainLock.newCondition<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    /**
+     * Tracks largest attained pool size. Accessed only under
+     * mainLock.
+     */
+    <span class="keyword">private</span> int <a title="Int" id="121193">largestPoolSize</a>;
+
+    /**
+     * Counter for completed tasks. Updated only on termination of
+     * worker threads. Accessed only under mainLock.
+     */
+    <span class="keyword">private</span> long <a title="Long" id="121194">completedTaskCount</a>;
+
+    /*
+     * All user control parameters are declared as volatiles so that
+     * ongoing actions are based on freshest values, but without need
+     * for locking, since no internal invariants depend on them
+     * changing synchronously with respect to other actions.
+     */
+
+    /**
+     * Factory for new threads. All threads are created using this
+     * factory (via method addWorker).  All callers must be prepared
+     * for addWorker to fail, which may reflect a system or user's
+     * policy limiting the number of threads.  Even though it is not
+     * treated as an error, failure to create threads may result in
+     * new tasks being rejected or existing ones remaining stuck in
+     * the queue. On the other hand, no special precautions exist to
+     * handle OutOfMemoryErrors that might be thrown while trying to
+     * create threads, since there is generally no recourse from
+     * within this class.
+     */
+    <span class="keyword">private</span> volatile <a href="ThreadFactory.java.html#9248" title="scala.actors.threadpool.ThreadFactory">ThreadFactory</a> <a title="scala.actors.threadpool.ThreadFactory" id="121195">threadFactory</a>;
+
+    /**
+     * Handler called when saturated or shutdown in execute.
+     */
+    <span class="keyword">private</span> volatile <a href="RejectedExecutionHandler.java.html#9231" title="scala.actors.threadpool.RejectedExecutionHandler">RejectedExecutionHandler</a> <a title="scala.actors.threadpool.RejectedExecutionHandler" id="121196">handler</a>;
+
+    /**
+     * Timeout in nanoseconds for idle threads waiting for work.
+     * Threads use this timeout when there are more than corePoolSize
+     * present or if allowCoreThreadTimeOut. Otherwise they wait
+     * forever for new work.
+     */
+    <span class="keyword">private</span> volatile long <a title="Long" id="121197">keepAliveTime</a>;
+
+    /**
+     * If false (default), core threads stay alive even when idle.
+     * If true, core threads use keepAliveTime to time out waiting
+     * for work.
+     */
+    <span class="keyword">private</span> volatile boolean <a title="Boolean" id="121198">allowCoreThreadTimeOut</a>;
+
+    /**
+     * Core pool size is the minimum number of workers to keep alive
+     * (and not allow to time out etc) unless allowCoreThreadTimeOut
+     * is set, in which case the minimum is zero.
+     */
+    <span class="keyword">private</span> volatile int <a title="Int" id="121199">corePoolSize</a>;
+
+    /**
+     * Maximum pool size. Note that the actual maximum is internally
+     * bounded by CAPACITY.
+     */
+    <span class="keyword">private</span> volatile int <a title="Int" id="121200">maximumPoolSize</a>;
+
+    /**
+     * The default rejected execution handler
+     */
+    <span class="keyword">private</span> static <span class="keyword">final</span> <a href="RejectedExecutionHandler.java.html#9231" title="scala.actors.threadpool.RejectedExecutionHandler">RejectedExecutionHandler</a> <a title="scala.actors.threadpool.RejectedExecutionHandler" id="127520">defaultHandler</a> =
+        <span class="keyword">new</span> AbortPolicy<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+    /**
+     * Permission required for callers of shutdown and shutdownNow.
+     * We additionally require (see checkShutdownAccess) that callers
+     * have permission to actually interrupt threads in the worker set
+     * (as governed by Thread.interrupt, which relies on
+     * ThreadGroup.checkAccess, which in turn relies on
+     * SecurityManager.checkAccess). Shutdowns are attempted only if
+     * these checks pass.
+     *
+     * All actual invocations of Thread.interrupt (see
+     * interruptIdleWorkers and interruptWorkers) ignore
+     * SecurityExceptions, meaning that the attempted interrupts
+     * silently fail. In the case of shutdown, they should not fail
+     * unless the SecurityManager has inconsistent policies, sometimes
+     * allowing access to a thread and sometimes not. In such cases,
+     * failure to actually interrupt threads may disable or delay full
+     * termination. Other uses of interruptIdleWorkers are advisory,
+     * and failure to actually interrupt will merely delay response to
+     * configuration changes so is not handled exceptionally.
+     */
+    <span class="keyword">private</span> static <span class="keyword">final</span> RuntimePermission <a title="RuntimePermission" id="127521">shutdownPerm</a> =
+        <span class="keyword">new</span> RuntimePermission<span class="delimiter">(</span><span class="string">&quot;modifyThread&quot;</span><span class="delimiter">)</span>;
+
+    /**
+     * Class Worker mainly maintains interrupt control state for
+     * threads running tasks, along with other minor bookkeeping. This
+     * class opportunistically extends ReentrantLock to simplify
+     * acquiring and releasing a lock surrounding each task execution.
+     * This protects against interrupts that are intended to wake up a
+     * worker thread waiting for a task from instead interrupting a
+     * task being run.
+     */
+    public <span class="keyword">final</span> <span class="keyword">class</span> <a title="ThreadPoolExecutor.this.Worker.type" id="121203">Worker</a> <span class="keyword">extends</span> ReentrantLock implements Runnable <span class="delimiter">{</span>
+	/**
+	 * This class will never be serialized, but we provide a
+	 * serialVersionUID to suppress a javac warning.
+	 */
+	<span class="keyword">private</span> static <span class="keyword">final</span> long <a title="Long" id="127815">serialVersionUID</a> = <span class="long">6138294804551838833L</span>;
+
+        /** Thread this worker is running in.  Null if factory fails. */
+        public <span class="keyword">final</span> Thread <a title="Thread" id="127786">thread</a>;
+        /** Initial task to run.  Possibly null. */
+        Runnable <a title="Runnable" id="127787">firstTask</a>;
+        /** Per-thread task counter */
+        volatile long <a title="Long" id="127788">completedTasks</a>;
+
+        /**
+         * Creates with given first task and thread from ThreadFactory.
+         * @param firstTask the first task (null if none)
+         */
+        Worker<span class="delimiter">(</span>Runnable firstTask<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">this</span>.firstTask = firstTask;
+	    <span class="keyword">this</span>.thread = getThreadFactory<span class="delimiter">(</span><span class="delimiter">)</span>.newThread<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        /** Delegates main run loop to outer runWorker  */
+        public void <a title="()Unit" id="127790">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            runWorker<span class="delimiter">(</span><span class="keyword">this</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /*
+     * Methods for setting control state
+     */
+
+    /**
+     * Transitions runState to given target, or leaves it alone if
+     * already at least the given target.
+     *
+     * @param targetState the desired state, either SHUTDOWN or STOP
+     *        (but not TIDYING or TERMINATED -- use tryTerminate for that)
+     */
+    <span class="keyword">private</span> void <a title="(targetState: Int)Unit" id="121204">advanceRunState</a><span class="delimiter">(</span>int <a title="Int" id="3389321">targetState</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span> <span class="delimiter">{</span>
+            int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>runStateAtLeast<span class="delimiter">(</span>c, targetState<span class="delimiter">)</span> ||
+                ctl.compareAndSet<span class="delimiter">(</span>c, ctlOf<span class="delimiter">(</span>targetState, workerCountOf<span class="delimiter">(</span>c<span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+                break;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Transitions to TERMINATED state if either (SHUTDOWN and pool
+     * and queue empty) or (STOP and pool empty).  If otherwise
+     * eligible to terminate but workerCount is nonzero, interrupts an
+     * idle worker to ensure that shutdown signals propagate. This
+     * method must be called following any action that might make
+     * termination possible -- reducing worker count or removing tasks
+     * from the queue during shutdown. The method is non-private to
+     * allow access from ScheduledThreadPoolExecutor.
+     */
+    <span class="keyword">final</span> void <a title="()Unit" id="121205">tryTerminate</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span> <span class="delimiter">{</span>
+            int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+	    <span class="keyword">if</span> <span class="delimiter">(</span>isRunning<span class="delimiter">(</span>c<span class="delimiter">)</span> ||
+		runStateAtLeast<span class="delimiter">(</span>c, TIDYING<span class="delimiter">)</span> ||
+		<span class="delimiter">(</span>runStateOf<span class="delimiter">(</span>c<span class="delimiter">)</span> == SHUTDOWN &amp;&amp; ! workQueue.isEmpty<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		<span class="keyword">return</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>workerCountOf<span class="delimiter">(</span>c<span class="delimiter">)</span> != <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span> // Eligible to terminate
+                interruptIdleWorkers<span class="delimiter">(</span>ONLY_ONE<span class="delimiter">)</span>;
+                <span class="keyword">return</span>;
+            <span class="delimiter">}</span>
+
+	    <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+	    mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+	    <span class="keyword">try</span> <span class="delimiter">{</span>
+		<span class="keyword">if</span> <span class="delimiter">(</span>ctl.compareAndSet<span class="delimiter">(</span>c, ctlOf<span class="delimiter">(</span>TIDYING, <span class="int">0</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+		    <span class="keyword">try</span> <span class="delimiter">{</span>
+			terminated<span class="delimiter">(</span><span class="delimiter">)</span>;
+		    <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+			ctl.set<span class="delimiter">(</span>ctlOf<span class="delimiter">(</span>TERMINATED, <span class="int">0</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+			termination.signalAll<span class="delimiter">(</span><span class="delimiter">)</span>;
+		    <span class="delimiter">}</span>
+		    <span class="keyword">return</span>;
+		<span class="delimiter">}</span>
+	    <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+		mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+	    <span class="delimiter">}</span>
+            // else retry on failed CAS
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /*
+     * Methods for controlling interrupts to worker threads.
+     */
+
+    /**
+     * If there is a security manager, makes sure caller has
+     * permission to shut down threads in general (see shutdownPerm).
+     * If this passes, additionally makes sure the caller is allowed
+     * to interrupt each worker thread. This might not be true even if
+     * first check passed, if the SecurityManager treats some threads
+     * specially.
+     */
+    <span class="keyword">private</span> void <a title="()Unit" id="121206">checkShutdownAccess</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        SecurityManager security = System.getSecurityManager<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>security != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            security.checkPermission<span class="delimiter">(</span>shutdownPerm<span class="delimiter">)</span>;
+            <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+            mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">try</span> <span class="delimiter">{</span>
+                <span class="keyword">for</span> <span class="delimiter">(</span>Iterator itr = workers.iterator<span class="delimiter">(</span><span class="delimiter">)</span>; itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span>;<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    Worker w = <span class="delimiter">(</span>Worker<span class="delimiter">)</span>itr.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    security.checkAccess<span class="delimiter">(</span>w.thread<span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+                mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Interrupts all threads, even if active. Ignores SecurityExceptions
+     * (in which case some threads may remain uninterrupted).
+     */
+    <span class="keyword">private</span> void <a title="()Unit" id="121207">interruptWorkers</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            <span class="keyword">for</span> <span class="delimiter">(</span>Iterator itr = workers.iterator<span class="delimiter">(</span><span class="delimiter">)</span>; itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span>;<span class="delimiter">)</span> <span class="delimiter">{</span>
+                Worker w = <span class="delimiter">(</span>Worker<span class="delimiter">)</span>itr.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">try</span> <span class="delimiter">{</span>
+                    w.thread.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>SecurityException ignore<span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Interrupts threads that might be waiting for tasks (as
+     * indicated by not being locked) so they can check for
+     * termination or configuration changes. Ignores
+     * SecurityExceptions (in which case some threads may remain
+     * uninterrupted).
+     *
+     * @param onlyOne If true, interrupt at most one worker. This is
+     * called only from tryTerminate when termination is otherwise
+     * enabled but there are still other workers.  In this case, at
+     * most one waiting worker is interrupted to propagate shutdown
+     * signals in case all threads are currently waiting.
+     * Interrupting any arbitrary thread ensures that newly arriving
+     * workers since shutdown began will also eventually exit.
+     * To guarantee eventual termination, it suffices to always
+     * interrupt only one idle worker, but shutdown() interrupts all
+     * idle workers so that redundant workers exit promptly, not
+     * waiting for a straggler task to finish.
+     */
+    <span class="keyword">private</span> void <a title="(onlyOne: Boolean)Unit" id="121208">interruptIdleWorkers</a><span class="delimiter">(</span>boolean <a title="Boolean" id="3389322">onlyOne</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            Iterator it = workers.iterator<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">while</span> <span class="delimiter">(</span>it.hasNext<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                Worker w = <span class="delimiter">(</span>Worker<span class="delimiter">)</span>it.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                Thread t = w.thread;
+                <span class="keyword">if</span> <span class="delimiter">(</span>!t.isInterrupted<span class="delimiter">(</span><span class="delimiter">)</span> &amp;&amp; w.tryLock<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                    <span class="keyword">try</span> <span class="delimiter">{</span>
+                        t.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>SecurityException ignore<span class="delimiter">)</span> <span class="delimiter">{</span>
+                    <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+                        w.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>onlyOne<span class="delimiter">)</span>
+                    break;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Common form of interruptIdleWorkers, to avoid having to
+     * remember what the boolean argument means.
+     */
+    <span class="keyword">private</span> void <a title="()Unit" id="121209">interruptIdleWorkers</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        interruptIdleWorkers<span class="delimiter">(</span><span class="keyword">false</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> static <span class="keyword">final</span> boolean <a title="Boolean" id="127522">ONLY_ONE</a> = <span class="keyword">true</span>;
+
+    /**
+     * Ensures that unless the pool is stopping, the current thread
+     * does not have its interrupt set. This requires a double-check
+     * of state in case the interrupt was cleared concurrently with a
+     * shutdownNow -- if so, the interrupt is re-enabled.
+     */
+    <span class="keyword">private</span> void <a title="()Unit" id="121210">clearInterruptsForTaskRun</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>runStateLessThan<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>, STOP<span class="delimiter">)</span> &amp;&amp;
+            Thread.interrupted<span class="delimiter">(</span><span class="delimiter">)</span> &amp;&amp;
+            runStateAtLeast<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>, STOP<span class="delimiter">)</span><span class="delimiter">)</span>
+            Thread.currentThread<span class="delimiter">(</span><span class="delimiter">)</span>.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /*
+     * Misc utilities, most of which are also exported to
+     * ScheduledThreadPoolExecutor
+     */
+
+    /**
+     * Invokes the rejected execution handler for the given command.
+     * Package-protected for use by ScheduledThreadPoolExecutor.
+     */
+    <span class="keyword">final</span> void <a title="(command: Runnable)Unit" id="121211">reject</a><span class="delimiter">(</span>Runnable <a title="Runnable" id="3389323">command</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        handler.rejectedExecution<span class="delimiter">(</span>command, <span class="keyword">this</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Performs any further cleanup following run state transition on
+     * invocation of shutdown.  A no-op here, but used by
+     * ScheduledThreadPoolExecutor to cancel delayed tasks.
+     */
+    void <a title="()Unit" id="121212">onShutdown</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * State check needed by ScheduledThreadPoolExecutor to
+     * enable running tasks during shutdown.
+     *
+     * @param shutdownOK true if should return true if SHUTDOWN
+     */
+    <span class="keyword">final</span> boolean <a title="(shutdownOK: Boolean)Boolean" id="121213">isRunningOrShutdown</a><span class="delimiter">(</span>boolean <a title="Boolean" id="3389324">shutdownOK</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        int rs = runStateOf<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> rs == RUNNING || <span class="delimiter">(</span>rs == SHUTDOWN &amp;&amp; shutdownOK<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Drains the task queue into a new list, normally using
+     * drainTo. But if the queue is a DelayQueue or any other kind of
+     * queue for which poll or drainTo may fail to remove some
+     * elements, it deletes them one by one.
+     */
+    <span class="keyword">private</span> List <a title="()java.util.List" id="121214">drainQueue</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        BlockingQueue q = workQueue;
+        List&lt;Runnable&gt; taskList = <span class="keyword">new</span> ArrayList&lt;Runnable&gt;<span class="delimiter">(</span><span class="delimiter">)</span>;
+        q.drainTo<span class="delimiter">(</span>taskList<span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>!q.isEmpty<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            Runnable<span class="delimiter">[</span><span class="delimiter">]</span> arr = <span class="delimiter">(</span>Runnable<span class="delimiter">[</span><span class="delimiter">]</span><span class="delimiter">)</span>q.toArray<span class="delimiter">(</span><span class="keyword">new</span> Runnable<span class="delimiter">[</span><span class="int">0</span><span class="delimiter">]</span><span class="delimiter">)</span>;
+            <span class="keyword">for</span> <span class="delimiter">(</span>int i=<span class="int">0</span>; i&lt;arr.length; i++<span class="delimiter">)</span> <span class="delimiter">{</span>
+                Runnable r = arr<span class="delimiter">[</span>i<span class="delimiter">]</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>q.remove<span class="delimiter">(</span>r<span class="delimiter">)</span><span class="delimiter">)</span>
+                    taskList.add<span class="delimiter">(</span>r<span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">return</span> taskList;
+    <span class="delimiter">}</span>
+
+    /*
+     * Methods for creating, running and cleaning up after workers
+     */
+
+    /**
+     * Checks if a new worker can be added with respect to current
+     * pool state and the given bound (either core or maximum). If so,
+     * the worker count is adjusted accordingly, and, if possible, a
+     * new worker is created and started running firstTask as its
+     * first task. This method returns false if the pool is stopped or
+     * eligible to shut down. It also returns false if the thread
+     * factory fails to create a thread when asked, which requires a
+     * backout of workerCount, and a recheck for termination, in case
+     * the existence of this worker was holding up termination.
+     *
+     * @param firstTask the task the new thread should run first (or
+     * null if none). Workers are created with an initial first task
+     * (in method execute()) to bypass queuing when there are fewer
+     * than corePoolSize threads (in which case we always start one),
+     * or when the queue is full (in which case we must bypass queue).
+     * Initially idle threads are usually created via
+     * prestartCoreThread or to replace other dying workers.
+     *
+     * @param core if true use corePoolSize as bound, else
+     * maximumPoolSize. (A boolean indicator is used here rather than a
+     * value to ensure reads of fresh values after checking other pool
+     * state).
+     * @return true if successful
+     */
+    <span class="keyword">private</span> boolean <a title="(firstTask: Runnable, core: Boolean)Boolean" id="121215">addWorker</a><span class="delimiter">(</span>Runnable <a title="Runnable" id="3389325">firstTask</a>, boolean <a title="Boolean" id="3389326">core</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+	retry:
+        <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span> <span class="delimiter">{</span>
+	    int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+	    int rs = runStateOf<span class="delimiter">(</span>c<span class="delimiter">)</span>;
+
+	    // Check if queue empty only if necessary.
+            <span class="keyword">if</span> <span class="delimiter">(</span>rs &gt;= SHUTDOWN &amp;&amp;
+		! <span class="delimiter">(</span>rs == SHUTDOWN &amp;&amp;
+		   firstTask == <span class="keyword">null</span> &amp;&amp;
+		   ! workQueue.isEmpty<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		<span class="keyword">return</span> <span class="keyword">false</span>;
+
+	    <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span> <span class="delimiter">{</span>
+		int wc = workerCountOf<span class="delimiter">(</span>c<span class="delimiter">)</span>;
+		<span class="keyword">if</span> <span class="delimiter">(</span>wc &gt;= CAPACITY ||
+		    wc &gt;= <span class="delimiter">(</span>core ? corePoolSize : maximumPoolSize<span class="delimiter">)</span><span class="delimiter">)</span>
+		    <span class="keyword">return</span> <span class="keyword">false</span>;
+		<span class="keyword">if</span> <span class="delimiter">(</span>compareAndIncrementWorkerCount<span class="delimiter">(</span>c<span class="delimiter">)</span><span class="delimiter">)</span>
+		    break retry;
+		c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;	// Re-read ctl
+		<span class="keyword">if</span> <span class="delimiter">(</span>runStateOf<span class="delimiter">(</span>c<span class="delimiter">)</span> != rs<span class="delimiter">)</span>
+		    continue retry;
+		// else CAS failed due to workerCount change; retry inner loop
+	    <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        Worker w = <span class="keyword">new</span> Worker<span class="delimiter">(</span>firstTask<span class="delimiter">)</span>;
+        Thread t = w.thread;
+
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+	    // Recheck while holding lock.
+	    // Back out on ThreadFactory failure or if
+	    // shut down before lock acquired.
+            int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+	    int rs = runStateOf<span class="delimiter">(</span>c<span class="delimiter">)</span>;
+
+	    <span class="keyword">if</span> <span class="delimiter">(</span>t == <span class="keyword">null</span> ||
+		<span class="delimiter">(</span>rs &gt;= SHUTDOWN &amp;&amp;
+		 ! <span class="delimiter">(</span>rs == SHUTDOWN &amp;&amp;
+		    firstTask == <span class="keyword">null</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+		decrementWorkerCount<span class="delimiter">(</span><span class="delimiter">)</span>;
+		tryTerminate<span class="delimiter">(</span><span class="delimiter">)</span>;
+		<span class="keyword">return</span> <span class="keyword">false</span>;
+	    <span class="delimiter">}</span>
+
+	    workers.add<span class="delimiter">(</span>w<span class="delimiter">)</span>;
+
+	    int s = workers.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>s &gt; largestPoolSize<span class="delimiter">)</span>
+                largestPoolSize = s;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        t.start<span class="delimiter">(</span><span class="delimiter">)</span>;
+	// It is possible (but unlikely) for a thread to have been
+	// added to workers, but not yet started, during transition to
+	// STOP, which could result in a rare missed interrupt,
+	// because Thread.interrupt is not guaranteed to have any effect
+	// on a non-yet-started Thread (see Thread#interrupt).
+	<span class="keyword">if</span> <span class="delimiter">(</span>runStateOf<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> == STOP &amp;&amp; ! t.isInterrupted<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+	    t.interrupt<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+	<span class="keyword">return</span> <span class="keyword">true</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Performs cleanup and bookkeeping for a dying worker. Called
+     * only from worker threads. Unless completedAbruptly is set,
+     * assumes that workerCount has already been adjusted to account
+     * for exit.  This method removes thread from worker set, and
+     * possibly terminates the pool or replaces the worker if either
+     * it exited due to user task exception or if fewer than
+     * corePoolSize workers are running or queue is non-empty but
+     * there are no workers.
+     *
+     * @param w the worker
+     * @param completedAbruptly if the worker died due to user exception
+     */
+    <span class="keyword">private</span> void <a title="(w: ThreadPoolExecutor.this.Worker, completedAbruptly: Boolean)Unit" id="121216">processWorkerExit</a><span class="delimiter">(</span>Worker <a title="ThreadPoolExecutor.this.Worker" id="3389327">w</a>, boolean <a title="Boolean" id="3389328">completedAbruptly</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>completedAbruptly<span class="delimiter">)</span> // If abrupt, then workerCount wasn't adjusted
+            decrementWorkerCount<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            completedTaskCount += w.completedTasks;
+            workers.remove<span class="delimiter">(</span>w<span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+
+        tryTerminate<span class="delimiter">(</span><span class="delimiter">)</span>;
+
+	int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+	<span class="keyword">if</span> <span class="delimiter">(</span>runStateLessThan<span class="delimiter">(</span>c, STOP<span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+	    <span class="keyword">if</span> <span class="delimiter">(</span>!completedAbruptly<span class="delimiter">)</span> <span class="delimiter">{</span>
+		int min = allowCoreThreadTimeOut ? <span class="int">0</span> : corePoolSize;
+		<span class="keyword">if</span> <span class="delimiter">(</span>min == <span class="int">0</span> &amp;&amp; ! workQueue.isEmpty<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		    min = <span class="int">1</span>;
+		<span class="keyword">if</span> <span class="delimiter">(</span>workerCountOf<span class="delimiter">(</span>c<span class="delimiter">)</span> &gt;= min<span class="delimiter">)</span>
+		    <span class="keyword">return</span>; // replacement not needed
+	    <span class="delimiter">}</span>
+	    addWorker<span class="delimiter">(</span><span class="keyword">null</span>, <span class="keyword">false</span><span class="delimiter">)</span>;
+	<span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Performs blocking or timed wait for a task, depending on
+     * current configuration settings, or returns null if this worker
+     * must exit because of any of:
+     * 1. There are more than maximumPoolSize workers (due to
+     *    a call to setMaximumPoolSize).
+     * 2. The pool is stopped.
+     * 3. The pool is shutdown and the queue is empty.
+     * 4. This worker timed out waiting for a task, and timed-out
+     *    workers are subject to termination (that is,
+     *    {@code allowCoreThreadTimeOut || workerCount &gt; corePoolSize})
+     *    both before and after the timed wait.
+     *
+     * @return task, or null if the worker must exit, in which case
+     *         workerCount is decremented
+     */
+    <span class="keyword">private</span> Runnable <a title="()Runnable" id="121217">getTask</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+	boolean timedOut = <span class="keyword">false</span>; // Did the last poll() time out?
+
+	retry:
+	<span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span> <span class="delimiter">{</span>
+            int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+	    int rs = runStateOf<span class="delimiter">(</span>c<span class="delimiter">)</span>;
+
+	    // Check if queue empty only if necessary.
+	    <span class="keyword">if</span> <span class="delimiter">(</span>rs &gt;= SHUTDOWN &amp;&amp; <span class="delimiter">(</span>rs &gt;= STOP || workQueue.isEmpty<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+		decrementWorkerCount<span class="delimiter">(</span><span class="delimiter">)</span>;
+		<span class="keyword">return</span> <span class="keyword">null</span>;
+	    <span class="delimiter">}</span>
+
+	    boolean timed;	// Are workers subject to culling?
+
+	    <span class="keyword">for</span> <span class="delimiter">(</span>;;<span class="delimiter">)</span> <span class="delimiter">{</span>
+		int wc = workerCountOf<span class="delimiter">(</span>c<span class="delimiter">)</span>;
+		timed = allowCoreThreadTimeOut || wc &gt; corePoolSize;
+
+		<span class="keyword">if</span> <span class="delimiter">(</span>wc &lt;= maximumPoolSize &amp;&amp; ! <span class="delimiter">(</span>timedOut &amp;&amp; timed<span class="delimiter">)</span><span class="delimiter">)</span>
+		    break;
+		<span class="keyword">if</span> <span class="delimiter">(</span>compareAndDecrementWorkerCount<span class="delimiter">(</span>c<span class="delimiter">)</span><span class="delimiter">)</span>
+		    <span class="keyword">return</span> <span class="keyword">null</span>;
+		c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;	// Re-read ctl
+		<span class="keyword">if</span> <span class="delimiter">(</span>runStateOf<span class="delimiter">(</span>c<span class="delimiter">)</span> != rs<span class="delimiter">)</span>
+		    continue retry;
+		// else CAS failed due to workerCount change; retry inner loop
+            <span class="delimiter">}</span>
+
+            <span class="keyword">try</span> <span class="delimiter">{</span>
+                Runnable r = timed ?
+                    <span class="delimiter">(</span>Runnable<span class="delimiter">)</span>workQueue.poll<span class="delimiter">(</span>keepAliveTime, TimeUnit.NANOSECONDS<span class="delimiter">)</span> :
+                    <span class="delimiter">(</span>Runnable<span class="delimiter">)</span>workQueue.take<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>r != <span class="keyword">null</span><span class="delimiter">)</span>
+                    <span class="keyword">return</span> r;
+		timedOut = <span class="keyword">true</span>;
+            <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>InterruptedException retry<span class="delimiter">)</span> <span class="delimiter">{</span>
+		timedOut = <span class="keyword">false</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Main worker run loop.  Repeatedly gets tasks from queue and
+     * executes them, while coping with a number of issues:
+     *
+     * 1. We may start out with an initial task, in which case we
+     * don't need to get the first one. Otherwise, as long as pool is
+     * running, we get tasks from getTask. If it returns null then the
+     * worker exits due to changed pool state or configuration
+     * parameters.  Other exits result from exception throws in
+     * external code, in which case completedAbruptly holds, which
+     * usually leads processWorkerExit to replace this thread.
+     *
+     * 2. Before running any task, the lock is acquired to prevent
+     * other pool interrupts while the task is executing, and
+     * clearInterruptsForTaskRun called to ensure that unless pool is
+     * stopping, this thread does not have its interrupt set.
+     *
+     * 3. Each task run is preceded by a call to beforeExecute, which
+     * might throw an exception, in which case we cause thread to die
+     * (breaking loop with completedAbruptly true) without processing
+     * the task.
+     *
+     * 4. Assuming beforeExecute completes normally, we run the task,
+     * gathering any of its thrown exceptions to send to
+     * afterExecute. We separately handle RuntimeException, Error
+     * (both of which the specs guarantee that we trap) and arbitrary
+     * Throwables.  Because we cannot rethrow Throwables within
+     * Runnable.run, we wrap them within Errors on the way out (to the
+     * thread's UncaughtExceptionHandler).  Any thrown exception also
+     * conservatively causes thread to die.
+     *
+     * 5. After task.run completes, we call afterExecute, which may
+     * also throw an exception, which will also cause thread to
+     * die. According to JLS Sec 14.20, this exception is the one that
+     * will be in effect even if task.run throws.
+     *
+     * The net effect of the exception mechanics is that afterExecute
+     * and the thread's UncaughtExceptionHandler have as accurate
+     * information as we can provide about any problems encountered by
+     * user code.
+     *
+     * @param w the worker
+     */
+    <span class="keyword">final</span> void <a title="(w: ThreadPoolExecutor.this.Worker)Unit" id="121218">runWorker</a><span class="delimiter">(</span>Worker <a title="ThreadPoolExecutor.this.Worker" id="3389329">w</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        Runnable task = w.firstTask;
+        w.firstTask = <span class="keyword">null</span>;
+        boolean completedAbruptly = <span class="keyword">true</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            <span class="keyword">while</span> <span class="delimiter">(</span>task != <span class="keyword">null</span> || <span class="delimiter">(</span>task = getTask<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> != <span class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                w.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+                clearInterruptsForTaskRun<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">try</span> <span class="delimiter">{</span>
+                    beforeExecute<span class="delimiter">(</span>w.thread, task<span class="delimiter">)</span>;
+                    Throwable thrown = <span class="keyword">null</span>;
+                    <span class="keyword">try</span> <span class="delimiter">{</span>
+                        task.run<span class="delimiter">(</span><span class="delimiter">)</span>;
+                    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>RuntimeException x<span class="delimiter">)</span> <span class="delimiter">{</span>
+                        thrown = x; <span class="keyword">throw</span> x;
+                    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>Error x<span class="delimiter">)</span> <span class="delimiter">{</span>
+                        thrown = x; <span class="keyword">throw</span> x;
+                    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>Throwable x<span class="delimiter">)</span> <span class="delimiter">{</span>
+                        thrown = x; <span class="keyword">throw</span> <span class="keyword">new</span> Error<span class="delimiter">(</span>x<span class="delimiter">)</span>;
+                    <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+                        afterExecute<span class="delimiter">(</span>task, thrown<span class="delimiter">)</span>;
+                    <span class="delimiter">}</span>
+                <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+                    task = <span class="keyword">null</span>;
+                    w.completedTasks++;
+                    w.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+            completedAbruptly = <span class="keyword">false</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            processWorkerExit<span class="delimiter">(</span>w, completedAbruptly<span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    // Public constructors and methods
+
+    /**
+     * Creates a new {@code ThreadPoolExecutor} with the given initial
+     * parameters and default thread factory and rejected execution handler.
+     * It may be more convenient to use one of the {@link Executors} factory
+     * methods instead of this general purpose constructor.
+     *
+     * @param corePoolSize the number of threads to keep in the pool, even
+     *        if they are idle, unless {@code allowCoreThreadTimeOut} is set
+     * @param maximumPoolSize the maximum number of threads to allow in the
+     *        pool
+     * @param keepAliveTime when the number of threads is greater than
+     *        the core, this is the maximum time that excess idle threads
+     *        will wait for new tasks before terminating.
+     * @param unit the time unit for the {@code keepAliveTime} argument
+     * @param workQueue the queue to use for holding tasks before they are
+     *        executed.  This queue will hold only the {@code Runnable}
+     *        tasks submitted by the {@code execute} method.
+     * @throws IllegalArgumentException if one of the following holds:&lt;br&gt;
+     *         {@code corePoolSize &lt; 0}&lt;br&gt;
+     *         {@code keepAliveTime &lt; 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt;= 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt; corePoolSize}
+     * @throws NullPointerException if {@code workQueue} is null
+     */
+    public ThreadPoolExecutor<a href="#9259" title="scala.actors.threadpool.ThreadPoolExecutor" class="delimiter">(</a>int <a title="Int" id="127572">corePoolSize</a>,
+                              int <a title="Int" id="127573">maximumPoolSize</a>,
+                              long <a title="Long" id="127574">keepAliveTime</a>,
+                              <a href="TimeUnit.java.html#9265" title="scala.actors.threadpool.TimeUnit">TimeUnit</a> <a title="scala.actors.threadpool.TimeUnit" id="127575">unit</a>,
+                              <a href="BlockingQueue.java.html#9147" title="scala.actors.threadpool.BlockingQueue">BlockingQueue</a> <a title="scala.actors.threadpool.BlockingQueue" id="127576">workQueue</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">this</span><span class="delimiter">(</span>corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue,
+             Executors.defaultThreadFactory<span class="delimiter">(</span><span class="delimiter">)</span>, defaultHandler<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Creates a new {@code ThreadPoolExecutor} with the given initial
+     * parameters and default rejected execution handler.
+     *
+     * @param corePoolSize the number of threads to keep in the pool, even
+     *        if they are idle, unless {@code allowCoreThreadTimeOut} is set
+     * @param maximumPoolSize the maximum number of threads to allow in the
+     *        pool
+     * @param keepAliveTime when the number of threads is greater than
+     *        the core, this is the maximum time that excess idle threads
+     *        will wait for new tasks before terminating.
+     * @param unit the time unit for the {@code keepAliveTime} argument
+     * @param workQueue the queue to use for holding tasks before they are
+     *        executed.  This queue will hold only the {@code Runnable}
+     *        tasks submitted by the {@code execute} method.
+     * @param threadFactory the factory to use when the executor
+     *        creates a new thread
+     * @throws IllegalArgumentException if one of the following holds:&lt;br&gt;
+     *         {@code corePoolSize &lt; 0}&lt;br&gt;
+     *         {@code keepAliveTime &lt; 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt;= 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt; corePoolSize}
+     * @throws NullPointerException if {@code workQueue}
+     *         or {@code threadFactory} is null
+     */
+    public ThreadPoolExecutor<a title="(corePoolSize: Int, maximumPoolSize: Int, keepAliveTime: Long, unit: scala.actors.threadpool.TimeUnit, workQueue: scala.actors.threadpool.BlockingQueue[_], threadFactory: scala.actors.threadpool.ThreadFactory)scala.actors.threadpool.ThreadPoolExecutor" id="121220" class="delimiter">(</a>int <a title="Int" id="127558">corePoolSize</a>,
+                              int <a title="Int" id="127559">maximumPoolSize</a>,
+                              long <a title="Long" id="127560">keepAliveTime</a>,
+                              <a href="TimeUnit.java.html#9265" title="scala.actors.threadpool.TimeUnit">TimeUnit</a> <a title="scala.actors.threadpool.TimeUnit" id="127561">unit</a>,
+                              <a href="BlockingQueue.java.html#9147" title="scala.actors.threadpool.BlockingQueue">BlockingQueue</a> <a title="scala.actors.threadpool.BlockingQueue" id="127562">workQueue</a>,
+                              <a href="ThreadFactory.java.html#9248" title="scala.actors.threadpool.ThreadFactory">ThreadFactory</a> <a title="scala.actors.threadpool.ThreadFactory" id="127563">threadFactory</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">this</span><span class="delimiter">(</span>corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue,
+             threadFactory, defaultHandler<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Creates a new {@code ThreadPoolExecutor} with the given initial
+     * parameters and default thread factory.
+     *
+     * @param corePoolSize the number of threads to keep in the pool, even
+     *        if they are idle, unless {@code allowCoreThreadTimeOut} is set
+     * @param maximumPoolSize the maximum number of threads to allow in the
+     *        pool
+     * @param keepAliveTime when the number of threads is greater than
+     *        the core, this is the maximum time that excess idle threads
+     *        will wait for new tasks before terminating.
+     * @param unit the time unit for the {@code keepAliveTime} argument
+     * @param workQueue the queue to use for holding tasks before they are
+     *        executed.  This queue will hold only the {@code Runnable}
+     *        tasks submitted by the {@code execute} method.
+     * @param handler the handler to use when execution is blocked
+     *        because the thread bounds and queue capacities are reached
+     * @throws IllegalArgumentException if one of the following holds:&lt;br&gt;
+     *         {@code corePoolSize &lt; 0}&lt;br&gt;
+     *         {@code keepAliveTime &lt; 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt;= 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt; corePoolSize}
+     * @throws NullPointerException if {@code workQueue}
+     *         or {@code handler} is null
+     */
+    public ThreadPoolExecutor<a title="(corePoolSize: Int, maximumPoolSize: Int, keepAliveTime: Long, unit: scala.actors.threadpool.TimeUnit, workQueue: scala.actors.threadpool.BlockingQueue[_], handler: scala.actors.threadpool.RejectedExecutionHandler)scala.actors.threadpool.ThreadPoolExecutor" id="121221" class="delimiter">(</a>int <a title="Int" id="127544">corePoolSize</a>,
+                              int <a title="Int" id="127545">maximumPoolSize</a>,
+                              long <a title="Long" id="127546">keepAliveTime</a>,
+                              <a href="TimeUnit.java.html#9265" title="scala.actors.threadpool.TimeUnit">TimeUnit</a> <a title="scala.actors.threadpool.TimeUnit" id="127547">unit</a>,
+                              <a href="BlockingQueue.java.html#9147" title="scala.actors.threadpool.BlockingQueue">BlockingQueue</a> <a title="scala.actors.threadpool.BlockingQueue" id="127548">workQueue</a>,
+                              <a href="RejectedExecutionHandler.java.html#9231" title="scala.actors.threadpool.RejectedExecutionHandler">RejectedExecutionHandler</a> <a title="scala.actors.threadpool.RejectedExecutionHandler" id="127549">handler</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">this</span><span class="delimiter">(</span>corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue,
+             Executors.defaultThreadFactory<span class="delimiter">(</span><span class="delimiter">)</span>, handler<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Creates a new {@code ThreadPoolExecutor} with the given initial
+     * parameters.
+     *
+     * @param corePoolSize the number of threads to keep in the pool, even
+     *        if they are idle, unless {@code allowCoreThreadTimeOut} is set
+     * @param maximumPoolSize the maximum number of threads to allow in the
+     *        pool
+     * @param keepAliveTime when the number of threads is greater than
+     *        the core, this is the maximum time that excess idle threads
+     *        will wait for new tasks before terminating.
+     * @param unit the time unit for the {@code keepAliveTime} argument
+     * @param workQueue the queue to use for holding tasks before they are
+     *        executed.  This queue will hold only the {@code Runnable}
+     *        tasks submitted by the {@code execute} method.
+     * @param threadFactory the factory to use when the executor
+     *        creates a new thread
+     * @param handler the handler to use when execution is blocked
+     *        because the thread bounds and queue capacities are reached
+     * @throws IllegalArgumentException if one of the following holds:&lt;br&gt;
+     *         {@code corePoolSize &lt; 0}&lt;br&gt;
+     *         {@code keepAliveTime &lt; 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt;= 0}&lt;br&gt;
+     *         {@code maximumPoolSize &lt; corePoolSize}
+     * @throws NullPointerException if {@code workQueue}
+     *         or {@code threadFactory} or {@code handler} is null
+     */
+    public ThreadPoolExecutor<a title="(corePoolSize: Int, maximumPoolSize: Int, keepAliveTime: Long, unit: scala.actors.threadpool.TimeUnit, workQueue: scala.actors.threadpool.BlockingQueue[_], threadFactory: scala.actors.threadpool.ThreadFactory, handler: scala.actors.threadpool.RejectedExecutionHandler)scala.actors.threadpool.ThreadPoolExecutor" id="121222" class="delimiter">(</a>int <a title="Int" id="127499">corePoolSize</a>,
+                              int <a title="Int" id="127500">maximumPoolSize</a>,
+                              long <a title="Long" id="127501">keepAliveTime</a>,
+                              <a href="TimeUnit.java.html#9265" title="scala.actors.threadpool.TimeUnit">TimeUnit</a> <a title="scala.actors.threadpool.TimeUnit" id="127502">unit</a>,
+                              <a href="BlockingQueue.java.html#9147" title="scala.actors.threadpool.BlockingQueue">BlockingQueue</a> <a title="scala.actors.threadpool.BlockingQueue" id="127503">workQueue</a>,
+                              <a href="ThreadFactory.java.html#9248" title="scala.actors.threadpool.ThreadFactory">ThreadFactory</a> <a title="scala.actors.threadpool.ThreadFactory" id="127504">threadFactory</a>,
+                              <a href="RejectedExecutionHandler.java.html#9231" title="scala.actors.threadpool.RejectedExecutionHandler">RejectedExecutionHandler</a> <a title="scala.actors.threadpool.RejectedExecutionHandler" id="127505">handler</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>corePoolSize &lt; <span class="int">0</span> ||
+            maximumPoolSize &lt;= <span class="int">0</span> ||
+            maximumPoolSize &lt; corePoolSize ||
+            keepAliveTime &lt; <span class="int">0</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>workQueue == <span class="keyword">null</span> || threadFactory == <span class="keyword">null</span> || handler == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">this</span>.corePoolSize = corePoolSize;
+        <span class="keyword">this</span>.maximumPoolSize = maximumPoolSize;
+        <span class="keyword">this</span>.workQueue = workQueue;
+        <span class="keyword">this</span>.keepAliveTime = unit.toNanos<span class="delimiter">(</span>keepAliveTime<span class="delimiter">)</span>;
+        <span class="keyword">this</span>.threadFactory = threadFactory;
+        <span class="keyword">this</span>.handler = handler;
+    <span class="delimiter">}</span>
+
+    /**
+     * Executes the given task sometime in the future.  The task
+     * may execute in a new thread or in an existing pooled thread.
+     *
+     * If the task cannot be submitted for execution, either because this
+     * executor has been shutdown or because its capacity has been reached,
+     * the task is handled by the current {@code RejectedExecutionHandler}.
+     *
+     * @param command the task to execute
+     * @throws RejectedExecutionException at discretion of
+     *         {@code RejectedExecutionHandler}, if the task
+     *         cannot be accepted for execution
+     * @throws NullPointerException if {@code command} is null
+     */
+    public void <a title="(command: Runnable)Unit" id="121223">execute</a><span class="delimiter">(</span>Runnable <a title="Runnable" id="127888">command</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>command == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        /*
+         * Proceed in 3 steps:
+         *
+         * 1. If fewer than corePoolSize threads are running, try to
+         * start a new thread with the given command as its first
+         * task.  The call to addWorker atomically checks runState and
+         * workerCount, and so prevents false alarms that would add
+         * threads when it shouldn't, by returning false.
+         *
+         * 2. If a task can be successfully queued, then we still need
+         * to double-check whether we should have added a thread
+         * (because existing ones died since last checking) or that
+         * the pool shut down since entry into this method. So we
+         * recheck state and if necessary roll back the enqueuing if
+         * stopped, or start a new thread if there are none.
+         *
+         * 3. If we cannot queue task, then we try to add a new
+         * thread.  If it fails, we know we are shut down or saturated
+         * and so reject the task.
+         */
+        int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>workerCountOf<span class="delimiter">(</span>c<span class="delimiter">)</span> &lt; corePoolSize<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>addWorker<span class="delimiter">(</span>command, <span class="keyword">true</span><span class="delimiter">)</span><span class="delimiter">)</span>
+                <span class="keyword">return</span>;
+            c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>isRunning<span class="delimiter">(</span>c<span class="delimiter">)</span> &amp;&amp; workQueue.offer<span class="delimiter">(</span>command<span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            int recheck = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">if</span> <span class="delimiter">(</span>! isRunning<span class="delimiter">(</span>recheck<span class="delimiter">)</span> &amp;&amp; remove<span class="delimiter">(</span>command<span class="delimiter">)</span><span class="delimiter">)</span>
+                reject<span class="delimiter">(</span>command<span class="delimiter">)</span>;
+            <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>workerCountOf<span class="delimiter">(</span>recheck<span class="delimiter">)</span> == <span class="int">0</span><span class="delimiter">)</span>
+                addWorker<span class="delimiter">(</span><span class="keyword">null</span>, <span class="keyword">false</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>!addWorker<span class="delimiter">(</span>command, <span class="keyword">false</span><span class="delimiter">)</span><span class="delimiter">)</span>
+            reject<span class="delimiter">(</span>command<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Initiates an orderly shutdown in which previously submitted
+     * tasks are executed, but no new tasks will be accepted.
+     * Invocation has no additional effect if already shut down.
+     *
+     * @throws SecurityException {@inheritDoc}
+     */
+    public void <a title="()Unit" id="121224">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            checkShutdownAccess<span class="delimiter">(</span><span class="delimiter">)</span>;
+            advanceRunState<span class="delimiter">(</span>SHUTDOWN<span class="delimiter">)</span>;
+            interruptIdleWorkers<span class="delimiter">(</span><span class="delimiter">)</span>;
+            onShutdown<span class="delimiter">(</span><span class="delimiter">)</span>; // hook for ScheduledThreadPoolExecutor
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        tryTerminate<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Attempts to stop all actively executing tasks, halts the
+     * processing of waiting tasks, and returns a list of the tasks
+     * that were awaiting execution. These tasks are drained (removed)
+     * from the task queue upon return from this method.
+     *
+     * &lt;p&gt;There are no guarantees beyond best-effort attempts to stop
+     * processing actively executing tasks.  This implementation
+     * cancels tasks via {@link Thread#interrupt}, so any task that
+     * fails to respond to interrupts may never terminate.
+     *
+     * @throws SecurityException {@inheritDoc}
+     */
+    public List <a title="()java.util.List[_]" id="121225">shutdownNow</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        List tasks;
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            checkShutdownAccess<span class="delimiter">(</span><span class="delimiter">)</span>;
+            advanceRunState<span class="delimiter">(</span>STOP<span class="delimiter">)</span>;
+            interruptWorkers<span class="delimiter">(</span><span class="delimiter">)</span>;
+            tasks = drainQueue<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+        tryTerminate<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> tasks;
+    <span class="delimiter">}</span>
+
+    public boolean <a title="()Boolean" id="121226">isShutdown</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> ! isRunning<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns true if this executor is in the process of terminating
+     * after {@link #shutdown} or {@link #shutdownNow} but has not
+     * completely terminated.  This method may be useful for
+     * debugging. A return of {@code true} reported a sufficient
+     * period after shutdown may indicate that submitted tasks have
+     * ignored or suppressed interruption, causing this executor not
+     * to properly terminate.
+     *
+     * @return true if terminating but not yet terminated
+     */
+    public boolean <a title="()Boolean" id="121227">isTerminating</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        int c = ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">return</span> ! isRunning<span class="delimiter">(</span>c<span class="delimiter">)</span> &amp;&amp; runStateLessThan<span class="delimiter">(</span>c, TERMINATED<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public boolean <a title="()Boolean" id="121228">isTerminated</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> runStateAtLeast<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>, TERMINATED<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    public boolean <a title="(timeout: Long, unit: scala.actors.threadpool.TimeUnit)Boolean" id="121229">awaitTermination</a><span class="delimiter">(</span>long <a title="Long" id="3389334">timeout</a>, <a href="TimeUnit.java.html#9265" title="scala.actors.threadpool.TimeUnit">TimeUnit</a> <a title="scala.actors.threadpool.TimeUnit" id="3389335">unit</a><span class="delimiter">)</span>
+        throws InterruptedException <span class="delimiter">{</span>
+        long nanos = unit.toNanos<span class="delimiter">(</span>timeout<span class="delimiter">)</span>;
+        long deadline = Utils.nanoTime<span class="delimiter">(</span><span class="delimiter">)</span> + nanos;
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>runStateAtLeast<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>, TERMINATED<span class="delimiter">)</span><span class="delimiter">)</span>
+                <span class="keyword">return</span> <span class="keyword">true</span>;
+            <span class="keyword">while</span> <span class="delimiter">(</span>nanos &gt; <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                termination.await<span class="delimiter">(</span>nanos, TimeUnit.NANOSECONDS<span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>runStateAtLeast<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>, TERMINATED<span class="delimiter">)</span><span class="delimiter">)</span>
+                    <span class="keyword">return</span> <span class="keyword">true</span>;
+                nanos = deadline - Utils.nanoTime<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> <span class="keyword">false</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Invokes {@code shutdown} when this executor is no longer
+     * referenced and it has no threads.
+     */
+    <span class="keyword">protected</span> void <a title="()Unit" id="121230">finalize</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        shutdown<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Sets the thread factory used to create new threads.
+     *
+     * @param threadFactory the new thread factory
+     * @throws NullPointerException if threadFactory is null
+     * @see #getThreadFactory
+     */
+    public void <a title="(threadFactory: scala.actors.threadpool.ThreadFactory)Unit" id="121231">setThreadFactory</a><span class="delimiter">(</span><a href="ThreadFactory.java.html#9248" title="scala.actors.threadpool.ThreadFactory">ThreadFactory</a> <a title="scala.actors.threadpool.ThreadFactory" id="3389336">threadFactory</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>threadFactory == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">this</span>.threadFactory = threadFactory;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the thread factory used to create new threads.
+     *
+     * @return the current thread factory
+     * @see #setThreadFactory
+     */
+    public <a href="ThreadFactory.java.html#9248" title="scala.actors.threadpool.ThreadFactory">ThreadFactory</a> <a title="()scala.actors.threadpool.ThreadFactory" id="121232">getThreadFactory</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> threadFactory;
+    <span class="delimiter">}</span>
+
+    /**
+     * Sets a new handler for unexecutable tasks.
+     *
+     * @param handler the new handler
+     * @throws NullPointerException if handler is null
+     * @see #getRejectedExecutionHandler
+     */
+    public void <a title="(handler: scala.actors.threadpool.RejectedExecutionHandler)Unit" id="121233">setRejectedExecutionHandler</a><span class="delimiter">(</span><a href="RejectedExecutionHandler.java.html#9231" title="scala.actors.threadpool.RejectedExecutionHandler">RejectedExecutionHandler</a> <a title="scala.actors.threadpool.RejectedExecutionHandler" id="3389337">handler</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>handler == <span class="keyword">null</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">this</span>.handler = handler;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the current handler for unexecutable tasks.
+     *
+     * @return the current handler
+     * @see #setRejectedExecutionHandler
+     */
+    public <a href="RejectedExecutionHandler.java.html#9231" title="scala.actors.threadpool.RejectedExecutionHandler">RejectedExecutionHandler</a> <a title="()scala.actors.threadpool.RejectedExecutionHandler" id="121234">getRejectedExecutionHandler</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> handler;
+    <span class="delimiter">}</span>
+
+    /**
+     * Sets the core number of threads.  This overrides any value set
+     * in the constructor.  If the new value is smaller than the
+     * current value, excess existing threads will be terminated when
+     * they next become idle.  If larger, new threads will, if needed,
+     * be started to execute any queued tasks.
+     *
+     * @param corePoolSize the new core size
+     * @throws IllegalArgumentException if {@code corePoolSize &lt; 0}
+     * @see #getCorePoolSize
+     */
+    public void <a title="(corePoolSize: Int)Unit" id="121235">setCorePoolSize</a><span class="delimiter">(</span>int <a title="Int" id="127865">corePoolSize</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>corePoolSize &lt; <span class="int">0</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        int delta = corePoolSize - <span class="keyword">this</span>.corePoolSize;
+        <span class="keyword">this</span>.corePoolSize = corePoolSize;
+        <span class="keyword">if</span> <span class="delimiter">(</span>workerCountOf<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> &gt; corePoolSize<span class="delimiter">)</span>
+            interruptIdleWorkers<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">else</span> <span class="keyword">if</span> <span class="delimiter">(</span>delta &gt; <span class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            // We don't really know how many new threads are &quot;needed&quot;.
+            // As a heuristic, prestart enough new workers (up to new
+            // core size) to handle the current number of tasks in
+            // queue, but stop if queue becomes empty while doing so.
+            int k = Math.min<span class="delimiter">(</span>delta, workQueue.size<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>;
+            <span class="keyword">while</span> <span class="delimiter">(</span>k-- &gt; <span class="int">0</span> &amp;&amp; addWorker<span class="delimiter">(</span><span class="keyword">null</span>, <span class="keyword">true</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                <span class="keyword">if</span> <span class="delimiter">(</span>workQueue.isEmpty<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+                    break;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the core number of threads.
+     *
+     * @return the core number of threads
+     * @see #setCorePoolSize
+     */
+    public int <a title="()Int" id="121236">getCorePoolSize</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> corePoolSize;
+    <span class="delimiter">}</span>
+
+    /**
+     * Starts a core thread, causing it to idly wait for work. This
+     * overrides the default policy of starting core threads only when
+     * new tasks are executed. This method will return {@code false}
+     * if all core threads have already been started.
+     *
+     * @return {@code true} if a thread was started
+     */
+    public boolean <a title="()Boolean" id="121237">prestartCoreThread</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> workerCountOf<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> &lt; corePoolSize &amp;&amp;
+            addWorker<span class="delimiter">(</span><span class="keyword">null</span>, <span class="keyword">true</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Starts all core threads, causing them to idly wait for work. This
+     * overrides the default policy of starting core threads only when
+     * new tasks are executed.
+     *
+     * @return the number of threads started
+     */
+    public int <a title="()Int" id="121238">prestartAllCoreThreads</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        int n = <span class="int">0</span>;
+        <span class="keyword">while</span> <span class="delimiter">(</span>addWorker<span class="delimiter">(</span><span class="keyword">null</span>, <span class="keyword">true</span><span class="delimiter">)</span><span class="delimiter">)</span>
+            ++n;
+        <span class="keyword">return</span> n;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns true if this pool allows core threads to time out and
+     * terminate if no tasks arrive within the keepAlive time, being
+     * replaced if needed when new tasks arrive. When true, the same
+     * keep-alive policy applying to non-core threads applies also to
+     * core threads. When false (the default), core threads are never
+     * terminated due to lack of incoming tasks.
+     *
+     * @return {@code true} if core threads are allowed to time out,
+     *         else {@code false}
+     *
+     * @since 1.6
+     */
+    public boolean <a title="()Boolean" id="121239">allowsCoreThreadTimeOut</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> allowCoreThreadTimeOut;
+    <span class="delimiter">}</span>
+
+    /**
+     * Sets the policy governing whether core threads may time out and
+     * terminate if no tasks arrive within the keep-alive time, being
+     * replaced if needed when new tasks arrive. When false, core
+     * threads are never terminated due to lack of incoming
+     * tasks. When true, the same keep-alive policy applying to
+     * non-core threads applies also to core threads. To avoid
+     * continual thread replacement, the keep-alive time must be
+     * greater than zero when setting {@code true}. This method
+     * should in general be called before the pool is actively used.
+     *
+     * @param value {@code true} if should time out, else {@code false}
+     * @throws IllegalArgumentException if value is {@code true}
+     *         and the current keep-alive time is not greater than zero
+     *
+     * @since 1.6
+     */
+    public void <a title="(value: Boolean)Unit" id="121240">allowCoreThreadTimeOut</a><span class="delimiter">(</span>boolean <a title="Boolean" id="3389338">value</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>value &amp;&amp; keepAliveTime &lt;= <span class="int">0</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="string">&quot;Core threads must have nonzero keep alive times&quot;</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>value != allowCoreThreadTimeOut<span class="delimiter">)</span> <span class="delimiter">{</span>
+            allowCoreThreadTimeOut = value;
+            <span class="keyword">if</span> <span class="delimiter">(</span>value<span class="delimiter">)</span>
+                interruptIdleWorkers<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Sets the maximum allowed number of threads. This overrides any
+     * value set in the constructor. If the new value is smaller than
+     * the current value, excess existing threads will be
+     * terminated when they next become idle.
+     *
+     * @param maximumPoolSize the new maximum
+     * @throws IllegalArgumentException if the new maximum is
+     *         less than or equal to zero, or
+     *         less than the {@linkplain #getCorePoolSize core pool size}
+     * @see #getMaximumPoolSize
+     */
+    public void <a title="(maximumPoolSize: Int)Unit" id="121241">setMaximumPoolSize</a><span class="delimiter">(</span>int <a title="Int" id="3389339">maximumPoolSize</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>maximumPoolSize &lt;= <span class="int">0</span> || maximumPoolSize &lt; corePoolSize<span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">this</span>.maximumPoolSize = maximumPoolSize;
+        <span class="keyword">if</span> <span class="delimiter">(</span>workerCountOf<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> &gt; maximumPoolSize<span class="delimiter">)</span>
+            interruptIdleWorkers<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the maximum allowed number of threads.
+     *
+     * @return the maximum allowed number of threads
+     * @see #setMaximumPoolSize
+     */
+    public int <a title="()Int" id="121242">getMaximumPoolSize</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> maximumPoolSize;
+    <span class="delimiter">}</span>
+
+    /**
+     * Sets the time limit for which threads may remain idle before
+     * being terminated.  If there are more than the core number of
+     * threads currently in the pool, after waiting this amount of
+     * time without processing a task, excess threads will be
+     * terminated.  This overrides any value set in the constructor.
+     *
+     * @param time the time to wait.  A time value of zero will cause
+     *        excess threads to terminate immediately after executing tasks.
+     * @param unit the time unit of the {@code time} argument
+     * @throws IllegalArgumentException if {@code time} less than zero or
+     *         if {@code time} is zero and {@code allowsCoreThreadTimeOut}
+     * @see #getKeepAliveTime
+     */
+    public void <a title="(time: Long, unit: scala.actors.threadpool.TimeUnit)Unit" id="121243">setKeepAliveTime</a><span class="delimiter">(</span>long <a title="Long" id="3389340">time</a>, <a href="TimeUnit.java.html#9265" title="scala.actors.threadpool.TimeUnit">TimeUnit</a> <a title="scala.actors.threadpool.TimeUnit" id="3389341">unit</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">if</span> <span class="delimiter">(</span>time &lt; <span class="int">0</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">if</span> <span class="delimiter">(</span>time == <span class="int">0</span> &amp;&amp; allowsCoreThreadTimeOut<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException<span class="delimiter">(</span><span class="string">&quot;Core threads must have nonzero keep alive times&quot;</span><span class="delimiter">)</span>;
+        long keepAliveTime = unit.toNanos<span class="delimiter">(</span>time<span class="delimiter">)</span>;
+        long delta = keepAliveTime - <span class="keyword">this</span>.keepAliveTime;
+        <span class="keyword">this</span>.keepAliveTime = keepAliveTime;
+        <span class="keyword">if</span> <span class="delimiter">(</span>delta &lt; <span class="int">0</span><span class="delimiter">)</span>
+            interruptIdleWorkers<span class="delimiter">(</span><span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the thread keep-alive time, which is the amount of time
+     * that threads in excess of the core pool size may remain
+     * idle before being terminated.
+     *
+     * @param unit the desired time unit of the result
+     * @return the time limit
+     * @see #setKeepAliveTime
+     */
+    public long <a title="(unit: scala.actors.threadpool.TimeUnit)Long" id="121244">getKeepAliveTime</a><span class="delimiter">(</span><a href="TimeUnit.java.html#9265" title="scala.actors.threadpool.TimeUnit">TimeUnit</a> <a title="scala.actors.threadpool.TimeUnit" id="3389342">unit</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> unit.convert<span class="delimiter">(</span>keepAliveTime, TimeUnit.NANOSECONDS<span class="delimiter">)</span>;
+    <span class="delimiter">}</span>
+
+    /* User-level queue utilities */
+
+    /**
+     * Returns the task queue used by this executor. Access to the
+     * task queue is intended primarily for debugging and monitoring.
+     * This queue may be in active use.  Retrieving the task queue
+     * does not prevent queued tasks from executing.
+     *
+     * @return the task queue
+     */
+    public <a href="BlockingQueue.java.html#9147" title="scala.actors.threadpool.BlockingQueue">BlockingQueue</a> <a title="()scala.actors.threadpool.BlockingQueue" id="121245">getQueue</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">return</span> workQueue;
+    <span class="delimiter">}</span>
+
+    /**
+     * Removes this task from the executor's internal queue if it is
+     * present, thus causing it not to be run if it has not already
+     * started.
+     *
+     * &lt;p&gt; This method may be useful as one part of a cancellation
+     * scheme.  It may fail to remove tasks that have been converted
+     * into other forms before being placed on the internal queue. For
+     * example, a task entered using {@code submit} might be
+     * converted into a form that maintains {@code Future} status.
+     * However, in such cases, method {@link #purge} may be used to
+     * remove those Futures that have been cancelled.
+     *
+     * @param task the task to remove
+     * @return true if the task was removed
+     */
+    public boolean <a title="(task: Runnable)Boolean" id="121246">remove</a><span class="delimiter">(</span>Runnable <a title="Runnable" id="3389343">task</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        boolean removed = workQueue.remove<span class="delimiter">(</span>task<span class="delimiter">)</span>;
+        tryTerminate<span class="delimiter">(</span><span class="delimiter">)</span>; // In case SHUTDOWN and now empty
+        <span class="keyword">return</span> removed;
+    <span class="delimiter">}</span>
+
+    /**
+     * Tries to remove from the work queue all {@link Future}
+     * tasks that have been cancelled. This method can be useful as a
+     * storage reclamation operation, that has no other impact on
+     * functionality. Cancelled tasks are never executed, but may
+     * accumulate in work queues until worker threads can actively
+     * remove them. Invoking this method instead tries to remove them now.
+     * However, this method may fail to remove tasks in
+     * the presence of interference by other threads.
+     */
+    public void <a title="()Unit" id="121247">purge</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> BlockingQueue q = workQueue;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            Iterator it = q.iterator<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">while</span> <span class="delimiter">(</span>it.hasNext<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                Runnable r = <span class="delimiter">(</span>Runnable<span class="delimiter">)</span>it.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>r instanceof Future &amp;&amp; <span class="delimiter">(</span><span class="delimiter">(</span>Future<span class="delimiter">)</span>r<span class="delimiter">)</span>.isCancelled<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		    it.remove<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">(</span>ConcurrentModificationException fallThrough<span class="delimiter">)</span> <span class="delimiter">{</span>
+	    // Take slow path if we encounter interference during traversal.
+            // Make copy for traversal and call remove for cancelled entries.
+	    // The slow path is more likely to be O(N*N).
+            Object<span class="delimiter">[</span><span class="delimiter">]</span> arr = q.toArray<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="keyword">for</span> <span class="delimiter">(</span>int i=<span class="int">0</span>; i&lt;arr.length; i++<span class="delimiter">)</span> <span class="delimiter">{</span>
+                Object r = arr<span class="delimiter">[</span>i<span class="delimiter">]</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>r instanceof Future &amp;&amp; <span class="delimiter">(</span><span class="delimiter">(</span>Future<span class="delimiter">)</span>r<span class="delimiter">)</span>.isCancelled<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+		    q.remove<span class="delimiter">(</span>r<span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+
+        tryTerminate<span class="delimiter">(</span><span class="delimiter">)</span>; // In case SHUTDOWN and now empty
+    <span class="delimiter">}</span>
+
+    /* Statistics */
+
+    /**
+     * Returns the current number of threads in the pool.
+     *
+     * @return the number of threads
+     */
+    public int <a title="()Int" id="121248">getPoolSize</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+	    // Remove rare and surprising possibility of
+	    // isTerminated() &amp;&amp; getPoolSize() &gt; 0
+            <span class="keyword">return</span> runStateAtLeast<span class="delimiter">(</span>ctl.get<span class="delimiter">(</span><span class="delimiter">)</span>, TIDYING<span class="delimiter">)</span> ? <span class="int">0</span>
+		: workers.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the approximate number of threads that are actively
+     * executing tasks.
+     *
+     * @return the number of threads
+     */
+    public int <a title="()Int" id="121249">getActiveCount</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            int n = <span class="int">0</span>;
+            <span class="keyword">for</span> <span class="delimiter">(</span>Iterator itr = workers.iterator<span class="delimiter">(</span><span class="delimiter">)</span>; itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span>;<span class="delimiter">)</span> <span class="delimiter">{</span>
+                Worker w = <span class="delimiter">(</span>Worker<span class="delimiter">)</span>itr.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                <span class="keyword">if</span> <span class="delimiter">(</span>w.isLocked<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+                    ++n;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> n;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the largest number of threads that have ever
+     * simultaneously been in the pool.
+     *
+     * @return the number of threads
+     */
+    public int <a title="()Int" id="121250">getLargestPoolSize</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            <span class="keyword">return</span> largestPoolSize;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the approximate total number of tasks that have ever been
+     * scheduled for execution. Because the states of tasks and
+     * threads may change dynamically during computation, the returned
+     * value is only an approximation.
+     *
+     * @return the number of tasks
+     */
+    public long <a title="()Long" id="121251">getTaskCount</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            long n = completedTaskCount;
+            <span class="keyword">for</span> <span class="delimiter">(</span>Iterator itr = workers.iterator<span class="delimiter">(</span><span class="delimiter">)</span>; itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span>;<span class="delimiter">)</span> <span class="delimiter">{</span>
+                Worker w = <span class="delimiter">(</span>Worker<span class="delimiter">)</span>itr.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                n += w.completedTasks;
+                <span class="keyword">if</span> <span class="delimiter">(</span>w.isLocked<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+                    ++n;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> n + workQueue.size<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * Returns the approximate total number of tasks that have
+     * completed execution. Because the states of tasks and threads
+     * may change dynamically during computation, the returned value
+     * is only an approximation, but one that does not ever decrease
+     * across successive calls.
+     *
+     * @return the number of tasks
+     */
+    public long <a title="()Long" id="121252">getCompletedTaskCount</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">final</span> ReentrantLock mainLock = <span class="keyword">this</span>.mainLock;
+        mainLock.lock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+            long n = completedTaskCount;
+            <span class="keyword">for</span> <span class="delimiter">(</span>Iterator itr = workers.iterator<span class="delimiter">(</span><span class="delimiter">)</span>; itr.hasNext<span class="delimiter">(</span><span class="delimiter">)</span>;<span class="delimiter">)</span> <span class="delimiter">{</span>
+                Worker w = <span class="delimiter">(</span>Worker<span class="delimiter">)</span>itr.next<span class="delimiter">(</span><span class="delimiter">)</span>;
+                n += w.completedTasks;
+            <span class="delimiter">}</span>
+            <span class="keyword">return</span> n;
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+            mainLock.unlock<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /* Extension hooks */
+
+    /**
+     * Method invoked prior to executing the given Runnable in the
+     * given thread.  This method is invoked by thread {@code t} that
+     * will execute task {@code r}, and may be used to re-initialize
+     * ThreadLocals, or to perform logging.
+     *
+     * &lt;p&gt;This implementation does nothing, but may be customized in
+     * subclasses. Note: To properly nest multiple overridings, subclasses
+     * should generally invoke {@code super.beforeExecute} at the end of
+     * this method.
+     *
+     * @param t the thread that will run task {@code r}
+     * @param r the task that will be executed
+     */
+    <span class="keyword">protected</span> void <a title="(t: Thread, r: Runnable)Unit" id="121253">beforeExecute</a><span class="delimiter">(</span>Thread <a title="Thread" id="3389344">t</a>, Runnable <a title="Runnable" id="3389345">r</a><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">}</span>
+
+    /**
+     * Method invoked upon completion of execution of the given Runnable.
+     * This method is invoked by the thread that executed the task. If
+     * non-null, the Throwable is the uncaught {@code RuntimeException}
+     * or {@code Error} that caused execution to terminate abruptly.
+     *
+     * &lt;p&gt;This implementation does nothing, but may be customized in
+     * subclasses. Note: To properly nest multiple overridings, subclasses
+     * should generally invoke {@code super.afterExecute} at the
+     * beginning of this method.
+     *
+     * &lt;p&gt;&lt;b&gt;Note:&lt;/b&gt; When actions are enclosed in tasks (such as
+     * {@link FutureTask}) either explicitly or via methods such as
+     * {@code submit}, these task objects catch and maintain
+     * computational exceptions, and so they do not cause abrupt
+     * termination, and the internal exceptions are &lt;em&gt;not&lt;/em&gt;
+     * passed to this method. If you would like to trap both kinds of
+     * failures in this method, you can further probe for such cases,
+     * as in this sample subclass that prints either the direct cause
+     * or the underlying exception if a task has been aborted:
+     *
+     *  &lt;pre&gt; {@code
+     * class ExtendedExecutor extends ThreadPoolExecutor {
+     *   // ...
+     *   protected void afterExecute(Runnable r, Throwable t) {
+     *     super.afterExecute(r, t);
+     *     if (t == null &amp;&amp; r instanceof Future&lt;?&gt;) {
+     *       try {
+     *         Object result = ((Future&lt;?&gt;) r).get();
+     *       } catch (CancellationException ce) {
+     *           t = ce;
+     *       } catch (ExecutionException ee) {
+     *           t = ee.getCause();
+     *       } catch (InterruptedException ie) {
+     *           Thread.currentThread().interrupt(); // ignore/reset
+     *       }
+     *     }
+     *     if (t != null)
+     *       System.out.println(t);
+     *   }
+     * }}&lt;/pre&gt;
+     *
+     * @param r the runnable that has completed
+     * @param t the exception that caused termination, or null if
+     * execution completed normally
+     */
+    <span class="keyword">protected</span> void <a title="(r: Runnable, t: Throwable)Unit" id="121254">afterExecute</a><span class="delimiter">(</span>Runnable <a title="Runnable" id="3389346">r</a>, Throwable <a title="Throwable" id="3389347">t</a><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">}</span>
+
+    /**
+     * Method invoked when the Executor has terminated.  Default
+     * implementation does nothing. Note: To properly nest multiple
+     * overridings, subclasses should generally invoke
+     * {@code super.terminated} within this method.
+     */
+    <span class="keyword">protected</span> void <a title="()Unit" id="121255">terminated</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">}</span>
+
+    /* Predefined RejectedExecutionHandlers */
+
+    /**
+     * A handler for rejected tasks that runs the rejected task
+     * directly in the calling thread of the {@code execute} method,
+     * unless the executor has been shut down, in which case the task
+     * is discarded.
+     */
+    public static <span class="keyword">class</span> <a title="scala.actors.threadpool.ThreadPoolExecutor.CallerRunsPolicy.type" id="127525">CallerRunsPolicy</a> implements <a href="RejectedExecutionHandler.java.html#9231" title="scala.actors.threadpool.RejectedExecutionHandler">RejectedExecutionHandler</a> <span class="delimiter">{</span>
+        /**
+         * Creates a {@code CallerRunsPolicy}.
+         */
+        public CallerRunsPolicy<a href="#127525" title="scala.actors.threadpool.ThreadPoolExecutor.CallerRunsPolicy" class="delimiter">(</a><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">}</span>
+
+        /**
+         * Executes task r in the caller's thread, unless the executor
+         * has been shut down, in which case the task is discarded.
+         *
+         * @param r the runnable task requested to be executed
+         * @param e the executor attempting to execute this task
+         */
+        public void <a title="(r: Runnable, e: scala.actors.threadpool.ThreadPoolExecutor)Unit" id="127629">rejectedExecution</a><span class="delimiter">(</span>Runnable <a title="Runnable" id="3389312">r</a>, <a href="#9259" title="scala.actors.threadpool.ThreadPoolExecutor">ThreadPoolExecutor</a> <a title="scala.actors.threadpool.ThreadPoolExecutor" id="3389313">e</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>!e.isShutdown<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                r.run<span class="delimiter">(</span><span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * A handler for rejected tasks that throws a
+     * {@code RejectedExecutionException}.
+     */
+    public static <span class="keyword">class</span> <a title="scala.actors.threadpool.ThreadPoolExecutor.AbortPolicy.type" id="127528">AbortPolicy</a> implements RejectedExecutionHandler <span class="delimiter">{</span>
+        /**
+         * Creates an {@code AbortPolicy}.
+         */
+        public AbortPolicy<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">}</span>
+
+        /**
+         * Always throws RejectedExecutionException.
+         *
+         * @param r the runnable task requested to be executed
+         * @param e the executor attempting to execute this task
+         * @throws RejectedExecutionException always.
+         */
+        public void rejectedExecution<span class="delimiter">(</span>Runnable r, ThreadPoolExecutor e<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">throw</span> <span class="keyword">new</span> RejectedExecutionException<span class="delimiter">(</span><span class="delimiter">)</span>;
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * A handler for rejected tasks that silently discards the
+     * rejected task.
+     */
+    public static <span class="keyword">class</span> <a title="scala.actors.threadpool.ThreadPoolExecutor.DiscardPolicy.type" id="127531">DiscardPolicy</a> implements RejectedExecutionHandler <span class="delimiter">{</span>
+        /**
+         * Creates a {@code DiscardPolicy}.
+         */
+        public DiscardPolicy<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">}</span>
+
+        /**
+         * Does nothing, which has the effect of discarding task r.
+         *
+         * @param r the runnable task requested to be executed
+         * @param e the executor attempting to execute this task
+         */
+        public void rejectedExecution<span class="delimiter">(</span>Runnable r, ThreadPoolExecutor e<span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    /**
+     * A handler for rejected tasks that discards the oldest unhandled
+     * request and then retries {@code execute}, unless the executor
+     * is shut down, in which case the task is discarded.
+     */
+    public static <span class="keyword">class</span> <a title="scala.actors.threadpool.ThreadPoolExecutor.DiscardOldestPolicy.type" id="127534">DiscardOldestPolicy</a> implements RejectedExecutionHandler <span class="delimiter">{</span>
+        /**
+         * Creates a {@code DiscardOldestPolicy} for the given executor.
+         */
+        public DiscardOldestPolicy<span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="delimiter">}</span>
+
+        /**
+         * Obtains and ignores the next task that the executor
+         * would otherwise execute, if one is immediately available,
+         * and then retries execution of task r, unless the executor
+         * is shut down, in which case task r is instead discarded.
+         *
+         * @param r the runnable task requested to be executed
+         * @param e the executor attempting to execute this task
+         */
+        public void rejectedExecution<span class="delimiter">(</span>Runnable r, ThreadPoolExecutor e<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="keyword">if</span> <span class="delimiter">(</span>!e.isShutdown<span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                e.getQueue<span class="delimiter">(</span><span class="delimiter">)</span>.poll<span class="delimiter">(</span><span class="delimiter">)</span>;
+                e.execute<span class="delimiter">(</span>r<span class="delimiter">)</span>;
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
