@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>akka-cluster/cluster/ClusterRemoteWatcher.scala</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+<span class="keyword">package</span> akka.cluster
+
+<span class="keyword">import</span> scala.concurrent.duration.FiniteDuration
+<span class="keyword">import</span> akka.actor.Actor
+<span class="keyword">import</span> akka.actor.Address
+<span class="keyword">import</span> akka.actor.Props
+<span class="keyword">import</span> akka.cluster.<a href="ClusterEvent.scala.html#akka.cluster.ClusterEvent" title="akka.cluster.ClusterEvent.type">ClusterEvent</a>.CurrentClusterState
+<span class="keyword">import</span> akka.cluster.<a href="ClusterEvent.scala.html#akka.cluster.ClusterEvent" title="akka.cluster.ClusterEvent.type">ClusterEvent</a>.MemberEvent
+<span class="keyword">import</span> akka.cluster.<a href="ClusterEvent.scala.html#akka.cluster.ClusterEvent" title="akka.cluster.ClusterEvent.type">ClusterEvent</a>.MemberUp
+<span class="keyword">import</span> akka.cluster.<a href="ClusterEvent.scala.html#akka.cluster.ClusterEvent" title="akka.cluster.ClusterEvent.type">ClusterEvent</a>.MemberRemoved
+<span class="keyword">import</span> akka.remote.FailureDetectorRegistry
+<span class="keyword">import</span> akka.remote.RemoteWatcher
+<span class="keyword">import</span> akka.actor.Deploy
+
+<span class="comment">/**
+ * INTERNAL API
+ */</span>
+<span class="keyword">private</span><span class="delimiter">[</span>cluster<span class="delimiter">]</span> <span class="keyword">object</span> <a title="akka.cluster.ClusterRemoteWatcher.type" id="akka.cluster.ClusterRemoteWatcher">ClusterRemoteWatcher</a> <a href="#akka.cluster.ClusterRemoteWatcher" title="akka.cluster.ClusterRemoteWatcher.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Factory method for `ClusterRemoteWatcher` [[akka.actor.Props]].
+   */</span>
+  <span class="keyword">def</span> <a title="(failureDetector: akka.remote.FailureDetectorRegistry[akka.actor.Address], heartbeatInterval: scala.concurrent.duration.FiniteDuration, unreachableReaperInterval: scala.concurrent.duration.FiniteDuration, heartbeatExpectedResponseAfter: scala.concurrent.duration.FiniteDuration)akka.actor.Props" id="akka.cluster.ClusterRemoteWatcher.props">props</a><span class="delimiter">(</span>
+    <a title="akka.remote.FailureDetectorRegistry[akka.actor.Address]" id="akka.cluster.ClusterRemoteWatcher.props.failureDetector">failureDetector</a>: <a href="../../akka-remote/remote/FailureDetectorRegistry.scala.html#akka.remote;FailureDetectorRegistry" title="akka.remote.FailureDetectorRegistry[akka.actor.Address]">FailureDetectorRegistry</a><span class="delimiter">[</span>Address<span class="delimiter">]</span>,
+    <a title="scala.concurrent.duration.FiniteDuration" id="akka.cluster.ClusterRemoteWatcher.props.heartbeatInterval">heartbeatInterval</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span>,
+    <a title="scala.concurrent.duration.FiniteDuration" id="akka.cluster.ClusterRemoteWatcher.props.unreachableReaperInterval">unreachableReaperInterval</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span>,
+    <a title="scala.concurrent.duration.FiniteDuration" id="akka.cluster.ClusterRemoteWatcher.props.heartbeatExpectedResponseAfter">heartbeatExpectedResponseAfter</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>: <a href="../../akka-actor/actor/Props.scala.html#akka.actor;Props" title="akka.actor.Props">Props</a> =
+    <a href="../../akka-actor/actor/Props.scala.html#akka.actor.Props.apply(0870a176b3)" title="(clazz: Class[_], args: Any*)akka.actor.Props">Props</a><span class="delimiter">(</span>classOf<span title="Class[akka.cluster.ClusterRemoteWatcher](classOf[akka.cluster.ClusterRemoteWatcher])" class="delimiter">[</span>ClusterRemoteWatcher<span class="delimiter">]</span>, <a href="#akka.cluster.ClusterRemoteWatcher.props.failureDetector" title="akka.remote.FailureDetectorRegistry[akka.actor.Address]">failureDetector</a>, <a href="#akka.cluster.ClusterRemoteWatcher.props.heartbeatInterval" title="scala.concurrent.duration.FiniteDuration">heartbeatInterval</a>, <a href="#akka.cluster.ClusterRemoteWatcher.props.unreachableReaperInterval" title="scala.concurrent.duration.FiniteDuration">unreachableReaperInterval</a>,
+      <a href="#akka.cluster.ClusterRemoteWatcher.props.heartbeatExpectedResponseAfter" title="scala.concurrent.duration.FiniteDuration">heartbeatExpectedResponseAfter</a><span class="delimiter">)</span>.<a href="../../akka-actor/actor/Props.scala.html#akka.actor;Props.withDeploy" title="(d: akka.actor.Deploy)akka.actor.Props">withDeploy</a><span class="delimiter">(</span><a href="../../akka-actor/actor/Deployer.scala.html#akka.actor.Deploy" title="akka.actor.Deploy.type">Deploy</a>.<a href="../../akka-actor/actor/Deployer.scala.html#akka.actor.Deploy.local" title="=&gt; akka.actor.Deploy">local</a><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ *
+ * Specialization of [[akka.remote.RemoteWatcher]] that keeps
+ * track of cluster member nodes and is responsible for watchees on cluster nodes.
+ * [[akka.actor.AddressTerminate]] is published when node is removed from cluster.
+ *
+ * `RemoteWatcher` handles non-cluster nodes. `ClusterRemoteWatcher` will take
+ * over responsibility from `RemoteWatcher` if a watch is added before a node is member
+ * of the cluster and then later becomes cluster member.
+ */</span>
+<span title="AnyRef" class="keyword">private</span><span class="delimiter">[</span>cluster<span class="delimiter">]</span> <span class="keyword">class</span> <a title="class ClusterRemoteWatcher extends akka.remote.RemoteWatcher" id="akka.cluster;ClusterRemoteWatcher">ClusterRemoteWatcher</a><a href="#akka.cluster;ClusterRemoteWatcher" title="akka.cluster.ClusterRemoteWatcher" class="delimiter">(</a>
+  <a title="akka.remote.FailureDetectorRegistry[akka.actor.Address]" id="akka.cluster;ClusterRemoteWatcher.failureDetector">failureDetector</a>: <a href="../../akka-remote/remote/FailureDetectorRegistry.scala.html#akka.remote;FailureDetectorRegistry" title="akka.remote.FailureDetectorRegistry[akka.actor.Address]">FailureDetectorRegistry</a><span class="delimiter">[</span>Address<span class="delimiter">]</span>,
+  <a title="scala.concurrent.duration.FiniteDuration" id="akka.cluster;ClusterRemoteWatcher.heartbeatInterval">heartbeatInterval</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span>,
+  <a title="scala.concurrent.duration.FiniteDuration" id="akka.cluster;ClusterRemoteWatcher.unreachableReaperInterval">unreachableReaperInterval</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span>,
+  <a title="scala.concurrent.duration.FiniteDuration" id="akka.cluster;ClusterRemoteWatcher.heartbeatExpectedResponseAfter">heartbeatExpectedResponseAfter</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher" title="akka.remote.RemoteWatcher">RemoteWatcher</a><span class="delimiter">(</span>
+    <a href="#akka.cluster;ClusterRemoteWatcher.failureDetector" title="akka.remote.FailureDetectorRegistry[akka.actor.Address]">failureDetector</a>,
+    <a href="#akka.cluster;ClusterRemoteWatcher.heartbeatInterval" title="scala.concurrent.duration.FiniteDuration">heartbeatInterval</a>,
+    <a href="#akka.cluster;ClusterRemoteWatcher.unreachableReaperInterval" title="scala.concurrent.duration.FiniteDuration">unreachableReaperInterval</a>,
+    <a href="#akka.cluster;ClusterRemoteWatcher.heartbeatExpectedResponseAfter" title="scala.concurrent.duration.FiniteDuration">heartbeatExpectedResponseAfter</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+  <span class="keyword">import</span> <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote.RemoteWatcher" title="akka.remote.RemoteWatcher.type">RemoteWatcher</a>._
+
+  <span class="keyword">val</span> <a title="akka.cluster.Cluster" id="akka.cluster;ClusterRemoteWatcher.cluster">cluster</a> = <a href="../../akka-actor/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.Cluster">Cluster</a><span class="delimiter">(</span><a href="../../akka-actor/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../akka-actor/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span>
+  <span class="keyword">import</span> <a href="#akka.cluster;ClusterRemoteWatcher.cluster" title="=&gt; akka.cluster.Cluster">cluster</a>.selfAddress
+
+  <span class="keyword">var</span> <a title="Set[akka.actor.Address]" id="akka.cluster;ClusterRemoteWatcher.clusterNodes_=">clusterNodes</a>: <span title="Set[akka.actor.Address]">Set</span><span class="delimiter">[</span>Address<span class="delimiter">]</span> = <span title="=&gt; scala.collection.immutable.Set.type">Set</span>.<span title="scala.collection.immutable.Set[akka.actor.Address]">empty</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="akka.cluster;ClusterRemoteWatcher.preStart">preStart</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.cluster;ClusterRemoteWatcher" title="akka.cluster.ClusterRemoteWatcher" class="keyword">super</a>.<a href="../../akka-actor/actor/Actor.scala.html#akka.actor;Actor.preStart" title="()Unit">preStart</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#akka.cluster;ClusterRemoteWatcher.cluster" title="=&gt; akka.cluster.Cluster">cluster</a>.<a href="Cluster.scala.html#akka.cluster;Cluster.subscribe(6cfb44d410)" title="(subscriber: akka.actor.ActorRef, to: Class[_]*)Unit">subscribe</a><span class="delimiter">(</span><a href="../../akka-actor/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, classOf<span title="Class[akka.cluster.ClusterEvent.MemberEvent](classOf[akka.cluster.ClusterEvent$$MemberEvent])" class="delimiter">[</span>MemberEvent<span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="akka.cluster;ClusterRemoteWatcher.postStop">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.cluster;ClusterRemoteWatcher" title="akka.cluster.ClusterRemoteWatcher" class="keyword">super</a>.<a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.postStop" title="()Unit">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#akka.cluster;ClusterRemoteWatcher.cluster" title="=&gt; akka.cluster.Cluster">cluster</a>.<a href="Cluster.scala.html#akka.cluster;Cluster.unsubscribe(134bd64d81)" title="(subscriber: akka.actor.ActorRef)Unit">unsubscribe</a><span class="delimiter">(</span><a href="../../akka-actor/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; PartialFunction[Any,Unit]" id="akka.cluster;ClusterRemoteWatcher.receive">receive</a> = <a href="#akka.cluster;ClusterRemoteWatcher.receiveClusterEvent" title="=&gt; akka.actor.Actor.Receive">receiveClusterEvent</a> <span title="(that: PartialFunction[Any,Unit])PartialFunction[Any,Unit]">orElse</span> <a href="#akka.cluster;ClusterRemoteWatcher" title="akka.cluster.ClusterRemoteWatcher" class="keyword">super</a>.<a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.receive" title="=&gt; PartialFunction[Any,Unit]">receive</a>
+
+  <span class="keyword">def</span> <a title="=&gt; akka.actor.Actor.Receive" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent">receiveClusterEvent</a>: Actor.<span title="akka.actor.Actor.Receive">Receive</span> = <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    <span class="keyword">case</span> WatchRemote<span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.watchee">watchee</a>, <a title="akka.actor.ActorRef" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.watcher">watcher</a><span class="delimiter">)</span> <span class="keyword">if</span> <a href="#akka.cluster;ClusterRemoteWatcher.clusterNodes_=" title="(elem: akka.actor.Address)Boolean">clusterNodes</a><span class="delimiter">(</span><a href="#akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.watchee" title="akka.actor.ActorRef">watchee</a>.<a href="../../akka-actor/actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a>.<a href="../../akka-actor/actor/ActorPath.scala.html#akka.actor;ActorPath.address" title="=&gt; akka.actor.Address">address</a><span class="delimiter">)</span> ⇒
+      <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span> <span class="comment">// cluster managed node, don't propagate to super</span>
+    <span class="keyword">case</span> <a title="akka.cluster.ClusterEvent.CurrentClusterState" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.state">state</a>: <a href="ClusterEvent.scala.html#akka.cluster.ClusterEvent;CurrentClusterState" title="akka.cluster.ClusterEvent.CurrentClusterState">CurrentClusterState</a> ⇒
+      <a href="#akka.cluster;ClusterRemoteWatcher.clusterNodes_=" title="(x$1: Set[akka.actor.Address])Unit">clusterNodes</a> = <a href="#akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.state" title="akka.cluster.ClusterEvent.CurrentClusterState">state</a>.<a href="ClusterEvent.scala.html#akka.cluster.ClusterEvent;CurrentClusterState.members" title="=&gt; scala.collection.immutable.SortedSet[akka.cluster.Member]">members</a>.<span title="(pf: PartialFunction[akka.cluster.Member,akka.actor.Address])(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.SortedSet[akka.cluster.Member],akka.actor.Address,Set[akka.actor.Address]])Set[akka.actor.Address]">collect</span> <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[akka.cluster.Member,akka.actor.Address] with Serializable" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.applyOrElse;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a> <span class="keyword">case</span> <a title="akka.cluster.Member" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.applyOrElse;$anonfun.isDefinedAt.m">m</a> <span class="keyword">if</span> <a href="#akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.applyOrElse;$anonfun.isDefinedAt.m" title="akka.cluster.Member">m</a>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a> <span title="(x$1: AnyRef)Boolean">!=</span> <a href="Cluster.scala.html#akka.cluster;Cluster.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a> ⇒ <a href="#akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.applyOrElse;$anonfun.isDefinedAt.m" title="akka.cluster.Member">m</a>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a> <span class="delimiter">}</span>
+      <a href="#akka.cluster;ClusterRemoteWatcher.clusterNodes_=" title="=&gt; Set[akka.actor.Address]">clusterNodes</a> <span title="(f: akka.actor.Address =&gt; Unit)Unit">foreach</span> <a href="#akka.cluster;ClusterRemoteWatcher.takeOverResponsibility" title="(address: akka.actor.Address)Unit">takeOverResponsibility</a>
+      <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.unreachable_=" title="(x$1: Set[akka.actor.Address])Unit">unreachable</a> <span title="(xs: scala.collection.GenTraversableOnce[akka.actor.Address])scala.collection.immutable.Set[akka.actor.Address]">--=</span> <a href="#akka.cluster;ClusterRemoteWatcher.clusterNodes_=" title="=&gt; Set[akka.actor.Address]">clusterNodes</a>
+    <span class="keyword">case</span> MemberUp<span class="delimiter">(</span><span title="akka.cluster.Member">m</span><span class="delimiter">)</span> ⇒
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a> <span title="(x$1: AnyRef)Boolean">!=</span> <a href="Cluster.scala.html#akka.cluster;Cluster.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.cluster;ClusterRemoteWatcher.clusterNodes_=" title="(x$1: Set[akka.actor.Address])Unit">clusterNodes</a> <span title="(elem: akka.actor.Address)scala.collection.immutable.Set[akka.actor.Address]">+=</span> <span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a>
+        <a href="#akka.cluster;ClusterRemoteWatcher.takeOverResponsibility" title="(address: akka.actor.Address)Unit">takeOverResponsibility</a><span class="delimiter">(</span><span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a><span class="delimiter">)</span>
+        <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.unreachable_=" title="(x$1: Set[akka.actor.Address])Unit">unreachable</a> <span title="(elem: akka.actor.Address)scala.collection.immutable.Set[akka.actor.Address]">-=</span> <span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a>
+      <span class="delimiter">}</span>
+    <span class="keyword">case</span> MemberRemoved<span class="delimiter">(</span><span title="akka.cluster.Member">m</span>, <a title="akka.cluster.MemberStatus" id="akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.previousStatus">previousStatus</a><span class="delimiter">)</span> ⇒
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a> <span title="(x$1: AnyRef)Boolean">!=</span> <a href="Cluster.scala.html#akka.cluster;Cluster.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.cluster;ClusterRemoteWatcher.clusterNodes_=" title="(x$1: Set[akka.actor.Address])Unit">clusterNodes</a> <span title="(elem: akka.actor.Address)scala.collection.immutable.Set[akka.actor.Address]">-=</span> <span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.cluster;ClusterRemoteWatcher.receiveClusterEvent;$anonfun.isDefinedAt.previousStatus" title="akka.cluster.MemberStatus">previousStatus</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="Member.scala.html#akka.cluster.MemberStatus" title="akka.cluster.MemberStatus.type">MemberStatus</a>.<a href="Member.scala.html#akka.cluster.MemberStatus.Down" title="akka.cluster.MemberStatus.Down.type">Down</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.quarantine" title="(address: akka.actor.Address, uid: Option[Int])Unit">quarantine</a><span class="delimiter">(</span><span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a>, <span title="(x: Int)Some[Int]">Some</span><span class="delimiter">(</span><span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.uniqueAddress" title="=&gt; akka.cluster.UniqueAddress">uniqueAddress</a>.<a href="Member.scala.html#akka.cluster;UniqueAddress.uid" title="=&gt; Int">uid</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.publishAddressTerminated" title="(address: akka.actor.Address)Unit">publishAddressTerminated</a><span class="delimiter">(</span><span title="akka.cluster.Member">m</span>.<a href="Member.scala.html#akka.cluster;Member.address" title="=&gt; akka.actor.Address">address</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="keyword">case</span> _: <a href="ClusterEvent.scala.html#akka.cluster.ClusterEvent;MemberEvent" title="akka.cluster.ClusterEvent.MemberEvent">MemberEvent</a> ⇒ <span class="comment">// not interesting</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * When a cluster node is added this class takes over the
+   * responsibility for watchees on that node already handled
+   * by super RemoteWatcher.
+   */</span>
+  <span class="keyword">def</span> <a title="(address: akka.actor.Address)Unit" id="akka.cluster;ClusterRemoteWatcher.takeOverResponsibility">takeOverResponsibility</a><span class="delimiter">(</span><a title="akka.actor.Address" id="akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.address">address</a>: <a href="../../akka-actor/actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.watching" title="=&gt; Set[(akka.actor.ActorRef, akka.actor.ActorRef)]">watching</a> <span title="(f: ((akka.actor.ActorRef, akka.actor.ActorRef)) =&gt; Unit)Unit">foreach</span> <a href="#akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.$anonfun.x0$1" title="Unit" class="delimiter">{</a>
+      <span class="keyword">case</span> <span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.$anonfun.watchee">watchee</a>, <a title="akka.actor.ActorRef" id="akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.$anonfun.watcher">watcher</a><span class="delimiter">)</span> ⇒ <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.$anonfun.watchee" title="akka.actor.ActorRef">watchee</a>.<a href="../../akka-actor/actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a>.<a href="../../akka-actor/actor/ActorPath.scala.html#akka.actor;ActorPath.address" title="=&gt; akka.actor.Address">address</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.address" title="akka.actor.Address">address</a><span class="delimiter">)</span>
+        <a href="../../akka-remote/remote/RemoteWatcher.scala.html#akka.remote;RemoteWatcher.unwatchRemote" title="(watchee: akka.actor.ActorRef, watcher: akka.actor.ActorRef)Unit">unwatchRemote</a><span class="delimiter">(</span><a href="#akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.$anonfun.watchee" title="akka.actor.ActorRef">watchee</a>, <a href="#akka.cluster;ClusterRemoteWatcher.takeOverResponsibility.$anonfun.watcher" title="akka.actor.ActorRef">watcher</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>akka-actor/dispatch/BatchingExecutor.scala</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+<span class="keyword">package</span> akka.dispatch
+
+<span class="keyword">import</span> java.util.concurrent.<span class="delimiter">{</span> Executor <span class="delimiter">}</span>
+<span class="keyword">import</span> scala.concurrent._
+<span class="keyword">import</span> scala.annotation.tailrec
+
+<span class="comment">/**
+ * All Batchables are automatically batched when submitted to a BatchingExecutor
+ */</span>
+<span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait Batchable extends Object with Runnable" id="akka.dispatch;Batchable">Batchable</a> <span class="keyword">extends</span> <span title="Runnable">Runnable</span> <span class="delimiter">{</span>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="akka.dispatch;Batchable.isBatchable">isBatchable</a>: <span title="Boolean">Boolean</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Mixin trait for an Executor
+ * which groups multiple nested `Runnable.run()` calls
+ * into a single Runnable passed to the original
+ * Executor. This can be a useful optimization
+ * because it bypasses the original context's task
+ * queue and keeps related (nested) code on a single
+ * thread which may improve CPU affinity. However,
+ * if tasks passed to the Executor are blocking
+ * or expensive, this optimization can prevent work-stealing
+ * and make performance worse. Also, some ExecutionContext
+ * may be fast enough natively that this optimization just
+ * adds overhead.
+ * The default ExecutionContext.global is already batching
+ * or fast enough not to benefit from it; while
+ * `fromExecutor` and `fromExecutorService` do NOT add
+ * this optimization since they don't know whether the underlying
+ * executor will benefit from it.
+ * A batching executor can create deadlocks if code does
+ * not use `scala.concurrent.blocking` when it should,
+ * because tasks created within other tasks will block
+ * on the outer task completing.
+ * This executor may run tasks in any order, including LIFO order.
+ * There are no ordering guarantees.
+ *
+ * WARNING: The underlying Executor's execute-method must not execute the submitted Runnable
+ * in the calling thread synchronously. It must enqueue/handoff the Runnable.
+ */</span>
+<span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait BatchingExecutor extends Object with java.util.concurrent.Executor" id="akka.dispatch;BatchingExecutor">BatchingExecutor</a> <span title="Unit" class="keyword">extends</span> <span title="java.util.concurrent.Executor">Executor</span> <span class="delimiter">{</span>
+
+  <span class="comment">// invariant: if &quot;_tasksLocal.get ne null&quot; then we are inside BatchingRunnable.run; if it is null, we are outside</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="ThreadLocal[List[Runnable]]" id="akka.dispatch;BatchingExecutor._tasksLocal">_tasksLocal</a> = <span title="ThreadLocal[List[Runnable]]" class="keyword">new</span> <span title="ThreadLocal[List[Runnable]]">ThreadLocal</span><span class="delimiter">[</span>List<span class="delimiter">[</span>Runnable<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">class</span> <a title="class Batch extends Object with Runnable with scala.concurrent.BlockContext" id="akka.dispatch;BatchingExecutor;Batch">Batch</a><a href="#akka.dispatch;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch" class="delimiter">(</a><span class="keyword">val</span> <a title="List[Runnable]" id="akka.dispatch;BatchingExecutor;Batch.initial">initial</a>: <span title="List[Runnable]">List</span><span class="delimiter">[</span>Runnable<span class="delimiter">]</span><span class="delimiter">)</span> <span class="keyword">extends</span> <span title="Runnable">Runnable</span> <span class="keyword">with</span> <span title="scala.concurrent.BlockContext">BlockContext</span> <span class="delimiter">{</span>
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="scala.concurrent.BlockContext" id="akka.dispatch;BatchingExecutor;Batch.parentBlockContext_=">parentBlockContext</a>: <span title="scala.concurrent.BlockContext">BlockContext</span> = _
+    <span class="comment">// this method runs in the delegate ExecutionContext's thread</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="akka.dispatch;BatchingExecutor;Batch.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <span title="(requirement: Boolean)Unit">require</span><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span> <span title="(x$1: AnyRef)Boolean">eq</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span>
+
+      <span class="keyword">val</span> <a title="scala.concurrent.BlockContext" id="akka.dispatch;BatchingExecutor;Batch.run.prevBlockContext">prevBlockContext</a> = <span title="scala.concurrent.BlockContext.type">BlockContext</span>.<span title="=&gt; scala.concurrent.BlockContext">current</span>
+      <span title="scala.concurrent.BlockContext.type">BlockContext</span>.<span title="(blockContext: scala.concurrent.BlockContext)(body: =&gt; Unit)Unit">withBlockContext</span><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch" class="keyword">this</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+          <a href="#akka.dispatch;BatchingExecutor;Batch.parentBlockContext_=" title="(x$1: scala.concurrent.BlockContext)Unit">parentBlockContext</a> = <a href="#akka.dispatch;BatchingExecutor;Batch.run.prevBlockContext" title="scala.concurrent.BlockContext">prevBlockContext</a>
+
+          @tailrec <span class="keyword">def</span> <a title="(batch: List[Runnable])Unit" id="akka.dispatch;BatchingExecutor;Batch.run.processBatch">processBatch</a><span class="delimiter">(</span><a title="List[Runnable]" id="akka.dispatch;BatchingExecutor;Batch.run.processBatch.batch">batch</a>: <span title="List[Runnable]">List</span><span class="delimiter">[</span>Runnable<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.dispatch;BatchingExecutor;Batch.run.processBatch.batch" title="List[Runnable]">batch</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+            <span class="keyword">case</span> <span title="scala.collection.immutable.Nil.type">Nil</span> ⇒ <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+            <span class="keyword">case</span> <a title="Runnable" id="akka.dispatch;BatchingExecutor;Batch.run.processBatch.head">head</a> :: <a title="List[Runnable]" id="akka.dispatch;BatchingExecutor;Batch.run.processBatch.tail">tail</a> ⇒
+              <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a> <span title="(x$1: List[Runnable])Unit">set</span> <a href="#akka.dispatch;BatchingExecutor;Batch.run.processBatch.tail" title="List[Runnable]">tail</a>
+              <span class="keyword">try</span> <span class="delimiter">{</span>
+                <a href="#akka.dispatch;BatchingExecutor;Batch.run.processBatch.head" title="Runnable">head</a>.<span title="()Unit">run</span><span class="delimiter">(</span><span class="delimiter">)</span>
+              <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+                <span class="keyword">case</span> <a title="Throwable" id="akka.dispatch;BatchingExecutor;Batch.run.processBatch.t">t</a>: <span title="Throwable">Throwable</span> ⇒
+                  <span class="comment">// if one task throws, move the</span>
+                  <span class="comment">// remaining tasks to another thread</span>
+                  <span class="comment">// so we can throw the exception</span>
+                  <span class="comment">// up to the invoking executor</span>
+                  <span class="keyword">val</span> <a title="List[Runnable]" id="akka.dispatch;BatchingExecutor;Batch.run.processBatch.remaining">remaining</a> = <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span>
+                  <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a> <span title="(x$1: List[Runnable])Unit">set</span> <span title="scala.collection.immutable.Nil.type">Nil</span>
+                  <a href="#akka.dispatch;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span><span title="BatchingExecutor.this.Batch" class="keyword">new</span> <a href="#akka.dispatch;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch">Batch</a><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor;Batch.run.processBatch.remaining" title="List[Runnable]">remaining</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="comment">//TODO what if this submission fails?</span>
+                  <span title="Nothing" class="keyword">throw</span> <a href="#akka.dispatch;BatchingExecutor;Batch.run.processBatch.t" title="Throwable">t</a> <span class="comment">// rethrow</span>
+              <span class="delimiter">}</span>
+              <a href="#akka.dispatch;BatchingExecutor;Batch.run.processBatch" title="(batch: List[Runnable])Unit">processBatch</a><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span><span class="delimiter">)</span> <span class="comment">// since head.run() can add entries, always do _tasksLocal.get here</span>
+          <span class="delimiter">}</span>
+
+          <a href="#akka.dispatch;BatchingExecutor;Batch.run.processBatch" title="(batch: List[Runnable])Unit">processBatch</a><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor;Batch.initial" title="=&gt; List[Runnable]">initial</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+          <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()Unit">remove</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <a href="#akka.dispatch;BatchingExecutor;Batch.parentBlockContext_=" title="(x$1: scala.concurrent.BlockContext)Unit">parentBlockContext</a> = <span title="Null(null)" class="keyword">null</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="[T](thunk: =&gt; T)(implicit permission: scala.concurrent.CanAwait)T" id="akka.dispatch;BatchingExecutor;Batch.blockOn">blockOn</a><span class="delimiter">[</span><a title="" id="akka.dispatch;BatchingExecutor;Batch.blockOn;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="akka.dispatch;BatchingExecutor;Batch.blockOn.thunk">thunk</a>: ⇒ T<span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="scala.concurrent.CanAwait" id="akka.dispatch;BatchingExecutor;Batch.blockOn.permission">permission</a>: <span title="scala.concurrent.CanAwait">CanAwait</span><span class="delimiter">)</span>: <a href="#akka.dispatch;BatchingExecutor;Batch.blockOn;T" title="T">T</a> = <span class="delimiter">{</span>
+      <span class="comment">// if we know there will be blocking, we don't want to keep tasks queued up because it could deadlock.</span>
+      <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="List[Runnable]" id="akka.dispatch;BatchingExecutor;Batch.blockOn.tasks">tasks</a> = <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span>
+        <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a> <span title="(x$1: List[Runnable])Unit">set</span> <span title="scala.collection.immutable.Nil.type">Nil</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor;Batch.blockOn.tasks" title="List[Runnable]">tasks</a> <span title="(x$1: AnyRef)Boolean">ne</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#akka.dispatch;BatchingExecutor;Batch.blockOn.tasks" title="List[Runnable]">tasks</a>.<span title="=&gt; Boolean">nonEmpty</span><span class="delimiter">)</span>
+          <a href="#akka.dispatch;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span><span title="BatchingExecutor.this.Batch" class="keyword">new</span> <a href="#akka.dispatch;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch">Batch</a><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor;Batch.blockOn.tasks" title="List[Runnable]">tasks</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      <span class="comment">// now delegate the blocking to the previous BC</span>
+      <span title="(requirement: Boolean)Unit">require</span><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor;Batch.parentBlockContext_=" title="=&gt; scala.concurrent.BlockContext">parentBlockContext</a> <span title="(x$1: AnyRef)Boolean">ne</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span>
+      <a href="#akka.dispatch;BatchingExecutor;Batch.parentBlockContext_=" title="=&gt; scala.concurrent.BlockContext">parentBlockContext</a>.<span title="(thunk: =&gt; T)(implicit permission: scala.concurrent.CanAwait)T">blockOn</span><a href="#akka.dispatch;BatchingExecutor;Batch.blockOn.permission" title="scala.concurrent.CanAwait" class="delimiter">(</a><a href="#akka.dispatch;BatchingExecutor;Batch.blockOn.thunk" title="=&gt; T">thunk</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(r: Runnable)Unit" id="akka.dispatch;BatchingExecutor.unbatchedExecute">unbatchedExecute</a><span class="delimiter">(</span><a title="Runnable" id="akka.dispatch;BatchingExecutor.unbatchedExecute.r">r</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(runnable: Runnable)Unit" id="akka.dispatch;BatchingExecutor.execute">execute</a><span class="delimiter">(</span><a title="Runnable" id="akka.dispatch;BatchingExecutor.execute.runnable">runnable</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor.batchable" title="(runnable: Runnable)Boolean">batchable</a><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor.execute.runnable" title="Runnable">runnable</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="comment">// If we can batch the runnable</span>
+      <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <span title="Null(null)" class="keyword">null</span> ⇒ <a href="#akka.dispatch;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span><span title="BatchingExecutor.this.Batch" class="keyword">new</span> <a href="#akka.dispatch;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch">Batch</a><span class="delimiter">(</span><span title="(xs: Runnable*)List[Runnable]">List</span><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor.execute.runnable" title="Runnable">runnable</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="comment">// If we aren't in batching mode yet, enqueue batch</span>
+        <span class="keyword">case</span> <a title="List[Runnable]" id="akka.dispatch;BatchingExecutor.execute.some">some</a> ⇒ <a href="#akka.dispatch;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="(x$1: List[Runnable])Unit">set</span><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor.execute.runnable" title="Runnable">runnable</a> <a href="#akka.dispatch;BatchingExecutor.execute.x$1" title="(x: Runnable)List[Runnable]">::</a> <a href="#akka.dispatch;BatchingExecutor.execute.some" title="List[Runnable]">some</a><span class="delimiter">)</span> <span class="comment">// If we are already in batching mode, add to batch</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span> <span class="keyword">else</span> <a href="#akka.dispatch;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span><a href="#akka.dispatch;BatchingExecutor.execute.runnable" title="Runnable">runnable</a><span class="delimiter">)</span> <span class="comment">// If not batchable, just delegate to underlying</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Override this to define which runnables will be batched. */</span>
+  <span class="keyword">def</span> <a title="(runnable: Runnable)Boolean" id="akka.dispatch;BatchingExecutor.batchable">batchable</a><span class="delimiter">(</span><a title="Runnable" id="akka.dispatch;BatchingExecutor.batchable.runnable">runnable</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <a href="#akka.dispatch;BatchingExecutor.batchable.runnable" title="Runnable">runnable</a> <span title="Boolean" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> <a title="akka.dispatch.Batchable" id="akka.dispatch;BatchingExecutor.batchable.b">b</a>: <a href="#akka.dispatch;Batchable" title="akka.dispatch.Batchable">Batchable</a>                           ⇒ <a href="#akka.dispatch;BatchingExecutor.batchable.b" title="akka.dispatch.Batchable">b</a>.<a href="#akka.dispatch;Batchable.isBatchable" title="=&gt; Boolean">isBatchable</a>
+    <span class="keyword">case</span> _: scala.concurrent.<span title="scala.concurrent.OnCompleteRunnable">OnCompleteRunnable</span> ⇒ <span title="Boolean(true)" class="keyword">true</span>
+    <span class="keyword">case</span> _                                      ⇒ <span title="Boolean(false)" class="keyword">false</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
