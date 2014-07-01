@@ -1,0 +1,733 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>persistence-experimental/akka/persistence/Eventsourced.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+<span class="keyword">package</span> akka.persistence
+
+<span class="keyword">import</span> java.lang.<span class="delimiter">{</span> Iterable ⇒ JIterable <span class="delimiter">}</span>
+
+<span class="keyword">import</span> akka.actor.<span class="delimiter">{</span> AbstractActor, UntypedActor <span class="delimiter">}</span>
+<span class="keyword">import</span> akka.japi.<span class="delimiter">{</span> Procedure, Util <span class="delimiter">}</span>
+<span class="keyword">import</span> akka.persistence.<a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol" title="akka.persistence.JournalProtocol.type">JournalProtocol</a>._
+
+<span class="keyword">import</span> scala.collection.immutable
+
+<span class="comment">/**
+ * INTERNAL API.
+ *
+ * Event sourcing mixin for a [[Processor]].
+ */</span>
+<span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait Eventsourced extends AnyRef with akka.persistence.ProcessorImpl" id="akka.persistence;Eventsourced">Eventsourced</a> <span title="Unit" class="keyword">extends</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl" title="akka.persistence.ProcessorImpl">ProcessorImpl</a> <span class="delimiter">{</span>
+  <span class="comment">// TODO consolidate these traits as PersistentActor #15230</span>
+
+  <span class="comment">/**
+   * Processor recovery state. Waits for recovery completion and then changes to
+   * `processingCommands`
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Eventsourced.this.State" id="akka.persistence;Eventsourced.recovering">recovering</a>: <a href="Recovery.scala.html#akka.persistence;Recovery;State" title="Eventsourced.this.State">State</a> = <a href="#akka.persistence;Eventsourced.recovering;$anon" title="Eventsourced.this.State{}" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Eventsourced.this.State" id="akka.persistence;Eventsourced.recovering;$anon">State</a> <span class="delimiter">{</span>
+    <span class="comment">// cache the recoveryBehavior since it's a def for binary compatibility in 2.3.x</span>
+    <span class="keyword">private</span> <span class="keyword">val</span> <a title="Eventsourced.this.Receive" id="akka.persistence;Eventsourced.recovering;$anon._recoveryBehavior">_recoveryBehavior</a>: <span title="Eventsourced.this.Receive">Receive</span> = <a href="#akka.persistence;Eventsourced.recoveryBehavior" title="=&gt; Eventsourced.this.Receive">recoveryBehavior</a>
+
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Eventsourced.recovering;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;recovering&quot;)" class="string">&quot;recovering&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Eventsourced.this.Receive, message: Any)Unit" id="akka.persistence;Eventsourced.recovering;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Eventsourced.this.Receive" id="akka.persistence;Eventsourced.recovering;$anon.aroundReceive.receive">receive</a>: <span title="Eventsourced.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Eventsourced.recovering;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="comment">// Since we are recovering we can ignore the receive behavior from the stack</span>
+      <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.recovering;$anon._recoveryBehavior" title="=&gt; Eventsourced.this.Receive">_recoveryBehavior</a>, <a href="#akka.persistence;Eventsourced.recovering;$anon.aroundReceive.message" title="Any">message</a><span class="delimiter">)</span>
+      <a href="#akka.persistence;Eventsourced.recovering;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> _: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;ReadHighestSequenceNrSuccess" title="akka.persistence.JournalProtocol.ReadHighestSequenceNrSuccess">ReadHighestSequenceNrSuccess</a> | _: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;ReadHighestSequenceNrFailure" title="akka.persistence.JournalProtocol.ReadHighestSequenceNrFailure">ReadHighestSequenceNrFailure</a> ⇒
+          <a href="#akka.persistence;Eventsourced.currentState_=" title="(x$1: Eventsourced.this.State)Unit">currentState</a> = <a href="#akka.persistence;Eventsourced.processingCommands" title="=&gt; Eventsourced.this.State">processingCommands</a>
+        <span class="keyword">case</span> _ ⇒
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Command processing state. If event persistence is pending after processing a
+   * command, event persistence is triggered and state changes to `persistingEvents`.
+   *
+   * There's no need to loop commands though the journal any more i.e. they can now be
+   * directly offered as `LoopSuccess` to the state machine implemented by `Processor`.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Eventsourced.this.State" id="akka.persistence;Eventsourced.processingCommands">processingCommands</a>: <a href="Recovery.scala.html#akka.persistence;Recovery;State" title="Eventsourced.this.State">State</a> = <a href="#akka.persistence;Eventsourced.processingCommands;$anon" title="Eventsourced.this.State{}" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Eventsourced.this.State" id="akka.persistence;Eventsourced.processingCommands;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Eventsourced.processingCommands;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;processing commands&quot;)" class="string">&quot;processing commands&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Eventsourced.this.Receive, message: Any)Unit" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Eventsourced.this.Receive" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.receive">receive</a>: <span title="Eventsourced.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> _: <a href="Persistent.scala.html#akka.persistence;ConfirmablePersistent" title="akka.persistence.ConfirmablePersistent">ConfirmablePersistent</a> ⇒
+        <a href="#akka.persistence;Eventsourced.processingCommands;$anon.doAroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">doAroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.message" title="Any">message</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> PersistentBatch<span class="delimiter">(</span><a title="scala.collection.immutable.Seq[akka.persistence.Resequenceable]" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.b">b</a><span class="delimiter">)</span> ⇒
+        <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)UnsupportedOperationException" class="keyword">new</span> <span title="UnsupportedOperationException">UnsupportedOperationException</span><span class="delimiter">(</span><span title="String(&quot;Persistent command batches not supported&quot;)" class="string">&quot;Persistent command batches not supported&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> _: <a href="Persistent.scala.html#akka.persistence;PersistentRepr" title="akka.persistence.PersistentRepr">PersistentRepr</a> ⇒
+        <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)UnsupportedOperationException" class="keyword">new</span> <span title="UnsupportedOperationException">UnsupportedOperationException</span><span class="delimiter">(</span><span title="String(&quot;Persistent commands not supported&quot;)" class="string">&quot;Persistent commands not supported&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> WriteMessageSuccess<span class="delimiter">(</span><a title="akka.persistence.PersistentRepr" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.p">p</a>, <span title="Int">id</span><span class="delimiter">)</span> ⇒
+        <span class="comment">// instanceId mismatch can happen for persistAsync and defer in case of actor restart</span>
+        <span class="comment">// while message is in flight, in that case we ignore the call to the handler</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="Int">id</span> <span title="(x: Int)Boolean">==</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="Recovery.scala.html#akka.persistence;Recovery.withCurrentPersistent" title="(persistent: akka.persistence.Persistent)(body: akka.persistence.Persistent =&gt; Unit)Unit">withCurrentPersistent</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.p" title="akka.persistence.PersistentRepr">p</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.persistence.Persistent" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.$anonfun.p">p</a> ⇒ <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a>.<span title="()Eventsourced.this.PendingHandlerInvocation">peek</span><span class="delimiter">(</span><span class="delimiter">)</span>.<a href="#akka.persistence;Eventsourced;PendingHandlerInvocation.handler" title="(v1: Any)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.$anonfun.p" title="akka.persistence.Persistent">p</a>.<a href="Persistent.scala.html#akka.persistence;Persistent.payload" title="=&gt; Any">payload</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <a href="#akka.persistence;Eventsourced.processingCommands;$anon.onWriteComplete" title="()Unit">onWriteComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="keyword">case</span> LoopMessageSuccess<span class="delimiter">(</span><a title="Any" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.l">l</a>, <span title="Int">id</span><span class="delimiter">)</span> ⇒
+        <span class="comment">// instanceId mismatch can happen for persistAsync and defer in case of actor restart</span>
+        <span class="comment">// while message is in flight, in that case we ignore the call to the handler</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="Int">id</span> <span title="(x: Int)Boolean">==</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a>.<span title="()Eventsourced.this.PendingHandlerInvocation">peek</span><span class="delimiter">(</span><span class="delimiter">)</span>.<a href="#akka.persistence;Eventsourced;PendingHandlerInvocation.handler" title="(v1: Any)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.l" title="Any">l</a><span class="delimiter">)</span>
+          <a href="#akka.persistence;Eventsourced.processingCommands;$anon.onWriteComplete" title="()Unit">onWriteComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="keyword">case</span> <a title="akka.persistence.JournalProtocol.WriteMessagesSuccessful.type" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.s">s</a> @ <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol.WriteMessagesSuccessful" title="akka.persistence.JournalProtocol.WriteMessagesSuccessful.type">WriteMessagesSuccessful</a> ⇒ <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.s" title="akka.persistence.JournalProtocol.WriteMessagesSuccessful.type">s</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.persistence.JournalProtocol.WriteMessagesFailed" id="akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.f">f</a>: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;WriteMessagesFailed" title="akka.persistence.JournalProtocol.WriteMessagesFailed">WriteMessagesFailed</a>      ⇒ <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.f" title="akka.persistence.JournalProtocol.WriteMessagesFailed">f</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> _ ⇒
+        <a href="#akka.persistence;Eventsourced.processingCommands;$anon.doAroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">doAroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.processingCommands;$anon.aroundReceive.message" title="Any">message</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="(receive: Eventsourced.this.Receive, message: Any)Unit" id="akka.persistence;Eventsourced.processingCommands;$anon.doAroundReceive">doAroundReceive</a><span class="delimiter">(</span><a title="Eventsourced.this.Receive" id="akka.persistence;Eventsourced.processingCommands;$anon.doAroundReceive.receive">receive</a>: <span title="Eventsourced.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Eventsourced.processingCommands;$anon.doAroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.doAroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;LoopMessageSuccess" title="(message: Any, actorInstanceId: Int)akka.persistence.JournalProtocol.LoopMessageSuccess">LoopMessageSuccess</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.processingCommands;$anon.doAroundReceive.message" title="Any">message</a>, <a href="Processor.scala.html#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.pendingStashingPersistInvocations_=" title="=&gt; Long">pendingStashingPersistInvocations</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.persistence;Eventsourced.currentState_=" title="(x$1: Eventsourced.this.State)Unit">currentState</a> = <a href="#akka.persistence;Eventsourced.persistingEvents" title="=&gt; Eventsourced.this.State">persistingEvents</a>
+      <span class="delimiter">}</span>
+
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="=&gt; List[akka.persistence.Resequenceable]">resequenceableEventBatch</a>.<span title="=&gt; Boolean">nonEmpty</span><span class="delimiter">)</span> <a href="#akka.persistence;Eventsourced.flushBatch" title="()Unit">flushBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">else</span> <a href="#akka.persistence;Eventsourced.processorStash" title="=&gt; akka.actor.StashSupport">processorStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstash" title="()Unit">unstash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;Eventsourced.processingCommands;$anon.onWriteComplete">onWriteComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a>.<span title="()Eventsourced.this.PendingHandlerInvocation">pop</span><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Event persisting state. Remains until pending events are persisted and then changes
+   * state to `processingCommands`. Only events to be persisted are processed. All other
+   * messages are stashed internally.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Eventsourced.this.State" id="akka.persistence;Eventsourced.persistingEvents">persistingEvents</a>: <a href="Recovery.scala.html#akka.persistence;Recovery;State" title="Eventsourced.this.State">State</a> = <a href="#akka.persistence;Eventsourced.persistingEvents;$anon" title="Eventsourced.this.State{}" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Eventsourced.this.State" id="akka.persistence;Eventsourced.persistingEvents;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Eventsourced.persistingEvents;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;persisting events&quot;)" class="string">&quot;persisting events&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Eventsourced.this.Receive, message: Any)Unit" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Eventsourced.this.Receive" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.receive">receive</a>: <span title="Eventsourced.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> _: <a href="Persistent.scala.html#akka.persistence;ConfirmablePersistent" title="akka.persistence.ConfirmablePersistent">ConfirmablePersistent</a> ⇒
+        <a href="#akka.persistence;Eventsourced.processorStash" title="=&gt; akka.actor.StashSupport">processorStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> PersistentBatch<span class="delimiter">(</span><a title="scala.collection.immutable.Seq[akka.persistence.Resequenceable]" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.b">b</a><span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.b" title="scala.collection.immutable.Seq[akka.persistence.Resequenceable]">b</a> <span title="(f: akka.persistence.Resequenceable =&gt; Unit)Unit">foreach</span> <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.$anonfun.x0$1" title="Unit" class="delimiter">{</a>
+          <span class="keyword">case</span> <span title="akka.persistence.PersistentRepr">p</span>: <a href="Persistent.scala.html#akka.persistence;PersistentRepr" title="akka.persistence.PersistentRepr">PersistentRepr</a> ⇒ <a href="Processor.scala.html#akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede)" title="(sequenceNr: Long, permanent: Boolean)Unit">deleteMessage</a><span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span>.<a href="Persistent.scala.html#akka.persistence;PersistentId.sequenceNr" title="=&gt; Long">sequenceNr</a>, permanent = <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+          <span class="keyword">case</span> <a title="akka.persistence.Resequenceable" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.$anonfun.r">r</a>                 ⇒ <span class="comment">// ignore, nothing to delete (was not a persistent message)</span>
+        <span class="delimiter">}</span>
+        <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)UnsupportedOperationException" class="keyword">new</span> <span title="UnsupportedOperationException">UnsupportedOperationException</span><span class="delimiter">(</span><span title="String(&quot;Persistent command batches not supported&quot;)" class="string">&quot;Persistent command batches not supported&quot;</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <span title="akka.persistence.PersistentRepr">p</span>: <a href="Persistent.scala.html#akka.persistence;PersistentRepr" title="akka.persistence.PersistentRepr">PersistentRepr</a> ⇒
+        <a href="Processor.scala.html#akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede)" title="(sequenceNr: Long, permanent: Boolean)Unit">deleteMessage</a><span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span>.<a href="Persistent.scala.html#akka.persistence;PersistentId.sequenceNr" title="=&gt; Long">sequenceNr</a>, permanent = <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+        <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)UnsupportedOperationException" class="keyword">new</span> <span title="UnsupportedOperationException">UnsupportedOperationException</span><span class="delimiter">(</span><span title="String(&quot;Persistent commands not supported&quot;)" class="string">&quot;Persistent commands not supported&quot;</span><span class="delimiter">)</span>
+
+      <span class="keyword">case</span> WriteMessageSuccess<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span>, <span title="Int">id</span><span class="delimiter">)</span> ⇒
+        <span class="comment">// instanceId mismatch can happen for persistAsync and defer in case of actor restart</span>
+        <span class="comment">// while message is in flight, in that case we ignore the call to the handler</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="Int">id</span> <span title="(x: Int)Boolean">==</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="Recovery.scala.html#akka.persistence;Recovery.withCurrentPersistent" title="(persistent: akka.persistence.Persistent)(body: akka.persistence.Persistent =&gt; Unit)Unit">withCurrentPersistent</a><span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span><span class="delimiter">)</span><span class="delimiter">(</span><span title="akka.persistence.Persistent">p</span> ⇒ <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a>.<span title="()Eventsourced.this.PendingHandlerInvocation">peek</span><span class="delimiter">(</span><span class="delimiter">)</span>.<a href="#akka.persistence;Eventsourced;PendingHandlerInvocation.handler" title="(v1: Any)Unit">handler</a><span class="delimiter">(</span><span title="akka.persistence.Persistent">p</span>.<a href="Persistent.scala.html#akka.persistence;Persistent.payload" title="=&gt; Any">payload</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.onWriteComplete" title="()Unit">onWriteComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+
+      <span class="keyword">case</span> <a title="akka.persistence.JournalProtocol.WriteMessageFailure" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.e">e</a> @ WriteMessageFailure<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span>, _, <span title="Int">id</span><span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.message" title="Any">message</a><span class="delimiter">)</span> <span class="comment">// stops actor by default</span>
+        <span class="comment">// instanceId mismatch can happen for persistAsync and defer in case of actor restart</span>
+        <span class="comment">// while message is in flight, in that case the handler has already been discarded</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="Int">id</span> <span title="(x: Int)Boolean">==</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span>
+          <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.onWriteComplete" title="()Unit">onWriteComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> LoopMessageSuccess<span class="delimiter">(</span><a title="Any" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.l">l</a>, <span title="Int">id</span><span class="delimiter">)</span> ⇒
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="Int">id</span> <span title="(x: Int)Boolean">==</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a>.<span title="()Eventsourced.this.PendingHandlerInvocation">peek</span><span class="delimiter">(</span><span class="delimiter">)</span>.<a href="#akka.persistence;Eventsourced;PendingHandlerInvocation.handler" title="(v1: Any)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.l" title="Any">l</a><span class="delimiter">)</span>
+          <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.onWriteComplete" title="()Unit">onWriteComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="keyword">case</span> <a title="akka.persistence.JournalProtocol.WriteMessagesSuccessful.type" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.s">s</a> @ <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol.WriteMessagesSuccessful" title="akka.persistence.JournalProtocol.WriteMessagesSuccessful.type">WriteMessagesSuccessful</a> ⇒ <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.s" title="akka.persistence.JournalProtocol.WriteMessagesSuccessful.type">s</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.persistence.JournalProtocol.WriteMessagesFailed" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.f">f</a>: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;WriteMessagesFailed" title="akka.persistence.JournalProtocol.WriteMessagesFailed">WriteMessagesFailed</a>      ⇒ <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.f" title="akka.persistence.JournalProtocol.WriteMessagesFailed">f</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="Any" id="akka.persistence;Eventsourced.persistingEvents;$anon.aroundReceive.other">other</a>                       ⇒ <a href="#akka.persistence;Eventsourced.processorStash" title="=&gt; akka.actor.StashSupport">processorStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;Eventsourced.persistingEvents;$anon.onWriteComplete">onWriteComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a>.<span title="()Eventsourced.this.PendingHandlerInvocation">pop</span><span class="delimiter">(</span><span class="delimiter">)</span> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> _: <a href="#akka.persistence;Eventsourced.StashingHandlerInvocation.readResolve" title="Eventsourced.this.StashingHandlerInvocation">StashingHandlerInvocation</a> ⇒
+          <span class="comment">// enables an early return to `processingCommands`, because if this counter hits `0`,</span>
+          <span class="comment">// we know the remaining pendingInvocations are all `persistAsync` created, which</span>
+          <span class="comment">// means we can go back to processing commands also - and these callbacks will be called as soon as possible</span>
+          <a href="#akka.persistence;Eventsourced.pendingStashingPersistInvocations_=" title="(x$1: Long)Unit">pendingStashingPersistInvocations</a> <span title="(x: Int)Long">-=</span> <span title="Int(1)" class="int">1</span>
+        <span class="keyword">case</span> _ ⇒ <span class="comment">// do nothing</span>
+      <span class="delimiter">}</span>
+
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.pendingStashingPersistInvocations_=" title="=&gt; Long">pendingStashingPersistInvocations</a> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.persistence;Eventsourced.currentState_=" title="(x$1: Eventsourced.this.State)Unit">currentState</a> = <a href="#akka.persistence;Eventsourced.processingCommands" title="=&gt; Eventsourced.this.State">processingCommands</a>
+        <a href="#akka.persistence;Eventsourced.processorStash" title="=&gt; akka.actor.StashSupport">processorStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstash" title="()Unit">unstash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * This is a def and not a val because of binary compatibility in 2.3.x.
+   * It is cached where it is used.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="=&gt; Eventsourced.this.Receive" id="akka.persistence;Eventsourced.recoveryBehavior">recoveryBehavior</a>: <span title="Eventsourced.this.Receive">Receive</span> = <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    <span class="keyword">case</span> <a href="Persistent.scala.html#akka.persistence.Persistent.unapply" title="(persistent: akka.persistence.Persistent)Option[(Any, Long)]">Persistent</a><span class="delimiter">(</span><a title="Any" id="akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.payload">payload</a>, _<span class="delimiter">)</span> <span class="keyword">if</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl.recoveryRunning" title="=&gt; Boolean">recoveryRunning</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#akka.persistence;Eventsourced.receiveRecover" title="=&gt; Eventsourced.this.Receive">receiveRecover</a>.<span title="(x: Any)Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.payload" title="Any">payload</a><span class="delimiter">)</span> ⇒
+      <a href="#akka.persistence;Eventsourced.receiveRecover" title="(v1: Any)Unit">receiveRecover</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.payload" title="Any">payload</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a title="akka.persistence.SnapshotOffer" id="akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.s">s</a>: <a href="Snapshot.scala.html#akka.persistence;SnapshotOffer" title="akka.persistence.SnapshotOffer">SnapshotOffer</a> <span class="keyword">if</span> <a href="#akka.persistence;Eventsourced.receiveRecover" title="=&gt; Eventsourced.this.Receive">receiveRecover</a>.<span title="(x: Any)Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.s" title="akka.persistence.SnapshotOffer">s</a><span class="delimiter">)</span> ⇒
+      <a href="#akka.persistence;Eventsourced.receiveRecover" title="(v1: Any)Unit">receiveRecover</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.s" title="akka.persistence.SnapshotOffer">s</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a title="akka.persistence.RecoveryFailure" id="akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.f">f</a>: <a href="Processor.scala.html#akka.persistence;RecoveryFailure" title="akka.persistence.RecoveryFailure">RecoveryFailure</a> <span class="keyword">if</span> <a href="#akka.persistence;Eventsourced.receiveRecover" title="=&gt; Eventsourced.this.Receive">receiveRecover</a>.<span title="(x: Any)Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.f" title="akka.persistence.RecoveryFailure">f</a><span class="delimiter">)</span> ⇒
+      <a href="#akka.persistence;Eventsourced.receiveRecover" title="(v1: Any)Unit">receiveRecover</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.persistence;Eventsourced.recoveryBehavior;$anonfun.isDefinedAt.f" title="akka.persistence.RecoveryFailure">f</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a href="Processor.scala.html#akka.persistence.RecoveryCompleted" title="akka.persistence.RecoveryCompleted.type">RecoveryCompleted</a> <span class="keyword">if</span> <a href="#akka.persistence;Eventsourced.receiveRecover" title="=&gt; Eventsourced.this.Receive">receiveRecover</a>.<span title="(x: Any)Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="Processor.scala.html#akka.persistence.RecoveryCompleted" title="akka.persistence.RecoveryCompleted.type">RecoveryCompleted</a><span class="delimiter">)</span> ⇒
+      <a href="#akka.persistence;Eventsourced.receiveRecover" title="(v1: Any)Unit">receiveRecover</a><span title="Boolean(true)" class="delimiter">(</span><a href="Processor.scala.html#akka.persistence.RecoveryCompleted" title="akka.persistence.RecoveryCompleted.type">RecoveryCompleted</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">sealed</span> <span class="keyword">trait</span> <a title="trait PendingHandlerInvocation extends AnyRef" id="akka.persistence;Eventsourced;PendingHandlerInvocation">PendingHandlerInvocation</a> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="=&gt; Any" id="akka.persistence;Eventsourced;PendingHandlerInvocation.evt">evt</a>: <span title="Any">Any</span>
+    <span class="keyword">def</span> <a title="=&gt; Any =&gt; Unit" id="akka.persistence;Eventsourced;PendingHandlerInvocation.handler">handler</a>: Any ⇒ Unit
+  <span class="delimiter">}</span>
+  <span class="comment">/** forces processor to stash incoming commands untill all these invocations are handled */</span>
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">case class</span> <a title="class StashingHandlerInvocation extends AnyRef with Eventsourced.this.PendingHandlerInvocation with Product with Serializable" id="akka.persistence;Eventsourced.StashingHandlerInvocation.readResolve">StashingHandlerInvocation</a><a href="#akka.persistence;Eventsourced.StashingHandlerInvocation.readResolve" title="Product" class="delimiter">(</a><a title="Any" id="akka.persistence;Eventsourced;StashingHandlerInvocation.evt">evt</a>: <span title="Any">Any</span>, <a title="Any =&gt; Unit" id="akka.persistence;Eventsourced;StashingHandlerInvocation.handler">handler</a>: Any ⇒ Unit<span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#akka.persistence;Eventsourced;PendingHandlerInvocation" title="Eventsourced.this.PendingHandlerInvocation">PendingHandlerInvocation</a>
+  <span class="comment">/** does not force the processor to stash commands; Originates from either `persistAsync` or `defer` calls */</span>
+  <span class="keyword">private</span> <span class="keyword">final</span> <span class="keyword">case class</span> <a title="class AsyncHandlerInvocation extends AnyRef with Eventsourced.this.PendingHandlerInvocation with Product with Serializable" id="akka.persistence;Eventsourced.AsyncHandlerInvocation.readResolve">AsyncHandlerInvocation</a><a href="#akka.persistence;Eventsourced.AsyncHandlerInvocation.readResolve" title="Product" class="delimiter">(</a><a title="Any" id="akka.persistence;Eventsourced;AsyncHandlerInvocation.evt">evt</a>: <span title="Any">Any</span>, <a title="Any =&gt; Unit" id="akka.persistence;Eventsourced;AsyncHandlerInvocation.handler">handler</a>: Any ⇒ Unit<span class="delimiter">)</span> <span class="keyword">extends</span> <a href="#akka.persistence;Eventsourced;PendingHandlerInvocation" title="Eventsourced.this.PendingHandlerInvocation">PendingHandlerInvocation</a>
+
+  <span class="comment">/** Used instead of iterating `pendingInvocations` in order to check if safe to revert to processing commands */</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Long" id="akka.persistence;Eventsourced.pendingStashingPersistInvocations_=">pendingStashingPersistInvocations</a>: <span title="Long">Long</span> = <span title="Long(0L)" class="int">0</span>
+  <span class="comment">/** Holds user-supplied callbacks for persist/persistAsync calls */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]" id="akka.persistence;Eventsourced.pendingInvocations">pendingInvocations</a> = <span title="java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]" class="keyword">new</span> java.util.<span title="java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">LinkedList</span><span class="delimiter">[</span>PendingHandlerInvocation<span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span> <span class="comment">// we only append / isEmpty / get(0) on it</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="List[akka.persistence.Resequenceable]" id="akka.persistence;Eventsourced.resequenceableEventBatch_=">resequenceableEventBatch</a>: <span title="List[akka.persistence.Resequenceable]">List</span><span class="delimiter">[</span>Resequenceable<span class="delimiter">]</span> = <span title="scala.collection.immutable.Nil.type">Nil</span>
+  <span class="comment">// When using only `persistAsync` and `defer` max throughput is increased by using the</span>
+  <span class="comment">// batching implemented in `Processor`, but when using `persist` we want to use the atomic</span>
+  <span class="comment">// PeristentBatch for the emitted events. This implementation can be improved when</span>
+  <span class="comment">// Processor and Eventsourced are consolidated into one class </span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Boolean" id="akka.persistence;Eventsourced.useProcessorBatching_=">useProcessorBatching</a>: <span title="Boolean">Boolean</span> = <span title="Boolean(true)" class="keyword">true</span>
+
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Eventsourced.this.State" id="akka.persistence;Eventsourced.currentState_=">currentState</a>: <a href="Recovery.scala.html#akka.persistence;Recovery;State" title="Eventsourced.this.State">State</a> = <a href="#akka.persistence;Eventsourced.recovering" title="=&gt; Eventsourced.this.State">recovering</a>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="akka.actor.StashSupport" id="akka.persistence;Eventsourced.processorStash">processorStash</a> = <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashFactory.createStash" title="()(implicit ctx: akka.actor.ActorContext, implicit ref: akka.actor.ActorRef)akka.actor.StashSupport">createStash</a><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext" class="delimiter">(</a><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;Eventsourced.flushBatch">flushBatch</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.useProcessorBatching_=" title="=&gt; Boolean">useProcessorBatching</a><span class="delimiter">)</span>
+      <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="=&gt; List[akka.persistence.Resequenceable]">resequenceableEventBatch</a>.<span title="=&gt; List[akka.persistence.Resequenceable]">reverse</span> <span title="(f: akka.persistence.Resequenceable =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span> <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.receive" title="=&gt; akka.actor.Actor.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.flushBatch.$anonfun.x$1" title="akka.persistence.Resequenceable">_</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+    <span class="keyword">else</span>
+      <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a>.<span class="keyword">super</span>.<a href="Recovery.scala.html#akka.persistence;Recovery.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.receive" title="=&gt; akka.actor.Actor.Receive">receive</a>, <a href="Persistent.scala.html#akka.persistence;PersistentBatch" title="(batch: scala.collection.immutable.Seq[akka.persistence.Resequenceable])akka.persistence.PersistentBatch">PersistentBatch</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="=&gt; List[akka.persistence.Resequenceable]">resequenceableEventBatch</a>.<span title="=&gt; List[akka.persistence.Resequenceable]">reverse</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="(x$1: List[akka.persistence.Resequenceable])Unit">resequenceableEventBatch</a> = <span title="scala.collection.immutable.Nil.type">Nil</span>
+    <a href="#akka.persistence;Eventsourced.useProcessorBatching_=" title="(x$1: Boolean)Unit">useProcessorBatching</a> = <span title="Boolean(true)" class="keyword">true</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Asynchronously persists `event`. On successful persistence, `handler` is called with the
+   * persisted event. It is guaranteed that no new commands will be received by a persistent actor
+   * between a call to `persist` and the execution of its `handler`. This also holds for
+   * multiple `persist` calls per received command. Internally, this is achieved by stashing new
+   * commands and unstashing them when the `event` has been persisted and handled. The stash used
+   * for that is an internal stash which doesn't interfere with the inherited user stash.
+   *
+   * An event `handler` may close over persistent actor state and modify it. The `sender` of a persisted
+   * event is the sender of the corresponding command. This means that one can reply to a command
+   * sender within an event `handler`.
+   *
+   * Within an event handler, applications usually update persistent actor state using persisted event
+   * data, notify listeners and reply to command senders.
+   *
+   * If persistence of an event fails, the persistent actor will be stopped. This can be customized by
+   * handling [[PersistenceFailure]] in [[receiveCommand]].
+   *
+   * @param event event to be persisted
+   * @param handler handler for each persisted `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A)(handler: A =&gt; Unit)Unit" id="akka.persistence;Eventsourced.persist(aa368cf4a0)">persist</a><span class="delimiter">[</span><a title="" id="akka.persistence;Eventsourced.persist(aa368cf4a0);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;Eventsourced.persist(aa368cf4a0).event">event</a>: <a href="#akka.persistence;Eventsourced.persist(aa368cf4a0);A" title="A">A</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; Unit" id="akka.persistence;Eventsourced.persist(aa368cf4a0).handler">handler</a>: A ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;Eventsourced.pendingStashingPersistInvocations_=" title="(x$1: Long)Unit">pendingStashingPersistInvocations</a> <span title="(x: Int)Long">+=</span> <span title="Int(1)" class="int">1</span>
+    <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a> <span title="(x$1: Eventsourced.this.PendingHandlerInvocation)Unit">addLast</span> <a href="#akka.persistence;Eventsourced.StashingHandlerInvocation.readResolve" title="(evt: Any, handler: Any =&gt; Unit)Eventsourced.this.StashingHandlerInvocation">StashingHandlerInvocation</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persist(aa368cf4a0).event" title="A">event</a>, <a href="#akka.persistence;Eventsourced.persist(aa368cf4a0).handler" title="A =&gt; Unit">handler</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Any =&gt; Unit" class="delimiter">[</span>Any ⇒ Unit<span class="delimiter">]</span><span class="delimiter">)</span>
+    <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="(x$1: List[akka.persistence.Resequenceable])Unit">resequenceableEventBatch</a> = <a href="Persistent.scala.html#akka.persistence.PersistentRepr.apply" title="(payload: Any, sequenceNr: Long, persistenceId: String, deleted: Boolean, redeliveries: Int, confirms: scala.collection.immutable.Seq[String], confirmable: Boolean, confirmMessage: akka.persistence.Delivered, confirmTarget: akka.actor.ActorRef, sender: akka.actor.ActorRef)akka.persistence.PersistentRepr with Product{def update(sequenceNr: Long,persistenceId: String,deleted: Boolean,redeliveries: Int,confirms: scala.collection.immutable.Seq[String],confirmMessage: akka.persistence.Delivered,confirmTarget: akka.actor.ActorRef,sender: akka.actor.ActorRef): akka.persistence.PersistentRepr with Product}">PersistentRepr</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persist(aa368cf4a0).event" title="A">event</a><span class="delimiter">)</span> <a href="#akka.persistence;Eventsourced.persist(aa368cf4a0).x$2" title="(x: akka.persistence.Resequenceable)List[akka.persistence.Resequenceable]">::</a> <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="=&gt; List[akka.persistence.Resequenceable]">resequenceableEventBatch</a>
+    <a href="#akka.persistence;Eventsourced.useProcessorBatching_=" title="(x$1: Boolean)Unit">useProcessorBatching</a> = <span title="Boolean(false)" class="keyword">false</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Asynchronously persists `events` in specified order. This is equivalent to calling
+   * `persist[A](event: A)(handler: A =&gt; Unit)` multiple times with the same `handler`,
+   * except that `events` are persisted atomically with this method.
+   *
+   * @param events events to be persisted
+   * @param handler handler for each persisted `events`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit" id="akka.persistence;Eventsourced.persist(3ec6a93aa7)">persist</a><span class="delimiter">[</span><a title="" id="akka.persistence;Eventsourced.persist(3ec6a93aa7);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.immutable.Seq[A]" id="akka.persistence;Eventsourced.persist(3ec6a93aa7).events">events</a>: immutable.<span title="scala.collection.immutable.Seq[A]">Seq</span><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; Unit" id="akka.persistence;Eventsourced.persist(3ec6a93aa7).handler">handler</a>: A ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persist(3ec6a93aa7).events" title="scala.collection.immutable.Seq[A]">events</a>.<span title="(f: A =&gt; Unit)Unit">foreach</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persist(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">persist</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persist(3ec6a93aa7).$anonfun.x$3" title="A">_</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persist(3ec6a93aa7).handler" title="A =&gt; Unit">handler</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Asynchronously persists `event`. On successful persistence, `handler` is called with the
+   * persisted event.
+   *
+   * Unlike `persist` the persistent actor will continue to receive incomming commands between the
+   * call to `persist` and executing it's `handler`. This asynchronous, non-stashing, version of
+   * of persist should be used when you favor throughput over the &quot;command-2 only processed after
+   * command-1 effects' have been applied&quot; guarantee, which is provided by the plain [[persist]] method.
+   *
+   * An event `handler` may close over persistent actor state and modify it. The `sender` of a persisted
+   * event is the sender of the corresponding command. This means that one can reply to a command
+   * sender within an event `handler`.
+   *
+   * If persistence of an event fails, the persistent actor will be stopped. This can be customized by
+   * handling [[PersistenceFailure]] in [[receiveCommand]].
+   *
+   * @param event event to be persisted
+   * @param handler handler for each persisted `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A)(handler: A =&gt; Unit)Unit" id="akka.persistence;Eventsourced.persistAsync(aa368cf4a0)">persistAsync</a><span class="delimiter">[</span><a title="" id="akka.persistence;Eventsourced.persistAsync(aa368cf4a0);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;Eventsourced.persistAsync(aa368cf4a0).event">event</a>: <a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0);A" title="A">A</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; Unit" id="akka.persistence;Eventsourced.persistAsync(aa368cf4a0).handler">handler</a>: A ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a> <span title="(x$1: Eventsourced.this.PendingHandlerInvocation)Unit">addLast</span> <a href="#akka.persistence;Eventsourced.AsyncHandlerInvocation.readResolve" title="(evt: Any, handler: Any =&gt; Unit)Eventsourced.this.AsyncHandlerInvocation">AsyncHandlerInvocation</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0).event" title="A">event</a>, <a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0).handler" title="A =&gt; Unit">handler</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Any =&gt; Unit" class="delimiter">[</span>Any ⇒ Unit<span class="delimiter">]</span><span class="delimiter">)</span>
+    <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="(x$1: List[akka.persistence.Resequenceable])Unit">resequenceableEventBatch</a> = <a href="Persistent.scala.html#akka.persistence.PersistentRepr.apply" title="(payload: Any, sequenceNr: Long, persistenceId: String, deleted: Boolean, redeliveries: Int, confirms: scala.collection.immutable.Seq[String], confirmable: Boolean, confirmMessage: akka.persistence.Delivered, confirmTarget: akka.actor.ActorRef, sender: akka.actor.ActorRef)akka.persistence.PersistentRepr with Product{def update(sequenceNr: Long,persistenceId: String,deleted: Boolean,redeliveries: Int,confirms: scala.collection.immutable.Seq[String],confirmMessage: akka.persistence.Delivered,confirmTarget: akka.actor.ActorRef,sender: akka.actor.ActorRef): akka.persistence.PersistentRepr with Product}">PersistentRepr</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0).event" title="A">event</a><span class="delimiter">)</span> <a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0).x$4" title="(x: akka.persistence.Resequenceable)List[akka.persistence.Resequenceable]">::</a> <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="=&gt; List[akka.persistence.Resequenceable]">resequenceableEventBatch</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Asynchronously persists `events` in specified order. This is equivalent to calling
+   * `persistAsync[A](event: A)(handler: A =&gt; Unit)` multiple times with the same `handler`,
+   * except that `events` are persisted atomically with this method.
+   *
+   * @param events events to be persisted
+   * @param handler handler for each persisted `events`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit" id="akka.persistence;Eventsourced.persistAsync(3ec6a93aa7)">persistAsync</a><span class="delimiter">[</span><a title="" id="akka.persistence;Eventsourced.persistAsync(3ec6a93aa7);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.immutable.Seq[A]" id="akka.persistence;Eventsourced.persistAsync(3ec6a93aa7).events">events</a>: immutable.<span title="scala.collection.immutable.Seq[A]">Seq</span><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; Unit" id="akka.persistence;Eventsourced.persistAsync(3ec6a93aa7).handler">handler</a>: A ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persistAsync(3ec6a93aa7).events" title="scala.collection.immutable.Seq[A]">events</a>.<span title="(f: A =&gt; Unit)Unit">foreach</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">persistAsync</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistAsync(3ec6a93aa7).$anonfun.x$5" title="A">_</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.persistAsync(3ec6a93aa7).handler" title="A =&gt; Unit">handler</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Defer the handler execution until all pending handlers have been executed.
+   * Allows to define logic within the actor, which will respect the invocation-order-guarantee
+   * in respect to `persistAsync` calls. That is, if `persistAsync` was invoked before defer,
+   * the corresponding handlers will be invoked in the same order as they were registered in.
+   *
+   * This call will NOT result in `event` being persisted, please use `persist` or `persistAsync`,
+   * if the given event should possible to replay.
+   *
+   * If there are no pending persist handler calls, the handler will be called immediatly.
+   *
+   * In the event of persistence failures (indicated by [[PersistenceFailure]] messages being sent to the
+   * [[PersistentActor]], you can handle these messages, which in turn will enable the deferred handlers to run afterwards.
+   * If persistence failure messages are left `unhandled`, the default behavior is to stop the Actor, thus the handlers
+   * will not be run.
+   *
+   * @param event event to be handled in the future, when preceeding persist operations have been processes
+   * @param handler handler for the given `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A)(handler: A =&gt; Unit)Unit" id="akka.persistence;Eventsourced.defer(aa368cf4a0)">defer</a><span class="delimiter">[</span><a title="" id="akka.persistence;Eventsourced.defer(aa368cf4a0);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;Eventsourced.defer(aa368cf4a0).event">event</a>: <a href="#akka.persistence;Eventsourced.defer(aa368cf4a0);A" title="A">A</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; Unit" id="akka.persistence;Eventsourced.defer(aa368cf4a0).handler">handler</a>: A ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a>.<span title="()Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.persistence;Eventsourced.defer(aa368cf4a0).handler" title="(v1: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.defer(aa368cf4a0).event" title="A">event</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+      <a href="#akka.persistence;Eventsourced.pendingInvocations" title="=&gt; java.util.LinkedList[Eventsourced.this.PendingHandlerInvocation]">pendingInvocations</a> <span title="(x$1: Eventsourced.this.PendingHandlerInvocation)Unit">addLast</span> <a href="#akka.persistence;Eventsourced.AsyncHandlerInvocation.readResolve" title="(evt: Any, handler: Any =&gt; Unit)Eventsourced.this.AsyncHandlerInvocation">AsyncHandlerInvocation</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.defer(aa368cf4a0).event" title="A">event</a>, <a href="#akka.persistence;Eventsourced.defer(aa368cf4a0).handler" title="A =&gt; Unit">handler</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Any =&gt; Unit" class="delimiter">[</span>Any ⇒ Unit<span class="delimiter">]</span><span class="delimiter">)</span>
+      <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="(x$1: List[akka.persistence.Resequenceable])Unit">resequenceableEventBatch</a> = <a href="Persistent.scala.html#akka.persistence;NonPersistentRepr" title="(payload: Any, sender: akka.actor.ActorRef)akka.persistence.NonPersistentRepr">NonPersistentRepr</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.defer(aa368cf4a0).event" title="A">event</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.sender" title="()akka.actor.ActorRef">sender</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#akka.persistence;Eventsourced.defer(aa368cf4a0).x$6" title="(x: akka.persistence.Resequenceable)List[akka.persistence.Resequenceable]">::</a> <a href="#akka.persistence;Eventsourced.resequenceableEventBatch_=" title="=&gt; List[akka.persistence.Resequenceable]">resequenceableEventBatch</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Defer the handler execution until all pending handlers have been executed.
+   * Allows to define logic within the actor, which will respect the invocation-order-guarantee
+   * in respect to `persistAsync` calls. That is, if `persistAsync` was invoked before defer,
+   * the corresponding handlers will be invoked in the same order as they were registered in.
+   *
+   * This call will NOT result in `event` being persisted, please use `persist` or `persistAsync`,
+   * if the given event should possible to replay.
+   *
+   * If there are no pending persist handler calls, the handler will be called immediatly.
+   *
+   * In the event of persistence failures (indicated by [[PersistenceFailure]] messages being sent to the
+   * [[PersistentActor]], you can handle these messages, which in turn will enable the deferred handlers to run afterwards.
+   * If persistence failure messages are left `unhandled`, the default behavior is to stop the Actor, thus the handlers
+   * will not be run.
+   *
+   * @param events event to be handled in the future, when preceeding persist operations have been processes
+   * @param handler handler for each `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit" id="akka.persistence;Eventsourced.defer(3ec6a93aa7)">defer</a><span class="delimiter">[</span><a title="" id="akka.persistence;Eventsourced.defer(3ec6a93aa7);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.collection.immutable.Seq[A]" id="akka.persistence;Eventsourced.defer(3ec6a93aa7).events">events</a>: immutable.<span title="scala.collection.immutable.Seq[A]">Seq</span><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; Unit" id="akka.persistence;Eventsourced.defer(3ec6a93aa7).handler">handler</a>: A ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.defer(3ec6a93aa7).events" title="scala.collection.immutable.Seq[A]">events</a>.<span title="(f: A =&gt; Unit)Unit">foreach</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.defer(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">defer</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.defer(3ec6a93aa7).$anonfun.x$7" title="A">_</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.defer(3ec6a93aa7).handler" title="A =&gt; Unit">handler</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Recovery handler that receives persisted events during recovery. If a state snapshot
+   * has been captured and saved, this handler will receive a [[SnapshotOffer]] message
+   * followed by events that are younger than the offered snapshot.
+   *
+   * This handler must not have side-effects other than changing persistent actor state i.e. it
+   * should not perform actions that may fail, such as interacting with external services,
+   * for example.
+   *
+   * If recovery fails, the actor will be stopped. This can be customized by
+   * handling [[RecoveryFailure]].
+   *
+   * @see [[Recover]]
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Eventsourced.this.Receive" id="akka.persistence;Eventsourced.receiveRecover">receiveRecover</a>: <span title="Eventsourced.this.Receive">Receive</span>
+
+  <span class="comment">/**
+   * Command handler. Typically validates commands against current state (and/or by
+   * communication with other actors). On successful validation, one or more events are
+   * derived from a command and these events are then persisted by calling `persist`.
+   * Commands sent to event sourced persistent actors should not be [[Persistent]] messages.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Eventsourced.this.Receive" id="akka.persistence;Eventsourced.receiveCommand">receiveCommand</a>: <span title="Eventsourced.this.Receive">Receive</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;Eventsourced.unstashAll(aa97cb1b3d)">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="comment">// Internally, all messages are processed by unstashing them from</span>
+    <span class="comment">// the internal stash one-by-one. Hence, an unstashAll() from the</span>
+    <span class="comment">// user stash must be prepended to the internal stash.</span>
+    <a href="#akka.persistence;Eventsourced.processorStash" title="=&gt; akka.actor.StashSupport">processorStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.prepend" title="(others: scala.collection.immutable.Seq[akka.dispatch.Envelope])Unit">prepend</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.clearStash" title="()Vector[akka.dispatch.Envelope]">clearStash</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receive: Eventsourced.this.Receive, message: Any)Unit" id="akka.persistence;Eventsourced.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Eventsourced.this.Receive" id="akka.persistence;Eventsourced.aroundReceive.receive">receive</a>: <span title="Eventsourced.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Eventsourced.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#akka.persistence;Eventsourced.currentState_=" title="=&gt; Eventsourced.this.State">currentState</a>.<a href="Recovery.scala.html#akka.persistence;Recovery;State.aroundReceive" title="(receive: Eventsourced.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.aroundReceive.receive" title="Eventsourced.this.Receive">receive</a>, <a href="#akka.persistence;Eventsourced.aroundReceive.message" title="Any">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(reason: Throwable, message: Option[Any])Unit" id="akka.persistence;Eventsourced.aroundPreRestart">aroundPreRestart</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;Eventsourced.aroundPreRestart.reason">reason</a>: <span title="Throwable">Throwable</span>, <a title="Option[Any]" id="akka.persistence;Eventsourced.aroundPreRestart.message">message</a>: <span title="Option[Any]">Option</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="comment">// flushJournalBatch will send outstanding persistAsync and defer events to the journal</span>
+    <span class="comment">// and also prevent those to be unstashed in Processor.aroundPreRestart</span>
+    <a href="Processor.scala.html#akka.persistence;ProcessorImpl.flushJournalBatch" title="()Unit">flushJournalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced" class="keyword">super</a>.<a href="Processor.scala.html#akka.persistence;ProcessorImpl.aroundPreRestart" title="(reason: Throwable, message: Option[Any])Unit">aroundPreRestart</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.aroundPreRestart.reason" title="Throwable">reason</a>, <a href="#akka.persistence;Eventsourced.aroundPreRestart.message" title="Option[Any]">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Calls `super.preRestart` then unstashes all messages from the internal stash.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(reason: Throwable, message: Option[Any])Unit" id="akka.persistence;Eventsourced.preRestart">preRestart</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;Eventsourced.preRestart.reason">reason</a>: <span title="Throwable">Throwable</span>, <a title="Option[Any]" id="akka.persistence;Eventsourced.preRestart.message">message</a>: <span title="Option[Any]">Option</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#akka.persistence;Eventsourced.processorStash" title="=&gt; akka.actor.StashSupport">processorStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(aa97cb1b3d)" title="()Unit">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced" class="keyword">super</a>.<a href="Processor.scala.html#akka.persistence;ProcessorImpl.preRestart" title="(reason: Throwable, message: Option[Any])Unit">preRestart</a><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.preRestart.reason" title="Throwable">reason</a>, <a href="#akka.persistence;Eventsourced.preRestart.message" title="Option[Any]">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Calls `super.postStop` then unstashes all messages from the internal stash.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;Eventsourced.postStop">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#akka.persistence;Eventsourced.processorStash" title="=&gt; akka.actor.StashSupport">processorStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(aa97cb1b3d)" title="()Unit">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced" class="keyword">super</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;UnrestrictedStash.postStop" title="()Unit">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Only here for binary compatibility in 2.3.x.
+   */</span>
+  <span class="keyword">protected</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">val</span> <a title="Eventsourced.this.Receive" id="akka.persistence;Eventsourced.initialBehavior">initialBehavior</a>: <span title="Eventsourced.this.Receive">Receive</span> = <a href="#akka.persistence;Eventsourced.recoveryBehavior" title="=&gt; Eventsourced.this.Receive">recoveryBehavior</a> <span title="(that: PartialFunction[Any,Unit])PartialFunction[Any,Unit]">orElse</span> <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.persistence;Eventsourced.initialBehavior;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    <span class="keyword">case</span> <a title="Any" id="akka.persistence;Eventsourced.initialBehavior;$anonfun.isDefinedAt.msg">msg</a> <span class="keyword">if</span> <a href="#akka.persistence;Eventsourced.receiveCommand" title="=&gt; Eventsourced.this.Receive">receiveCommand</a>.<span title="(x: Any)Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="#akka.persistence;Eventsourced.initialBehavior;$anonfun.isDefinedAt.msg" title="Any">msg</a><span class="delimiter">)</span> ⇒
+      <a href="#akka.persistence;Eventsourced.receiveCommand" title="(v1: Any)Unit">receiveCommand</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.persistence;Eventsourced.initialBehavior;$anonfun.isDefinedAt.msg" title="Any">msg</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * An event sourced processor.
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;EventsourcedProcessor will be removed in 2.4.x, instead extend the API equivalent `akka.persistence.PersistentProcessor`&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+<span class="keyword">trait</span> <a title="trait EventsourcedProcessor extends AnyRef with akka.persistence.Processor with akka.persistence.Eventsourced" id="akka.persistence;EventsourcedProcessor">EventsourcedProcessor</a> <span title="Unit" class="keyword">extends</span> <a href="Processor.scala.html#akka.persistence;Processor" title="akka.persistence.Processor">Processor</a> <span class="keyword">with</span> <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a> <span class="delimiter">{</span>
+  <span class="comment">// TODO remove Processor #15230</span>
+  <span class="keyword">def</span> <a title="=&gt; EventsourcedProcessor.this.Receive" id="akka.persistence;EventsourcedProcessor.receive">receive</a> = <a href="#akka.persistence;Eventsourced.receiveCommand" title="=&gt; EventsourcedProcessor.this.Receive">receiveCommand</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * An persistent Actor - can be used to implement command or event sourcing.
+ */</span>
+<span class="keyword">trait</span> <a title="trait PersistentActor extends AnyRef with akka.persistence.ProcessorImpl with akka.persistence.Eventsourced" id="akka.persistence;PersistentActor">PersistentActor</a> <span title="Unit" class="keyword">extends</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl" title="akka.persistence.ProcessorImpl">ProcessorImpl</a> <span class="keyword">with</span> <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a> <span class="delimiter">{</span>
+  <span class="keyword">def</span> <a title="=&gt; PersistentActor.this.Receive" id="akka.persistence;PersistentActor.receive">receive</a> = <a href="#akka.persistence;Eventsourced.receiveCommand" title="=&gt; PersistentActor.this.Receive">receiveCommand</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API: an persistent actor - can be used to implement command or event sourcing.
+ */</span>
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class UntypedPersistentActor extends akka.actor.UntypedActor with akka.persistence.ProcessorImpl with akka.persistence.Eventsourced" id="akka.persistence;UntypedPersistentActor">UntypedPersistentActor</a> <a href="#akka.persistence;UntypedPersistentActor" title="akka.persistence.UntypedPersistentActor" class="keyword">extends</a> <a href="../../../actor/akka/actor/UntypedActor.scala.html#akka.actor;UntypedActor" title="akka.actor.UntypedActor">UntypedActor</a> <span class="keyword">with</span> <a href="Processor.scala.html#akka.persistence;ProcessorImpl" title="akka.persistence.ProcessorImpl">ProcessorImpl</a> <span class="keyword">with</span> <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a> <span class="delimiter">{</span>
+
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="(message: Any)Unit" id="akka.persistence;UntypedPersistentActor.onReceive">onReceive</a><span class="delimiter">(</span><a title="Any" id="akka.persistence;UntypedPersistentActor.onReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;UntypedPersistentActor.onReceiveCommand" title="(msg: Any)Unit">onReceiveCommand</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.onReceive.message" title="Any">message</a><span class="delimiter">)</span>
+
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="=&gt; UntypedPersistentActor.this.Receive" id="akka.persistence;UntypedPersistentActor.receiveRecover">receiveRecover</a>: <span title="UntypedPersistentActor.this.Receive">Receive</span> = <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.persistence;UntypedPersistentActor.receiveRecover;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    <span class="keyword">case</span> <a title="Any" id="akka.persistence;UntypedPersistentActor.receiveRecover;$anonfun.isDefinedAt.msg">msg</a> ⇒ <a href="#akka.persistence;UntypedPersistentActor.onReceiveRecover" title="(msg: Any)Unit">onReceiveRecover</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.receiveRecover;$anonfun.isDefinedAt.msg" title="Any">msg</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="=&gt; UntypedPersistentActor.this.Receive" id="akka.persistence;UntypedPersistentActor.receiveCommand">receiveCommand</a>: <span title="UntypedPersistentActor.this.Receive">Receive</span> = <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.persistence;UntypedPersistentActor.receiveCommand;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    <span class="keyword">case</span> <a title="Any" id="akka.persistence;UntypedPersistentActor.receiveCommand;$anonfun.isDefinedAt.msg">msg</a> ⇒ <a href="#akka.persistence;UntypedPersistentActor.onReceiveCommand" title="(msg: Any)Unit">onReceiveCommand</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.receiveCommand;$anonfun.isDefinedAt.msg" title="Any">msg</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Java API: asynchronously persists `event`. On successful persistence, `handler` is called with the
+   * persisted event. It is guaranteed that no new commands will be received by a persistent actor
+   * between a call to `persist` and the execution of its `handler`. This also holds for
+   * multiple `persist` calls per received command. Internally, this is achieved by stashing new
+   * commands and unstashing them when the `event` has been persisted and handled. The stash used
+   * for that is an internal stash which doesn't interfere with the inherited user stash.
+   *
+   * An event `handler` may close over persistent actor state and modify it. The `getSender()` of a persisted
+   * event is the sender of the corresponding command. This means that one can reply to a command
+   * sender within an event `handler`.
+   *
+   * Within an event handler, applications usually update persistent actor state using persisted event
+   * data, notify listeners and reply to command senders.
+   *
+   * If persistence of an event fails, the persistent actor will be stopped. This can be customized by
+   * handling [[PersistenceFailure]] in [[onReceiveCommand]].
+   *
+   * @param event event to be persisted.
+   * @param handler handler for each persisted `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A, handler: akka.japi.Procedure[A])Unit" id="akka.persistence;UntypedPersistentActor.persist(b578f525ca)">persist</a><span class="delimiter">[</span><a title="" id="akka.persistence;UntypedPersistentActor.persist(b578f525ca);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.persist(b578f525ca).event">event</a>: <a href="#akka.persistence;UntypedPersistentActor.persist(b578f525ca);A" title="A">A</a>, <a title="akka.japi.Procedure[A]" id="akka.persistence;UntypedPersistentActor.persist(b578f525ca).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persist(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">persist</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persist(b578f525ca).event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.persist(b578f525ca).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persist(b578f525ca).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: asynchronously persists `events` in specified order. This is equivalent to calling
+   * `persist[A](event: A, handler: Procedure[A])` multiple times with the same `handler`,
+   * except that `events` are persisted atomically with this method.
+   *
+   * @param events events to be persisted.
+   * @param handler handler for each persisted `events`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: Iterable[A], handler: akka.japi.Procedure[A])Unit" id="akka.persistence;UntypedPersistentActor.persist(f69be466f3)">persist</a><span class="delimiter">[</span><a title="" id="akka.persistence;UntypedPersistentActor.persist(f69be466f3);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Iterable[A]" id="akka.persistence;UntypedPersistentActor.persist(f69be466f3).events">events</a>: <span title="Iterable[A]">JIterable</span><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="akka.japi.Procedure[A]" id="akka.persistence;UntypedPersistentActor.persist(f69be466f3).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persist(3ec6a93aa7)" title="(events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit">persist</a><span class="delimiter">(</span><a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util" title="akka.japi.Util.type">Util</a>.<a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[A])scala.collection.immutable.Seq[A]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persist(f69be466f3).events" title="Iterable[A]">events</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.persist(f69be466f3).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persist(f69be466f3).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * JAVA API: asynchronously persists `event`. On successful persistence, `handler` is called with the
+   * persisted event.
+   *
+   * Unlike `persist` the persistent actor will continue to receive incomming commands between the
+   * call to `persist` and executing it's `handler`. This asynchronous, non-stashing, version of
+   * of persist should be used when you favor throughput over the &quot;command-2 only processed after
+   * command-1 effects' have been applied&quot; guarantee, which is provided by the plain [[persist]] method.
+   *
+   * An event `handler` may close over persistent actor state and modify it. The `sender` of a persisted
+   * event is the sender of the corresponding command. This means that one can reply to a command
+   * sender within an event `handler`.
+   *
+   * If persistence of an event fails, the persistent actor will be stopped. This can be customized by
+   * handling [[PersistenceFailure]] in [[receiveCommand]].
+   *
+   * @param event event to be persisted
+   * @param handler handler for each persisted `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A)(handler: akka.japi.Procedure[A])Unit" id="akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44)">persistAsync</a><span class="delimiter">[</span><a title="" id="akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44).event">event</a>: <a href="#akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44);A" title="A">A</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.japi.Procedure[A]" id="akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;UntypedPersistentActor" title="akka.persistence.UntypedPersistentActor" class="keyword">super</a><span class="delimiter">[</span>Eventsourced<span class="delimiter">]</span>.<a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">persistAsync</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44).event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persistAsync(d83eeefc44).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * JAVA API: asynchronously persists `events` in specified order. This is equivalent to calling
+   * `persistAsync[A](event: A)(handler: A =&gt; Unit)` multiple times with the same `handler`,
+   * except that `events` are persisted atomically with this method.
+   *
+   * @param events events to be persisted
+   * @param handler handler for each persisted `events`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: Iterable[A])(handler: A =&gt; Unit)Unit" id="akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8)">persistAsync</a><span class="delimiter">[</span><a title="" id="akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Iterable[A]" id="akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8).events">events</a>: <span title="Iterable[A]">JIterable</span><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A =&gt; Unit" id="akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8).handler">handler</a>: A ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;UntypedPersistentActor" title="akka.persistence.UntypedPersistentActor" class="keyword">super</a><span class="delimiter">[</span>Eventsourced<span class="delimiter">]</span>.<a href="#akka.persistence;Eventsourced.persistAsync(3ec6a93aa7)" title="(events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit">persistAsync</a><span class="delimiter">(</span><a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util" title="akka.japi.Util.type">Util</a>.<a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[A])scala.collection.immutable.Seq[A]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8).events" title="Iterable[A]">events</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8).$anonfun.event">event</a> ⇒ <a href="#akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8).handler" title="(v1: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.persistAsync(69a11250f8).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Defer the handler execution until all pending handlers have been executed.
+   * Allows to define logic within the actor, which will respect the invocation-order-guarantee
+   * in respect to `persistAsync` calls. That is, if `persistAsync` was invoked before defer,
+   * the corresponding handlers will be invoked in the same order as they were registered in.
+   *
+   * This call will NOT result in `event` being persisted, please use `persist` or `persistAsync`,
+   * if the given event should possible to replay.
+   *
+   * If there are no pending persist handler calls, the handler will be called immediatly.
+   *
+   * In the event of persistence failures (indicated by [[PersistenceFailure]] messages being sent to the
+   * [[PersistentActor]], you can handle these messages, which in turn will enable the deferred handlers to run afterwards.
+   * If persistence failure messages are left `unhandled`, the default behavior is to stop the Actor, thus the handlers
+   * will not be run.
+   *
+   * @param event event to be handled in the future, when preceeding persist operations have been processes
+   * @param handler handler for the given `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A)(handler: akka.japi.Procedure[A])Unit" id="akka.persistence;UntypedPersistentActor.defer(d83eeefc44)">defer</a><span class="delimiter">[</span><a title="" id="akka.persistence;UntypedPersistentActor.defer(d83eeefc44);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.defer(d83eeefc44).event">event</a>: <a href="#akka.persistence;UntypedPersistentActor.defer(d83eeefc44);A" title="A">A</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.japi.Procedure[A]" id="akka.persistence;UntypedPersistentActor.defer(d83eeefc44).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;UntypedPersistentActor" title="akka.persistence.UntypedPersistentActor" class="keyword">super</a><span class="delimiter">[</span>Eventsourced<span class="delimiter">]</span>.<a href="#akka.persistence;Eventsourced.defer(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">defer</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.defer(d83eeefc44).event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.defer(d83eeefc44).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.defer(d83eeefc44).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Defer the handler execution until all pending handlers have been executed.
+   * Allows to define logic within the actor, which will respect the invocation-order-guarantee
+   * in respect to `persistAsync` calls. That is, if `persistAsync` was invoked before defer,
+   * the corresponding handlers will be invoked in the same order as they were registered in.
+   *
+   * This call will NOT result in `event` being persisted, please use `persist` or `persistAsync`,
+   * if the given event should possible to replay.
+   *
+   * If there are no pending persist handler calls, the handler will be called immediatly.
+   *
+   * In the event of persistence failures (indicated by [[PersistenceFailure]] messages being sent to the
+   * [[PersistentActor]], you can handle these messages, which in turn will enable the deferred handlers to run afterwards.
+   * If persistence failure messages are left `unhandled`, the default behavior is to stop the Actor, thus the handlers
+   * will not be run.
+   *
+   * @param events event to be handled in the future, when preceeding persist operations have been processes
+   * @param handler handler for each `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: Iterable[A])(handler: akka.japi.Procedure[A])Unit" id="akka.persistence;UntypedPersistentActor.defer(a449317eb0)">defer</a><span class="delimiter">[</span><a title="" id="akka.persistence;UntypedPersistentActor.defer(a449317eb0);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Iterable[A]" id="akka.persistence;UntypedPersistentActor.defer(a449317eb0).events">events</a>: <span title="Iterable[A]">JIterable</span><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.japi.Procedure[A]" id="akka.persistence;UntypedPersistentActor.defer(a449317eb0).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;UntypedPersistentActor" title="akka.persistence.UntypedPersistentActor" class="keyword">super</a><span class="delimiter">[</span>Eventsourced<span class="delimiter">]</span>.<a href="#akka.persistence;Eventsourced.defer(3ec6a93aa7)" title="(events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit">defer</a><span class="delimiter">(</span><a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util" title="akka.japi.Util.type">Util</a>.<a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[A])scala.collection.immutable.Seq[A]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.defer(a449317eb0).events" title="Iterable[A]">events</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;UntypedPersistentActor.defer(a449317eb0).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;UntypedPersistentActor.defer(a449317eb0).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: recovery handler that receives persisted events during recovery. If a state snapshot
+   * has been captured and saved, this handler will receive a [[SnapshotOffer]] message
+   * followed by events that are younger than the offered snapshot.
+   *
+   * This handler must not have side-effects other than changing persistent actor state i.e. it
+   * should not perform actions that may fail, such as interacting with external services,
+   * for example.
+   *
+   * If recovery fails, the actor will be stopped. This can be customized by
+   * handling [[RecoveryFailure]].
+   *
+   * @see [[Recover]]
+   */</span>
+  @throws<span class="delimiter">(</span>classOf<span class="delimiter">[</span>Exception<span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="(msg: Any)Unit" id="akka.persistence;UntypedPersistentActor.onReceiveRecover">onReceiveRecover</a><span class="delimiter">(</span><a title="Any" id="akka.persistence;UntypedPersistentActor.onReceiveRecover.msg">msg</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+
+  <span class="comment">/**
+   * Java API: command handler. Typically validates commands against current state (and/or by
+   * communication with other actors). On successful validation, one or more events are
+   * derived from a command and these events are then persisted by calling `persist`.
+   * Commands sent to event sourced persistent actors must not be [[Persistent]] or
+   * [[PersistentBatch]] messages. In this case an `UnsupportedOperationException` is
+   * thrown by the persistent actor.
+   */</span>
+  @throws<span class="delimiter">(</span>classOf<span class="delimiter">[</span>Exception<span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="(msg: Any)Unit" id="akka.persistence;UntypedPersistentActor.onReceiveCommand">onReceiveCommand</a><span class="delimiter">(</span><a title="Any" id="akka.persistence;UntypedPersistentActor.onReceiveCommand.msg">msg</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API: an persistent actor - can be used to implement command or event sourcing.
+ */</span>
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class AbstractPersistentActor extends akka.actor.AbstractActor with akka.persistence.PersistentActor with akka.persistence.Eventsourced" id="akka.persistence;AbstractPersistentActor">AbstractPersistentActor</a> <a href="#akka.persistence;AbstractPersistentActor" title="akka.persistence.AbstractPersistentActor" class="keyword">extends</a> <a href="../../../actor/akka/actor/AbstractActor.scala.html#akka.actor;AbstractActor" title="akka.actor.AbstractActor">AbstractActor</a> <span class="keyword">with</span> <a href="#akka.persistence;PersistentActor" title="akka.persistence.PersistentActor">PersistentActor</a> <span class="keyword">with</span> <a href="#akka.persistence;Eventsourced" title="akka.persistence.Eventsourced">Eventsourced</a> <span class="delimiter">{</span>
+
+  <span class="comment">/**
+   * Java API: asynchronously persists `event`. On successful persistence, `handler` is called with the
+   * persisted event. It is guaranteed that no new commands will be received by a persistent actor
+   * between a call to `persist` and the execution of its `handler`. This also holds for
+   * multiple `persist` calls per received command. Internally, this is achieved by stashing new
+   * commands and unstashing them when the `event` has been persisted and handled. The stash used
+   * for that is an internal stash which doesn't interfere with the inherited user stash.
+   *
+   * An event `handler` may close over persistent actor state and modify it. The `getSender()` of a persisted
+   * event is the sender of the corresponding command. This means that one can reply to a command
+   * sender within an event `handler`.
+   *
+   * Within an event handler, applications usually update persistent actor state using persisted event
+   * data, notify listeners and reply to command senders.
+   *
+   * If persistence of an event fails, the persistent actor will be stopped. This can be customized by
+   * handling [[PersistenceFailure]] in [[receiveCommand]].
+   *
+   * @param event event to be persisted.
+   * @param handler handler for each persisted `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A, handler: akka.japi.Procedure[A])Unit" id="akka.persistence;AbstractPersistentActor.persist(b578f525ca)">persist</a><span class="delimiter">[</span><a title="" id="akka.persistence;AbstractPersistentActor.persist(b578f525ca);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.persist(b578f525ca).event">event</a>: <a href="#akka.persistence;AbstractPersistentActor.persist(b578f525ca);A" title="A">A</a>, <a title="akka.japi.Procedure[A]" id="akka.persistence;AbstractPersistentActor.persist(b578f525ca).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persist(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">persist</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persist(b578f525ca).event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.persist(b578f525ca).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persist(b578f525ca).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: asynchronously persists `events` in specified order. This is equivalent to calling
+   * `persist[A](event: A, handler: Procedure[A])` multiple times with the same `handler`,
+   * except that `events` are persisted atomically with this method.
+   *
+   * @param events events to be persisted.
+   * @param handler handler for each persisted `events`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: Iterable[A], handler: akka.japi.Procedure[A])Unit" id="akka.persistence;AbstractPersistentActor.persist(f69be466f3)">persist</a><span class="delimiter">[</span><a title="" id="akka.persistence;AbstractPersistentActor.persist(f69be466f3);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Iterable[A]" id="akka.persistence;AbstractPersistentActor.persist(f69be466f3).events">events</a>: <span title="Iterable[A]">JIterable</span><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="akka.japi.Procedure[A]" id="akka.persistence;AbstractPersistentActor.persist(f69be466f3).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persist(3ec6a93aa7)" title="(events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit">persist</a><span class="delimiter">(</span><a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util" title="akka.japi.Util.type">Util</a>.<a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[A])scala.collection.immutable.Seq[A]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persist(f69be466f3).events" title="Iterable[A]">events</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.persist(f69be466f3).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persist(f69be466f3).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: asynchronously persists `event`. On successful persistence, `handler` is called with the
+   * persisted event.
+   *
+   * Unlike `persist` the persistent actor will continue to receive incomming commands between the
+   * call to `persistAsync` and executing it's `handler`. This asynchronous, non-stashing, version of
+   * of persist should be used when you favor throughput over the strict ordering guarantees that `persist` guarantees.
+   *
+   * If persistence of an event fails, the persistent actor will be stopped. This can be customized by
+   * handling [[PersistenceFailure]] in [[receiveCommand]].
+   *
+   * @param event event to be persisted
+   * @param handler handler for each persisted `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A, handler: akka.japi.Procedure[A])Unit" id="akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca)">persistAsync</a><span class="delimiter">[</span><a title="" id="akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca).event">event</a>: <a href="#akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca);A" title="A">A</a>, <a title="akka.japi.Procedure[A]" id="akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persistAsync(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">persistAsync</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca).event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persistAsync(b578f525ca).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Defer the handler execution until all pending handlers have been executed.
+   * Allows to define logic within the actor, which will respect the invocation-order-guarantee
+   * in respect to `persistAsync` calls. That is, if `persistAsync` was invoked before defer,
+   * the corresponding handlers will be invoked in the same order as they were registered in.
+   *
+   * This call will NOT result in `event` being persisted, please use `persist` or `persistAsync`,
+   * if the given event should possible to replay.
+   *
+   * If there are no pending persist handler calls, the handler will be called immediatly.
+   *
+   * In the event of persistence failures (indicated by [[PersistenceFailure]] messages being sent to the
+   * [[PersistentActor]], you can handle these messages, which in turn will enable the deferred handlers to run afterwards.
+   * If persistence failure messages are left `unhandled`, the default behavior is to stop the Actor, thus the handlers
+   * will not be run.
+   *
+   * @param event event to be handled in the future, when preceeding persist operations have been processes
+   * @param handler handler for the given `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](event: A)(handler: akka.japi.Procedure[A])Unit" id="akka.persistence;AbstractPersistentActor.defer(d83eeefc44)">defer</a><span class="delimiter">[</span><a title="" id="akka.persistence;AbstractPersistentActor.defer(d83eeefc44);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.defer(d83eeefc44).event">event</a>: <a href="#akka.persistence;AbstractPersistentActor.defer(d83eeefc44);A" title="A">A</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.japi.Procedure[A]" id="akka.persistence;AbstractPersistentActor.defer(d83eeefc44).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;AbstractPersistentActor" title="akka.persistence.AbstractPersistentActor" class="keyword">super</a>.<a href="#akka.persistence;Eventsourced.defer(aa368cf4a0)" title="(event: A)(handler: A =&gt; Unit)Unit">defer</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.defer(d83eeefc44).event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.defer(d83eeefc44).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.defer(d83eeefc44).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Defer the handler execution until all pending handlers have been executed.
+   * Allows to define logic within the actor, which will respect the invocation-order-guarantee
+   * in respect to `persistAsync` calls. That is, if `persistAsync` was invoked before defer,
+   * the corresponding handlers will be invoked in the same order as they were registered in.
+   *
+   * This call will NOT result in `event` being persisted, please use `persist` or `persistAsync`,
+   * if the given event should possible to replay.
+   *
+   * If there are no pending persist handler calls, the handler will be called immediatly.
+   *
+   * In the event of persistence failures (indicated by [[PersistenceFailure]] messages being sent to the
+   * [[PersistentActor]], you can handle these messages, which in turn will enable the deferred handlers to run afterwards.
+   * If persistence failure messages are left `unhandled`, the default behavior is to stop the Actor, thus the handlers
+   * will not be run.
+   *
+   * @param events event to be handled in the future, when preceeding persist operations have been processes
+   * @param handler handler for each `event`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: Iterable[A])(handler: akka.japi.Procedure[A])Unit" id="akka.persistence;AbstractPersistentActor.defer(a449317eb0)">defer</a><span class="delimiter">[</span><a title="" id="akka.persistence;AbstractPersistentActor.defer(a449317eb0);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Iterable[A]" id="akka.persistence;AbstractPersistentActor.defer(a449317eb0).events">events</a>: <span title="Iterable[A]">JIterable</span><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.japi.Procedure[A]" id="akka.persistence;AbstractPersistentActor.defer(a449317eb0).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;AbstractPersistentActor" title="akka.persistence.AbstractPersistentActor" class="keyword">super</a>.<a href="#akka.persistence;Eventsourced.defer(3ec6a93aa7)" title="(events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit">defer</a><span class="delimiter">(</span><a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util" title="akka.japi.Util.type">Util</a>.<a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[A])scala.collection.immutable.Seq[A]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.defer(a449317eb0).events" title="Iterable[A]">events</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.defer(a449317eb0).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.defer(a449317eb0).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: asynchronously persists `events` in specified order. This is equivalent to calling
+   * `persistAsync[A](event: A)(handler: A =&gt; Unit)` multiple times with the same `handler`,
+   * except that `events` are persisted atomically with this method.
+   *
+   * @param events events to be persisted
+   * @param handler handler for each persisted `events`
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="[A](events: Iterable[A], handler: akka.japi.Procedure[A])Unit" id="akka.persistence;AbstractPersistentActor.persistAsync(f69be466f3)">persistAsync</a><span class="delimiter">[</span><a title="" id="akka.persistence;AbstractPersistentActor.persistAsync(f69be466f3);A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Iterable[A]" id="akka.persistence;AbstractPersistentActor.persistAsync(f69be466f3).events">events</a>: <span title="Iterable[A]">JIterable</span><span class="delimiter">[</span>A<span class="delimiter">]</span>, <a title="akka.japi.Procedure[A]" id="akka.persistence;AbstractPersistentActor.persistAsync(f69be466f3).handler">handler</a>: <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure" title="akka.japi.Procedure[A]">Procedure</a><span class="delimiter">[</span>A<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Eventsourced.persistAsync(3ec6a93aa7)" title="(events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit">persistAsync</a><span class="delimiter">(</span><a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util" title="akka.japi.Util.type">Util</a>.<a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[A])scala.collection.immutable.Seq[A]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persistAsync(f69be466f3).events" title="Iterable[A]">events</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="A" id="akka.persistence;AbstractPersistentActor.persistAsync(f69be466f3).$anonfun.event">event</a> ⇒ <a href="../../../actor/akka/japi/JavaAPI.scala.html#akka.japi;Procedure.apply" title="(param: A)Unit">handler</a><span class="delimiter">(</span><a href="#akka.persistence;AbstractPersistentActor.persistAsync(f69be466f3).$anonfun.event" title="A">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; AbstractPersistentActor.this.Receive" id="akka.persistence;AbstractPersistentActor.receive(79972a53c4)">receive</a> = <a href="#akka.persistence;AbstractPersistentActor" title="akka.persistence.AbstractPersistentActor" class="keyword">super</a><span class="delimiter">[</span>PersistentActor<span class="delimiter">]</span>.<a href="#akka.persistence;PersistentActor.receive" title="=&gt; AbstractPersistentActor.this.Receive">receive</a>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API: an event sourced processor.
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;UntypedEventsourcedProcessor will be removed in 2.4.x, instead extend the API equivalent `akka.persistence.PersistentProcessor`&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class UntypedEventsourcedProcessor extends akka.persistence.UntypedPersistentActor" id="akka.persistence;UntypedEventsourcedProcessor">UntypedEventsourcedProcessor</a> <a href="#akka.persistence;UntypedEventsourcedProcessor" title="akka.persistence.UntypedEventsourcedProcessor" class="keyword">extends</a> <a href="#akka.persistence;UntypedPersistentActor" title="akka.persistence.UntypedPersistentActor">UntypedPersistentActor</a> <span class="delimiter">{</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; String" id="akka.persistence;UntypedEventsourcedProcessor.persistenceId">persistenceId</a>: <span title="String">String</span> = <a href="Processor.scala.html#akka.persistence;ProcessorImpl.processorId" title="=&gt; String">processorId</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API: compatible with lambda expressions (to be used with [[akka.japi.pf.ReceiveBuilder]]):
+ * command handler. Typically validates commands against current state (and/or by
+ * communication with other actors). On successful validation, one or more events are
+ * derived from a command and these events are then persisted by calling `persist`.
+ * Commands sent to event sourced processors must not be [[Persistent]] or
+ * [[PersistentBatch]] messages. In this case an `UnsupportedOperationException` is
+ * thrown by the processor.
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;AbstractEventsourcedProcessor will be removed in 2.4.x, instead extend the API equivalent `akka.persistence.PersistentProcessor`&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class AbstractEventsourcedProcessor extends akka.persistence.AbstractPersistentActor" id="akka.persistence;AbstractEventsourcedProcessor">AbstractEventsourcedProcessor</a> <a href="#akka.persistence;AbstractEventsourcedProcessor" title="akka.persistence.AbstractEventsourcedProcessor" class="keyword">extends</a> <a href="#akka.persistence;AbstractPersistentActor" title="akka.persistence.AbstractPersistentActor">AbstractPersistentActor</a> <span class="delimiter">{</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; String" id="akka.persistence;AbstractEventsourcedProcessor.persistenceId">persistenceId</a>: <span title="String">String</span> = <a href="Processor.scala.html#akka.persistence;ProcessorImpl.processorId" title="=&gt; String">processorId</a>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

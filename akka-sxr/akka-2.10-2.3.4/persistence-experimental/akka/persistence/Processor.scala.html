@@ -1,0 +1,513 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>persistence-experimental/akka/persistence/Processor.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+<span class="keyword">package</span> akka.persistence
+
+<span class="keyword">import</span> akka.AkkaException
+<span class="keyword">import</span> akka.actor._
+<span class="keyword">import</span> akka.dispatch._
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicInteger
+
+<span class="comment">/**
+ * An actor that persists (journals) messages of type [[Persistent]]. Messages of other types are not persisted.
+ *
+ * {{{
+ * import akka.persistence.{ Persistent, Processor }
+ *
+ * class MyProcessor extends Processor {
+ *   def receive = {
+ *     case Persistent(payload, sequenceNr) =&gt; // message has been written to journal
+ *     case other                           =&gt; // message has not been written to journal
+ *   }
+ * }
+ *
+ * val processor = actorOf(Props[MyProcessor], name = &quot;myProcessor&quot;)
+ *
+ * processor ! Persistent(&quot;foo&quot;)
+ * processor ! &quot;bar&quot;
+ * }}}
+ *
+ * During start and restart, persistent messages are replayed to a processor so that it can recover internal
+ * state from these messages. New messages sent to a processor during recovery do not interfere with replayed
+ * messages, hence applications don't need to wait for a processor to complete its recovery.
+ *
+ * Automated recovery can be turned off or customized by overriding the [[preStart]] and [[preRestart]] life
+ * cycle hooks. If automated recovery is turned off, an application can explicitly recover a processor by
+ * sending it a [[Recover]] message.
+ *
+ * [[Persistent]] messages are assigned sequence numbers that are generated on a per-processor basis. A sequence
+ * starts at `1L` and doesn't contain gaps unless a processor (logically) deletes a message
+ *
+ * During recovery, a processor internally buffers new messages until recovery completes, so that new messages
+ * do not interfere with replayed messages. This internal buffer (the ''processor stash'') is isolated from the
+ * ''user stash'' inherited by `akka.actor.Stash`. `Processor` implementation classes can therefore use the
+ * ''user stash'' for stashing/unstashing both persistent and transient messages.
+ *
+ * Processors can also store snapshots of internal state by calling [[saveSnapshot]]. During recovery, a saved
+ * snapshot is offered to the processor with a [[SnapshotOffer]] message, followed by replayed messages, if any,
+ * that are younger than the snapshot. Default is to offer the latest saved snapshot.
+ *
+ * @see [[UntypedProcessor]]
+ * @see [[Recover]]
+ * @see [[PersistentBatch]]
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;Processor will be removed. Instead extend `akka.persistence.PersistentActor` and use it's `persistAsync(command)(callback)` method to get equivalent semantics.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+<span class="keyword">trait</span> <a title="trait Processor extends AnyRef with akka.persistence.ProcessorImpl" id="akka.persistence;Processor">Processor</a> <span title="Unit" class="keyword">extends</span> <a href="#akka.persistence;ProcessorImpl" title="akka.persistence.ProcessorImpl">ProcessorImpl</a> <span class="delimiter">{</span>
+  <span class="comment">/**
+   * Persistence id. Defaults to this persistent-actors's path and can be overridden.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; String" id="akka.persistence;Processor.persistenceId">persistenceId</a>: <span title="String">String</span> = <a href="#akka.persistence;ProcessorImpl.processorId" title="=&gt; String">processorId</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ */</span>
+<span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">object</span> <a title="akka.persistence.ProcessorImpl.type" id="akka.persistence.ProcessorImpl">ProcessorImpl</a> <a href="#akka.persistence.ProcessorImpl" title="akka.persistence.ProcessorImpl.type" class="delimiter">{</a>
+  <span class="comment">// ok to wrap around (2*Int.MaxValue restarts will not happen within a journal roundtrip)</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.atomic.AtomicInteger" id="akka.persistence.ProcessorImpl.instanceIdCounter">instanceIdCounter</a> = <span title="()java.util.concurrent.atomic.AtomicInteger" class="keyword">new</span> <span title="java.util.concurrent.atomic.AtomicInteger">AtomicInteger</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/** INTERNAL API */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;Processor will be removed. Instead extend `akka.persistence.PersistentActor` and use it's `persistAsync(command)(callback)` method to get equivalent semantics.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+<span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait ProcessorImpl extends AnyRef with akka.actor.Actor with akka.persistence.Recovery" id="akka.persistence;ProcessorImpl">ProcessorImpl</a> <span title="Unit" class="keyword">extends</span> <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor" title="akka.actor.Actor">Actor</a> <span class="keyword">with</span> <a href="Recovery.scala.html#akka.persistence;Recovery" title="akka.persistence.Recovery">Recovery</a> <span class="delimiter">{</span>
+  <span class="comment">// TODO: remove Processor in favor of PersistentActor #15230</span>
+
+  <span class="keyword">import</span> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol" title="akka.persistence.JournalProtocol.type">JournalProtocol</a>._
+
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">val</span> <a title="Int" id="akka.persistence;ProcessorImpl.instanceId">instanceId</a>: <span title="Int">Int</span> = <a href="#akka.persistence.ProcessorImpl" title="akka.persistence.ProcessorImpl.type">ProcessorImpl</a>.<a href="#akka.persistence.ProcessorImpl.instanceIdCounter" title="=&gt; java.util.concurrent.atomic.AtomicInteger">instanceIdCounter</a>.<span title="()Int">incrementAndGet</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Processes the highest stored sequence number response from the journal and then switches
+   * to `processing` state.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="initializing extends AnyRef with ProcessorImpl.this.State" id="akka.persistence;ProcessorImpl.initializing">initializing</a> = <a href="#akka.persistence;ProcessorImpl.initializing;$anon" title="ProcessorImpl.this.State" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with ProcessorImpl.this.State" id="akka.persistence;ProcessorImpl.initializing;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;ProcessorImpl.initializing;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;initializing&quot;)" class="string">&quot;initializing&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: ProcessorImpl.this.Receive, message: Any)Unit" id="akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="ProcessorImpl.this.Receive" id="akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.receive">receive</a>: <span title="ProcessorImpl.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> ReadHighestSequenceNrSuccess<span class="delimiter">(</span><a title="Long" id="akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.highest">highest</a><span class="delimiter">)</span> ⇒
+        <a href="Recovery.scala.html#akka.persistence;Recovery._currentState_=" title="(x$1: ProcessorImpl.this.State)Unit">_currentState</a> = <a href="#akka.persistence;ProcessorImpl.processing" title="=&gt; ProcessorImpl.this.State{def addToBatch(p: akka.persistence.Resequenceable): Unit; def addToBatch(pb: akka.persistence.PersistentBatch): Unit; def maxBatchSizeReached: Boolean; def journalBatch(): Unit}">processing</a>
+        <a href="#akka.persistence;ProcessorImpl.sequenceNr_=" title="(x$1: Long)Unit">sequenceNr</a> = <a href="#akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.highest" title="Long">highest</a>
+        <a href="Recovery.scala.html#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(aa97cb1b3d)" title="()Unit">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#akka.persistence;ProcessorImpl.onRecoveryCompleted" title="(receive: ProcessorImpl.this.Receive)Unit">onRecoveryCompleted</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.receive" title="ProcessorImpl.this.Receive">receive</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> ReadHighestSequenceNrFailure<span class="delimiter">(</span><a title="Throwable" id="akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.cause">cause</a><span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;ProcessorImpl.onRecoveryFailure" title="(receive: ProcessorImpl.this.Receive, cause: Throwable)Unit">onRecoveryFailure</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.receive" title="ProcessorImpl.this.Receive">receive</a>, <a href="#akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.cause" title="Throwable">cause</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="Any" id="akka.persistence;ProcessorImpl.initializing;$anon.aroundReceive.other">other</a> ⇒
+        <a href="Recovery.scala.html#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Journals and processes new messages, both persistent and transient.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="processing extends AnyRef with ProcessorImpl.this.State" id="akka.persistence;ProcessorImpl.processing">processing</a> = <a href="#akka.persistence;ProcessorImpl.processing;$anon" title="ProcessorImpl.this.State{def addToBatch(p: akka.persistence.Resequenceable): Unit; def addToBatch(pb: akka.persistence.PersistentBatch): Unit; def maxBatchSizeReached: Boolean; def journalBatch(): Unit}" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with ProcessorImpl.this.State" id="akka.persistence;ProcessorImpl.processing;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;ProcessorImpl.processing;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;processing&quot;)" class="string">&quot;processing&quot;</span>
+
+    <span class="keyword">private</span> <span class="keyword">var</span> <a title="Boolean" id="akka.persistence;ProcessorImpl.processing;$anon.batching_=">batching</a> = <span title="Boolean(false)" class="keyword">false</span>
+
+    <span class="keyword">def</span> <a title="(receive: ProcessorImpl.this.Receive, message: Any)Unit" id="akka.persistence;ProcessorImpl.processing;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="ProcessorImpl.this.Receive" id="akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.receive">receive</a>: <span title="ProcessorImpl.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <span title="akka.persistence.Recover">r</span>: <a href="Recovery.scala.html#akka.persistence;Recover" title="akka.persistence.Recover">Recover</a>                                ⇒ <span class="comment">// ignore</span>
+      <span class="keyword">case</span> ReplayedMessage<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span><span class="delimiter">)</span>                        ⇒ <a href="Recovery.scala.html#akka.persistence;Recovery;State.processPersistent" title="(receive: ProcessorImpl.this.Receive, persistent: akka.persistence.Persistent)Unit">processPersistent</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.receive" title="ProcessorImpl.this.Receive">receive</a>, <span title="akka.persistence.PersistentRepr">p</span><span class="delimiter">)</span> <span class="comment">// can occur after unstash from user stash</span>
+      <span class="keyword">case</span> WriteMessageSuccess<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span>: <a href="Persistent.scala.html#akka.persistence;PersistentRepr" title="akka.persistence.PersistentRepr">PersistentRepr</a>, _<span class="delimiter">)</span> ⇒ <a href="Recovery.scala.html#akka.persistence;Recovery;State.processPersistent" title="(receive: ProcessorImpl.this.Receive, persistent: akka.persistence.Persistent)Unit">processPersistent</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.receive" title="ProcessorImpl.this.Receive">receive</a>, <span title="akka.persistence.PersistentRepr">p</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> WriteMessageSuccess<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">r</span>: <a href="Persistent.scala.html#akka.persistence;Resequenceable" title="akka.persistence.Resequenceable">Resequenceable</a>, _<span class="delimiter">)</span> ⇒ <a href="Recovery.scala.html#akka.persistence;Recovery;State.process" title="(receive: ProcessorImpl.this.Receive, message: Any)Unit">process</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.receive" title="ProcessorImpl.this.Receive">receive</a>, <span title="akka.persistence.PersistentRepr">r</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> WriteMessageFailure<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span>, <a title="Throwable" id="akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.cause">cause</a>, _<span class="delimiter">)</span>          ⇒ <a href="Recovery.scala.html#akka.persistence;Recovery;State.process" title="(receive: ProcessorImpl.this.Receive, message: Any)Unit">process</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.receive" title="ProcessorImpl.this.Receive">receive</a>, <a href="#akka.persistence.PersistenceFailure.readResolve" title="(payload: Any, sequenceNr: Long, cause: Throwable)akka.persistence.PersistenceFailure">PersistenceFailure</a><span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span>.<a href="Persistent.scala.html#akka.persistence;PersistentRepr.payload" title="=&gt; Any">payload</a>, <span title="akka.persistence.PersistentRepr">p</span>.<a href="Persistent.scala.html#akka.persistence;PersistentId.sequenceNr" title="=&gt; Long">sequenceNr</a>, <a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.cause" title="Throwable">cause</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> LoopMessageSuccess<span class="delimiter">(</span><span title="Any">m</span>, _<span class="delimiter">)</span>                  ⇒ <a href="Recovery.scala.html#akka.persistence;Recovery;State.process" title="(receive: ProcessorImpl.this.Receive, message: Any)Unit">process</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.receive" title="ProcessorImpl.this.Receive">receive</a>, <span title="Any">m</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol.WriteMessagesSuccessful" title="akka.persistence.JournalProtocol.WriteMessagesSuccessful.type">WriteMessagesSuccessful</a> | WriteMessagesFailed<span class="delimiter">(</span>_<span class="delimiter">)</span> ⇒
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.batching_=" title="(x$1: Boolean)Unit">batching</a> = <span title="Boolean(false)" class="keyword">false</span> <span class="keyword">else</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.journalBatch" title="()Unit">journalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <span title="akka.persistence.PersistentRepr">p</span>: <a href="Persistent.scala.html#akka.persistence;PersistentRepr" title="akka.persistence.PersistentRepr">PersistentRepr</a> ⇒
+        <a href="#akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7)" title="(p: akka.persistence.Resequenceable)Unit">addToBatch</a><span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">p</span><span class="delimiter">)</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.batching_=" title="=&gt; Boolean">batching</a> <span title="(x: Boolean)Boolean">||</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.maxBatchSizeReached" title="=&gt; Boolean">maxBatchSizeReached</a><span class="delimiter">)</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.journalBatch" title="()Unit">journalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.persistence.NonPersistentRepr" id="akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.n">n</a>: <a href="Persistent.scala.html#akka.persistence;NonPersistentRepr" title="akka.persistence.NonPersistentRepr">NonPersistentRepr</a> ⇒
+        <a href="#akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7)" title="(p: akka.persistence.Resequenceable)Unit">addToBatch</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.n" title="akka.persistence.NonPersistentRepr">n</a><span class="delimiter">)</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.batching_=" title="=&gt; Boolean">batching</a> <span title="(x: Boolean)Boolean">||</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.maxBatchSizeReached" title="=&gt; Boolean">maxBatchSizeReached</a><span class="delimiter">)</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.journalBatch" title="()Unit">journalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.persistence.PersistentBatch" id="akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.pb">pb</a>: <a href="Persistent.scala.html#akka.persistence;PersistentBatch" title="akka.persistence.PersistentBatch">PersistentBatch</a> ⇒
+        <span class="comment">// submit all batched messages before submitting this user batch (isolated)</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.journalBatch" title="()Unit">journalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#akka.persistence;ProcessorImpl.processing;$anon.addToBatch(56b5b4bda2)" title="(pb: akka.persistence.PersistentBatch)Unit">addToBatch</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.aroundReceive.pb" title="akka.persistence.PersistentBatch">pb</a><span class="delimiter">)</span>
+        <a href="#akka.persistence;ProcessorImpl.processing;$anon.journalBatch" title="()Unit">journalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <span title="Any">m</span> ⇒
+        <span class="comment">// submit all batched messages before looping this message</span>
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.batching_=" title="(x$1: Boolean)Unit">batching</a> = <span title="Boolean(false)" class="keyword">false</span> <span class="keyword">else</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.journalBatch" title="()Unit">journalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="Recovery.scala.html#akka.persistence;Recovery.journal" title="=&gt; akka.actor.ActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef.forward" title="(message: Any)(implicit context: akka.actor.ActorContext)Unit">forward</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;LoopMessage" title="(message: Any, persistentActor: akka.actor.ActorRef, actorInstanceId: Int)akka.persistence.JournalProtocol.LoopMessage">LoopMessage</a><span class="delimiter">(</span><span title="Any">m</span>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(p: akka.persistence.Resequenceable)Unit" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7)">addToBatch</a><span class="delimiter">(</span><span title="akka.persistence.Resequenceable">p</span>: <a href="Persistent.scala.html#akka.persistence;Resequenceable" title="akka.persistence.Resequenceable">Resequenceable</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="akka.persistence.Resequenceable">p</span> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <span title="akka.persistence.PersistentRepr">p</span>: <a href="Persistent.scala.html#akka.persistence;PersistentRepr" title="akka.persistence.PersistentRepr">PersistentRepr</a> ⇒
+        <a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="(x$1: scala.collection.immutable.Vector[akka.persistence.Resequenceable])Unit">processorBatch</a> = <a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a> <span title="(elem: akka.persistence.Resequenceable)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Vector[akka.persistence.Resequenceable],akka.persistence.Resequenceable,scala.collection.immutable.Vector[akka.persistence.Resequenceable]])scala.collection.immutable.Vector[akka.persistence.Resequenceable]">:+</span> <span title="akka.persistence.PersistentRepr">p</span>.<a href="Persistent.scala.html#akka.persistence;PersistentRepr.update$default$3" title="Boolean" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7).x$8">update</a><span class="delimiter">(</span>persistenceId = <a href="Recovery.scala.html#akka.persistence;Recovery.persistenceId" title="String" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7).x$1">persistenceId</a>, sequenceNr = <a href="#akka.persistence;ProcessorImpl.nextSequenceNr" title="()Long">nextSequenceNr</a><a title="Long" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7).x$2" class="delimiter">(</a><span class="delimiter">)</span>, sender = <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.sender" title="()akka.actor.ActorRef">sender</a><a title="akka.actor.ActorRef" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7).x$3" class="delimiter">(</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.persistence.Resequenceable" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7).r">r</a> ⇒
+        <a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="(x$1: scala.collection.immutable.Vector[akka.persistence.Resequenceable])Unit">processorBatch</a> = <a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a> <span title="(elem: akka.persistence.Resequenceable)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Vector[akka.persistence.Resequenceable],akka.persistence.Resequenceable,scala.collection.immutable.Vector[akka.persistence.Resequenceable]])scala.collection.immutable.Vector[akka.persistence.Resequenceable]">:+</span> <a href="#akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7).r" title="akka.persistence.Resequenceable">r</a>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="(pb: akka.persistence.PersistentBatch)Unit" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(56b5b4bda2)">addToBatch</a><span class="delimiter">(</span><a title="akka.persistence.PersistentBatch" id="akka.persistence;ProcessorImpl.processing;$anon.addToBatch(56b5b4bda2).pb">pb</a>: <a href="Persistent.scala.html#akka.persistence;PersistentBatch" title="akka.persistence.PersistentBatch">PersistentBatch</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+      <a href="#akka.persistence;ProcessorImpl.processing;$anon.addToBatch(56b5b4bda2).pb" title="akka.persistence.PersistentBatch">pb</a>.<a href="Persistent.scala.html#akka.persistence;PersistentBatch.batch" title="=&gt; scala.collection.immutable.Seq[akka.persistence.Resequenceable]">batch</a>.<span title="(f: akka.persistence.Resequenceable =&gt; Unit)Unit">foreach</span><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processing;$anon.addToBatch(7c3ee8dda7)" title="(p: akka.persistence.Resequenceable)Unit">addToBatch</a><span class="delimiter">)</span>
+
+    <span class="keyword">def</span> <a title="=&gt; Boolean" id="akka.persistence;ProcessorImpl.processing;$anon.maxBatchSizeReached">maxBatchSizeReached</a>: <span title="Boolean">Boolean</span> =
+      <a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a>.<span title="=&gt; Int">length</span> <span title="(x: Int)Boolean">&gt;=</span> <a href="Recovery.scala.html#akka.persistence;Recovery.extension" title="=&gt; akka.persistence.Persistence">extension</a>.<a href="Persistence.scala.html#akka.persistence;Persistence.settings" title="=&gt; akka.persistence.PersistenceSettings">settings</a>.<a href="Persistence.scala.html#akka.persistence;PersistenceSettings.journal" title="ProcessorImpl.this.extension.settings.journal.type">journal</a>.<a href="Persistence.scala.html#akka.persistence;PersistenceSettings.journal.maxMessageBatchSize" title="=&gt; Int">maxMessageBatchSize</a>
+
+    <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;ProcessorImpl.processing;$anon.journalBatch">journalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;ProcessorImpl.flushJournalBatch" title="()Unit">flushJournalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#akka.persistence;ProcessorImpl.processing;$anon.batching_=" title="(x$1: Boolean)Unit">batching</a> = <span title="Boolean(true)" class="keyword">true</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Switches to `initializing` state and requests the highest stored sequence number from the journal.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receive: ProcessorImpl.this.Receive, awaitReplay: Boolean)Unit" id="akka.persistence;ProcessorImpl.onReplaySuccess">onReplaySuccess</a><span class="delimiter">(</span><a title="ProcessorImpl.this.Receive" id="akka.persistence;ProcessorImpl.onReplaySuccess.receive">receive</a>: <span title="ProcessorImpl.this.Receive">Receive</span>, <a title="Boolean" id="akka.persistence;ProcessorImpl.onReplaySuccess.awaitReplay">awaitReplay</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="Recovery.scala.html#akka.persistence;Recovery._currentState_=" title="(x$1: ProcessorImpl.this.State)Unit">_currentState</a> = <a href="#akka.persistence;ProcessorImpl.initializing" title="=&gt; ProcessorImpl.this.State">initializing</a>
+    <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;ReadHighestSequenceNr" title="(fromSequenceNr: Long, persistenceId: String, persistentActor: akka.actor.ActorRef)akka.persistence.JournalProtocol.ReadHighestSequenceNr">ReadHighestSequenceNr</a><span class="delimiter">(</span><a href="Recovery.scala.html#akka.persistence;Recovery.lastSequenceNr" title="=&gt; Long">lastSequenceNr</a>, <a href="Recovery.scala.html#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receive: ProcessorImpl.this.Receive, awaitReplay: Boolean, cause: Throwable)Unit" id="akka.persistence;ProcessorImpl.onReplayFailure">onReplayFailure</a><span class="delimiter">(</span><a title="ProcessorImpl.this.Receive" id="akka.persistence;ProcessorImpl.onReplayFailure.receive">receive</a>: <span title="ProcessorImpl.this.Receive">Receive</span>, <a title="Boolean" id="akka.persistence;ProcessorImpl.onReplayFailure.awaitReplay">awaitReplay</a>: <span title="Boolean">Boolean</span>, <a title="Throwable" id="akka.persistence;ProcessorImpl.onReplayFailure.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;ProcessorImpl.onRecoveryFailure" title="(receive: ProcessorImpl.this.Receive, cause: Throwable)Unit">onRecoveryFailure</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.onReplayFailure.receive" title="ProcessorImpl.this.Receive">receive</a>, <a href="#akka.persistence;ProcessorImpl.onReplayFailure.cause" title="Throwable">cause</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Invokes this processor's behavior with a `RecoveryFailure` message.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(receive: ProcessorImpl.this.Receive, cause: Throwable)Unit" id="akka.persistence;ProcessorImpl.onRecoveryFailure">onRecoveryFailure</a><span class="delimiter">(</span><a title="ProcessorImpl.this.Receive" id="akka.persistence;ProcessorImpl.onRecoveryFailure.receive">receive</a>: <span title="ProcessorImpl.this.Receive">Receive</span>, <a title="Throwable" id="akka.persistence;ProcessorImpl.onRecoveryFailure.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;ProcessorImpl.onRecoveryFailure.receive" title="ProcessorImpl.this.Receive">receive</a>.<span title="(x: akka.persistence.RecoveryFailure, default: akka.persistence.RecoveryFailure =&gt; Unit)Unit">applyOrElse</span><span class="delimiter">(</span><a href="#akka.persistence.RecoveryFailure.readResolve" title="(cause: Throwable)akka.persistence.RecoveryFailure">RecoveryFailure</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.onRecoveryFailure.cause" title="Throwable">cause</a><span class="delimiter">)</span>, <a href="#akka.persistence;ProcessorImpl.unhandled" title="(message: Any)Unit">unhandled</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Invokes this processor's behavior with a `RecoveryFinished` message.
+   */</span>
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(receive: ProcessorImpl.this.Receive)Unit" id="akka.persistence;ProcessorImpl.onRecoveryCompleted">onRecoveryCompleted</a><span class="delimiter">(</span><a title="ProcessorImpl.this.Receive" id="akka.persistence;ProcessorImpl.onRecoveryCompleted.receive">receive</a>: <span title="ProcessorImpl.this.Receive">Receive</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;ProcessorImpl.onRecoveryCompleted.receive" title="ProcessorImpl.this.Receive">receive</a>.<span title="(x: akka.persistence.RecoveryCompleted.type, default: akka.persistence.RecoveryCompleted.type =&gt; Unit)Unit">applyOrElse</span><span class="delimiter">(</span><a href="#akka.persistence.RecoveryCompleted.readResolve" title="akka.persistence.RecoveryCompleted.type">RecoveryCompleted</a>, <a href="#akka.persistence;ProcessorImpl.unhandled" title="(message: Any)Unit">unhandled</a><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="String" id="akka.persistence;ProcessorImpl._persistenceId">_persistenceId</a> = <a href="Recovery.scala.html#akka.persistence;Recovery.extension" title="=&gt; akka.persistence.Persistence">extension</a>.<a href="Persistence.scala.html#akka.persistence;Persistence.persistenceId" title="(persistentActor: akka.actor.ActorRef)String">persistenceId</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="scala.collection.immutable.Vector[akka.persistence.Resequenceable]" id="akka.persistence;ProcessorImpl.processorBatch_=">processorBatch</a> = <span title="=&gt; collection.immutable.Vector.type">Vector</span>.<span title="[A]=&gt; scala.collection.immutable.Vector[A]">empty</span><span title="scala.collection.immutable.Vector[akka.persistence.Resequenceable]" class="delimiter">[</span><a href="Persistent.scala.html#akka.persistence;Resequenceable" title="akka.persistence.Resequenceable">Resequenceable</a><span class="delimiter">]</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Long" id="akka.persistence;ProcessorImpl.sequenceNr_=">sequenceNr</a>: <span title="Long">Long</span> = <span title="Long(0L)" class="long">0L</span>
+
+  <span class="comment">/**
+   * Processor id. Defaults to this processor's path and can be overridden.
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;Override `persistenceId: String` instead. Processor will be removed.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; String" id="akka.persistence;ProcessorImpl.processorId">processorId</a>: <span title="String">String</span> = <a href="#akka.persistence;ProcessorImpl._persistenceId" title="=&gt; String">_persistenceId</a> <span class="comment">// TODO: remove processorId</span>
+
+  <span class="comment">/**
+   * Returns `persistenceId`.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; String" id="akka.persistence;ProcessorImpl.snapshotterId">snapshotterId</a>: <span title="String">String</span> = <a href="Recovery.scala.html#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a>
+
+  <span class="comment">/**
+   * Returns `true` if this processor is currently recovering.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="akka.persistence;ProcessorImpl.recoveryRunning">recoveryRunning</a>: <span title="Boolean">Boolean</span> =
+    <a href="Recovery.scala.html#akka.persistence;Recovery._currentState" title="=&gt; ProcessorImpl.this.State">_currentState</a> <span title="(x$1: AnyRef)Boolean">!=</span> <a href="#akka.persistence;ProcessorImpl.processing" title="=&gt; ProcessorImpl.this.State{def addToBatch(p: akka.persistence.Resequenceable): Unit; def addToBatch(pb: akka.persistence.PersistentBatch): Unit; def maxBatchSizeReached: Boolean; def journalBatch(): Unit}">processing</a>
+
+  <span class="comment">/**
+   * Returns `true` if this processor has successfully finished recovery.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Boolean" id="akka.persistence;ProcessorImpl.recoveryFinished">recoveryFinished</a>: <span title="Boolean">Boolean</span> =
+    <a href="Recovery.scala.html#akka.persistence;Recovery._currentState" title="=&gt; ProcessorImpl.this.State">_currentState</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#akka.persistence;ProcessorImpl.processing" title="=&gt; ProcessorImpl.this.State{def addToBatch(p: akka.persistence.Resequenceable): Unit; def addToBatch(pb: akka.persistence.PersistentBatch): Unit; def maxBatchSizeReached: Boolean; def journalBatch(): Unit}">processing</a>
+
+  <span class="comment">/**
+   * Marks a persistent message, identified by `sequenceNr`, as deleted. A message marked as deleted is
+   * not replayed during recovery. This method is usually called inside `preRestartProcessor` when a
+   * persistent message caused an exception. Processors that want to re-receive that persistent message
+   * during recovery should not call this method.
+   *
+   * @param sequenceNr sequence number of the persistent message to be deleted.
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;deleteMessage(sequenceNr) will be removed. Instead, validate before persist, and use deleteMessages for pruning.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="(sequenceNr: Long)Unit" id="akka.persistence;ProcessorImpl.deleteMessage(ee59c36e1d)">deleteMessage</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;ProcessorImpl.deleteMessage(ee59c36e1d).sequenceNr">sequenceNr</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede)" title="(sequenceNr: Long, permanent: Boolean)Unit">deleteMessage</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.deleteMessage(ee59c36e1d).sequenceNr" title="Long">sequenceNr</a>, permanent = <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Deletes a persistent message identified by `sequenceNr`. If `permanent` is set to `false`,
+   * the persistent message is marked as deleted in the journal, otherwise it is permanently
+   * deleted from the journal. A deleted message is not replayed during recovery. This method
+   * is usually called inside `preRestartProcessor` when a persistent message caused an exception.
+   * Processors that want to re-receive that persistent message during recovery should not call
+   * this method.
+   *
+   * @param sequenceNr sequence number of the persistent message to be deleted.
+   * @param permanent if `false`, the message is marked as deleted, otherwise it is permanently deleted.
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;deleteMessage(sequenceNr) will be removed. Instead, validate before persist, and use deleteMessages for pruning.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="(sequenceNr: Long, permanent: Boolean)Unit" id="akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede)">deleteMessage</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede).sequenceNr">sequenceNr</a>: <span title="Long">Long</span>, <a title="Boolean" id="akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede).permanent">permanent</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;DeleteMessages" title="(messageIds: scala.collection.immutable.Seq[akka.persistence.PersistentId], permanent: Boolean, requestor: Option[akka.actor.ActorRef])akka.persistence.JournalProtocol.DeleteMessages">DeleteMessages</a><span class="delimiter">(</span><span title="(xs: akka.persistence.PersistentIdImpl*)List[akka.persistence.PersistentIdImpl]">List</span><span class="delimiter">(</span><a href="Persistent.scala.html#akka.persistence;PersistentIdImpl" title="(processorId: String, sequenceNr: Long)akka.persistence.PersistentIdImpl">PersistentIdImpl</a><span class="delimiter">(</span><a href="Recovery.scala.html#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a>, <a href="#akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede).sequenceNr" title="Long">sequenceNr</a><span class="delimiter">)</span><span class="delimiter">)</span>, <a href="#akka.persistence;ProcessorImpl.deleteMessage(c8e8289ede).permanent" title="Boolean">permanent</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Permanently deletes all persistent messages with sequence numbers less than or equal `toSequenceNr`.
+   *
+   * @param toSequenceNr upper sequence number bound of persistent messages to be deleted.
+   */</span>
+  <span class="keyword">def</span> <a title="(toSequenceNr: Long)Unit" id="akka.persistence;ProcessorImpl.deleteMessages(641961f91e)">deleteMessages</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;ProcessorImpl.deleteMessages(641961f91e).toSequenceNr">toSequenceNr</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;ProcessorImpl.deleteMessages(0318139e22)" title="(toSequenceNr: Long, permanent: Boolean)Unit">deleteMessages</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.deleteMessages(641961f91e).toSequenceNr" title="Long">toSequenceNr</a>, permanent = <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Deletes all persistent messages with sequence numbers less than or equal `toSequenceNr`. If `permanent`
+   * is set to `false`, the persistent messages are marked as deleted in the journal, otherwise
+   * they permanently deleted from the journal.
+   *
+   * @param toSequenceNr upper sequence number bound of persistent messages to be deleted.
+   * @param permanent if `false`, the message is marked as deleted, otherwise it is permanently deleted.
+   */</span>
+  <span class="keyword">def</span> <a title="(toSequenceNr: Long, permanent: Boolean)Unit" id="akka.persistence;ProcessorImpl.deleteMessages(0318139e22)">deleteMessages</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;ProcessorImpl.deleteMessages(0318139e22).toSequenceNr">toSequenceNr</a>: <span title="Long">Long</span>, <a title="Boolean" id="akka.persistence;ProcessorImpl.deleteMessages(0318139e22).permanent">permanent</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;DeleteMessagesTo" title="(persistenceId: String, toSequenceNr: Long, permanent: Boolean)akka.persistence.JournalProtocol.DeleteMessagesTo">DeleteMessagesTo</a><span class="delimiter">(</span><a href="Recovery.scala.html#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a>, <a href="#akka.persistence;ProcessorImpl.deleteMessages(0318139e22).toSequenceNr" title="Long">toSequenceNr</a>, <a href="#akka.persistence;ProcessorImpl.deleteMessages(0318139e22).permanent" title="Boolean">permanent</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;ProcessorImpl.flushJournalBatch">flushJournalBatch</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;WriteMessages" title="(messages: scala.collection.immutable.Seq[akka.persistence.Resequenceable], persistentActor: akka.actor.ActorRef, actorInstanceId: Int)akka.persistence.JournalProtocol.WriteMessages">WriteMessages</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.persistence;ProcessorImpl.instanceId" title="=&gt; Int">instanceId</a><span class="delimiter">)</span>
+    <a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="(x$1: scala.collection.immutable.Vector[akka.persistence.Resequenceable])Unit">processorBatch</a> = <span title="=&gt; collection.immutable.Vector.type">Vector</span>.<span title="scala.collection.immutable.Vector[Nothing]">empty</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;ProcessorImpl.aroundPreStart">aroundPreStart</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="keyword">try</span> <a href="#akka.persistence;ProcessorImpl.preStart" title="()Unit">preStart</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="keyword">finally</span> <a href="#akka.persistence;ProcessorImpl" title="akka.persistence.ProcessorImpl" class="keyword">super</a>.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.preStart" title="()Unit">preStart</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;ProcessorImpl.aroundPostStop">aroundPostStop</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="keyword">try</span> <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(11538b75a6)" title="(filterPredicate: Any =&gt; Boolean)Unit">unstashAll</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.unstashFilterPredicate" title="=&gt; Any =&gt; Boolean">unstashFilterPredicate</a><span class="delimiter">)</span> <span class="keyword">finally</span> <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;UnrestrictedStash.postStop" title="()Unit">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(reason: Throwable, message: Option[Any])Unit" id="akka.persistence;ProcessorImpl.aroundPreRestart">aroundPreRestart</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;ProcessorImpl.aroundPreRestart.reason">reason</a>: <span title="Throwable">Throwable</span>, <a title="Option[Any]" id="akka.persistence;ProcessorImpl.aroundPreRestart.message">message</a>: <span title="Option[Any]">Option</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="keyword">try</span> <span class="delimiter">{</span>
+      <a href="Recovery.scala.html#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.prepend" title="(others: scala.collection.immutable.Seq[akka.dispatch.Envelope])Unit">prepend</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.processorBatch_=" title="=&gt; scala.collection.immutable.Vector[akka.persistence.Resequenceable]">processorBatch</a>.<span title="(f: akka.persistence.Resequenceable =&gt; akka.dispatch.Envelope)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Vector[akka.persistence.Resequenceable],akka.dispatch.Envelope,scala.collection.immutable.Seq[akka.dispatch.Envelope]])scala.collection.immutable.Seq[akka.dispatch.Envelope]">map</span><span title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.Vector.Coll,akka.dispatch.Envelope,scala.collection.immutable.Vector[akka.dispatch.Envelope]]" class="delimiter">(</span><a title="akka.persistence.Resequenceable" id="akka.persistence;ProcessorImpl.aroundPreRestart.$anonfun.p">p</a> ⇒ <a href="../../../actor/akka/dispatch/AbstractDispatcher.scala.html#akka.dispatch.Envelope.apply(fd4a9d0721)" title="(message: Any, sender: akka.actor.ActorRef, system: akka.actor.ActorSystem)akka.dispatch.Envelope">Envelope</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.aroundPreRestart.$anonfun.p" title="akka.persistence.Resequenceable">p</a>, <a href="#akka.persistence;ProcessorImpl.aroundPreRestart.$anonfun.p" title="akka.persistence.Resequenceable">p</a>.<a href="Persistent.scala.html#akka.persistence;Resequenceable.sender" title="=&gt; akka.actor.ActorRef">sender</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="Recovery.scala.html#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(aa97cb1b3d)" title="()Unit">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(11538b75a6)" title="(filterPredicate: Any =&gt; Boolean)Unit">unstashAll</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.unstashFilterPredicate" title="=&gt; Any =&gt; Boolean">unstashFilterPredicate</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span> <span class="keyword">finally</span> <span class="delimiter">{</span>
+      <a href="#akka.persistence;ProcessorImpl.aroundPreRestart.message" title="Option[Any]">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> Some<span class="delimiter">(</span>WriteMessageSuccess<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">m</span>, _<span class="delimiter">)</span><span class="delimiter">)</span> ⇒ <a href="#akka.persistence;ProcessorImpl.preRestartDefault" title="(reason: Throwable, message: Option[Any])Unit">preRestartDefault</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.aroundPreRestart.reason" title="Throwable">reason</a>, <span title="(x: akka.persistence.PersistentRepr)Some[akka.persistence.PersistentRepr]">Some</span><span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">m</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">case</span> Some<span class="delimiter">(</span>LoopMessageSuccess<span class="delimiter">(</span><span title="Any">m</span>, _<span class="delimiter">)</span><span class="delimiter">)</span>  ⇒ <a href="#akka.persistence;ProcessorImpl.preRestartDefault" title="(reason: Throwable, message: Option[Any])Unit">preRestartDefault</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.aroundPreRestart.reason" title="Throwable">reason</a>, <span title="(x: Any)Some[Any]">Some</span><span class="delimiter">(</span><span title="Any">m</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">case</span> Some<span class="delimiter">(</span>ReplayedMessage<span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">m</span><span class="delimiter">)</span><span class="delimiter">)</span>        ⇒ <a href="#akka.persistence;ProcessorImpl.preRestartDefault" title="(reason: Throwable, message: Option[Any])Unit">preRestartDefault</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.aroundPreRestart.reason" title="Throwable">reason</a>, <span title="(x: akka.persistence.PersistentRepr)Some[akka.persistence.PersistentRepr]">Some</span><span class="delimiter">(</span><span title="akka.persistence.PersistentRepr">m</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">case</span> <a title="Option[Any]" id="akka.persistence;ProcessorImpl.aroundPreRestart.mo">mo</a>                              ⇒ <a href="#akka.persistence;ProcessorImpl.preRestartDefault" title="(reason: Throwable, message: Option[Any])Unit">preRestartDefault</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.aroundPreRestart.reason" title="Throwable">reason</a>, <span title="None.type">None</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * User-overridable callback. Called when a processor is started. Default implementation sends
+   * a `Recover()` to `self`.
+   */</span>
+  @throws<span class="delimiter">(</span>classOf<span class="delimiter">[</span>Exception<span class="delimiter">]</span><span class="delimiter">)</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;ProcessorImpl.preStart">preStart</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">self</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="Recovery.scala.html#akka.persistence;Recover" title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long, replayMax: Long)akka.persistence.Recover">Recover</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * User-overridable callback. Called before a processor is restarted. Default implementation sends
+   * a `Recover(lastSequenceNr)` message to `self` if `message` is defined, `Recover() otherwise`.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(reason: Throwable, message: Option[Any])Unit" id="akka.persistence;ProcessorImpl.preRestart">preRestart</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;ProcessorImpl.preRestart.reason">reason</a>: <span title="Throwable">Throwable</span>, <a title="Option[Any]" id="akka.persistence;ProcessorImpl.preRestart.message">message</a>: <span title="Option[Any]">Option</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;ProcessorImpl.preRestart.message" title="Option[Any]">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Some<span class="delimiter">(</span>_<span class="delimiter">)</span> ⇒ <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">self</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="Recovery.scala.html#akka.persistence.Recover.apply$default$1" title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence;ProcessorImpl.preRestart.x$11">Recover</a><span class="delimiter">(</span>toSequenceNr = <a href="Recovery.scala.html#akka.persistence;Recovery.lastSequenceNr" title="Long" id="akka.persistence;ProcessorImpl.preRestart.x$9">lastSequenceNr</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <span title="None.type">None</span>    ⇒ <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">self</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="Recovery.scala.html#akka.persistence;Recover" title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long, replayMax: Long)akka.persistence.Recover">Recover</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Calls [[preRestart]] and then `super.preRestart()`. If processor implementation classes want to
+   * opt out from stopping child actors, they should override this method and call [[preRestart]] only.
+   */</span>
+  <span class="keyword">def</span> <a title="(reason: Throwable, message: Option[Any])Unit" id="akka.persistence;ProcessorImpl.preRestartDefault">preRestartDefault</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;ProcessorImpl.preRestartDefault.reason">reason</a>: <span title="Throwable">Throwable</span>, <a title="Option[Any]" id="akka.persistence;ProcessorImpl.preRestartDefault.message">message</a>: <span title="Option[Any]">Option</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="keyword">try</span> <a href="#akka.persistence;ProcessorImpl.preRestart" title="(reason: Throwable, message: Option[Any])Unit">preRestart</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.preRestartDefault.reason" title="Throwable">reason</a>, <a href="#akka.persistence;ProcessorImpl.preRestartDefault.message" title="Option[Any]">message</a><span class="delimiter">)</span> <span class="keyword">finally</span> <a href="#akka.persistence;ProcessorImpl" title="akka.persistence.ProcessorImpl" class="keyword">super</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;UnrestrictedStash.preRestart" title="(reason: Throwable, message: Option[Any])Unit">preRestart</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.preRestartDefault.reason" title="Throwable">reason</a>, <a href="#akka.persistence;ProcessorImpl.preRestartDefault.message" title="Option[Any]">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(message: Any)Unit" id="akka.persistence;ProcessorImpl.unhandled">unhandled</a><span class="delimiter">(</span><a title="Any" id="akka.persistence;ProcessorImpl.unhandled.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;ProcessorImpl.unhandled.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a href="#akka.persistence.RecoveryCompleted.readResolve" title="akka.persistence.RecoveryCompleted.type">RecoveryCompleted</a> ⇒ <span class="comment">// mute</span>
+      <span class="keyword">case</span> RecoveryFailure<span class="delimiter">(</span><span title="Throwable">cause</span><span class="delimiter">)</span> ⇒
+        <span class="keyword">val</span> <span title="String">errorMsg</span> = <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;Processor killed after recovery failure (persisten id = [&quot;)">Processor killed after recovery failure (persisten id = [$</span><span class="delimiter">{</span><a href="Recovery.scala.html#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a><span class="delimiter">}</span><span title="String(&quot;]). &quot;)" class="string">]). &quot;</span> <span title="(x$1: Any)String">+</span>
+          <span title="String(&quot;To avoid killing processors on recovery failure, a processor must handle RecoveryFailure messages. &quot;)" class="string">&quot;To avoid killing processors on recovery failure, a processor must handle RecoveryFailure messages. &quot;</span> <span title="(x$1: Any)String">+</span>
+          <span title="String(&quot;RecoveryFailure was caused by: &quot;)" class="string">&quot;RecoveryFailure was caused by: &quot;</span> <span title="(x$1: Any)String">+</span> <span title="Throwable">cause</span>
+        <span title="Nothing" class="keyword">throw</span> <span title="akka.actor.ActorKilledException" class="keyword">new</span> <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;ActorKilledException" title="akka.actor.ActorKilledException">ActorKilledException</a><span class="delimiter">(</span><span title="String">errorMsg</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> PersistenceFailure<span class="delimiter">(</span><a title="Any" id="akka.persistence;ProcessorImpl.unhandled.payload">payload</a>, <a title="Long" id="akka.persistence;ProcessorImpl.unhandled.sequenceNumber">sequenceNumber</a>, <span title="Throwable">cause</span><span class="delimiter">)</span> ⇒
+        <span class="keyword">val</span> <span title="String">errorMsg</span> = <span title="String(&quot;Processor killed after persistence failure &quot;)" class="string">&quot;Processor killed after persistence failure &quot;</span> <span title="(x$1: Any)String">+</span>
+          <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;(persistent id = [&quot;)">(persistent id = [$</span><span class="delimiter">{</span><a href="Recovery.scala.html#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a><span class="delimiter">}</span><span title="String(&quot;], sequence nr = [&quot;)">], sequence nr = [$</span><span class="delimiter">{</span><a href="#akka.persistence;ProcessorImpl.unhandled.sequenceNumber" title="Long">sequenceNumber</a><span class="delimiter">}</span><span title="String(&quot;], payload class = [&quot;)">], payload class = [$</span><span class="delimiter">{</span><a href="#akka.persistence;ProcessorImpl.unhandled.payload" title="Any">payload</a>.<span title="()Class[_]">getClass</span>.<span title="()String">getName</span><span class="delimiter">}</span><span title="String(&quot;]). &quot;)" class="string">]). &quot;</span> <span title="(x$1: Any)String">+</span>
+          <span title="String(&quot;To avoid killing processors on persistence failure, a processor must handle PersistenceFailure messages. &quot;)" class="string">&quot;To avoid killing processors on persistence failure, a processor must handle PersistenceFailure messages. &quot;</span> <span title="(x$1: Any)String">+</span>
+          <span title="String(&quot;PersistenceFailure was caused by: &quot;)" class="string">&quot;PersistenceFailure was caused by: &quot;</span> <span title="(x$1: Any)String">+</span> <span title="Throwable">cause</span>
+        <span title="Nothing" class="keyword">throw</span> <span title="akka.actor.ActorKilledException" class="keyword">new</span> <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;ActorKilledException" title="akka.actor.ActorKilledException">ActorKilledException</a><span class="delimiter">(</span><span title="String">errorMsg</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="Any" id="akka.persistence;ProcessorImpl.unhandled.m">m</a> ⇒ <a href="#akka.persistence;ProcessorImpl" title="akka.persistence.ProcessorImpl" class="keyword">super</a>.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.unhandled" title="(message: Any)Unit">unhandled</a><span class="delimiter">(</span><a href="#akka.persistence;ProcessorImpl.unhandled.m" title="Any">m</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="()Long" id="akka.persistence;ProcessorImpl.nextSequenceNr">nextSequenceNr</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Long">Long</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;ProcessorImpl.sequenceNr_=" title="(x$1: Long)Unit">sequenceNr</a> <span title="(x: Long)Long">+=</span> <span title="Long(1L)" class="long">1L</span>
+    <a href="#akka.persistence;ProcessorImpl.sequenceNr_=" title="=&gt; Long">sequenceNr</a>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="Any =&gt; Boolean" id="akka.persistence;ProcessorImpl.unstashFilterPredicate">unstashFilterPredicate</a>: Any ⇒ Boolean = <a href="#akka.persistence;ProcessorImpl.unstashFilterPredicate.$anonfun.x0$1" title="Boolean" class="delimiter">{</a>
+    <span class="keyword">case</span> _: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;WriteMessageSuccess" title="akka.persistence.JournalProtocol.WriteMessageSuccess">WriteMessageSuccess</a> ⇒ <span title="Boolean(false)" class="keyword">false</span>
+    <span class="keyword">case</span> _: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;ReplayedMessage" title="akka.persistence.JournalProtocol.ReplayedMessage">ReplayedMessage</a>     ⇒ <span title="Boolean(false)" class="keyword">false</span>
+    <span class="keyword">case</span> _                      ⇒ <span title="Boolean(true)" class="keyword">true</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Sent to a [[Processor]] if a journal fails to write a [[Persistent]] message. If
+ * not handled, an `akka.actor.ActorKilledException` is thrown by that processor.
+ *
+ * @param payload payload of the persistent message.
+ * @param sequenceNr sequence number of the persistent message.
+ * @param cause failure cause.
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+<span class="keyword">case class</span> <a title="class PersistenceFailure extends AnyRef with Product with Serializable" id="akka.persistence.PersistenceFailure.readResolve">PersistenceFailure</a><a href="#akka.persistence.PersistenceFailure.readResolve" title="Product" class="delimiter">(</a><a title="Any" id="akka.persistence;PersistenceFailure.payload">payload</a>: <span title="Any">Any</span>, <a title="Long" id="akka.persistence;PersistenceFailure.sequenceNr">sequenceNr</a>: <span title="Long">Long</span>, <a title="Throwable" id="akka.persistence;PersistenceFailure.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>
+
+<span class="comment">/**
+ * Sent to a [[Processor]] if a journal fails to replay messages or fetch that processor's
+ * highest sequence number. If not handled, the prossor will be stopped.
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+<span class="keyword">case class</span> <a title="class RecoveryFailure extends AnyRef with Product with Serializable" id="akka.persistence.RecoveryFailure.readResolve">RecoveryFailure</a><a href="#akka.persistence.RecoveryFailure.readResolve" title="Product" class="delimiter">(</a><a title="Throwable" id="akka.persistence;RecoveryFailure.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>
+
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class RecoveryCompleted extends AnyRef" id="akka.persistence;RecoveryCompleted">RecoveryCompleted</a>
+<span class="comment">/**
+ * Sent to a [[Processor]] when the journal replay has been finished.
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+<span class="keyword">case object</span> <a href="#akka.persistence.RecoveryCompleted.productElement.x$1" title="akka.persistence.RecoveryCompleted.type" id="akka.persistence.RecoveryCompleted.readResolve">RecoveryCompleted</a> <span title="Product" class="keyword">extends</span> <a href="#akka.persistence;RecoveryCompleted" title="akka.persistence.RecoveryCompleted">RecoveryCompleted</a> <span class="delimiter">{</span>
+  <span class="comment">/**
+   * Java API: get the singleton instance
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; akka.persistence.RecoveryCompleted.type" id="akka.persistence.RecoveryCompleted.getInstance">getInstance</a> = <span class="keyword">this</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API: an actor that persists (journals) messages of type [[Persistent]]. Messages of other types
+ * are not persisted.
+ *
+ * {{{
+ * import akka.persistence.Persistent;
+ * import akka.persistence.Processor;
+ *
+ * class MyProcessor extends UntypedProcessor {
+ *     public void onReceive(Object message) throws Exception {
+ *         if (message instanceof Persistent) {
+ *             // message has been written to journal
+ *             Persistent persistent = (Persistent)message;
+ *             Object payload = persistent.payload();
+ *             Long sequenceNr = persistent.sequenceNr();
+ *             // ...
+ *         } else {
+ *             // message has not been written to journal
+ *         }
+ *     }
+ * }
+ *
+ * // ...
+ *
+ * ActorRef processor = getContext().actorOf(Props.create(MyProcessor.class), &quot;myProcessor&quot;);
+ *
+ * processor.tell(Persistent.create(&quot;foo&quot;), null);
+ * processor.tell(&quot;bar&quot;, null);
+ * }}}
+ *
+ * During start and restart, persistent messages are replayed to a processor so that it can recover internal
+ * state from these messages. New messages sent to a processor during recovery do not interfere with replayed
+ * messages, hence applications don't need to wait for a processor to complete its recovery.
+ *
+ * Automated recovery can be turned off or customized by overriding the [[preStart]] and [[preRestart]] life
+ * cycle hooks. If automated recovery is turned off, an application can explicitly recover a processor by
+ * sending it a [[Recover]] message.
+ *
+ * [[Persistent]] messages are assigned sequence numbers that are generated on a per-processor basis. A sequence
+ * starts at `1L` and doesn't contain gaps unless a processor (logically) deletes a message.
+ *
+ * During recovery, a processor internally buffers new messages until recovery completes, so that new messages
+ * do not interfere with replayed messages. This internal buffer (the ''processor stash'') is isolated from the
+ * ''user stash'' inherited by `akka.actor.Stash`. `Processor` implementation classes can therefore use the
+ * ''user stash'' for stashing/unstashing both persistent and transient messages.
+ *
+ * Processors can also store snapshots of internal state by calling [[saveSnapshot]]. During recovery, a saved
+ * snapshot is offered to the processor with a [[SnapshotOffer]] message, followed by replayed messages, if any,
+ * that are younger than the snapshot. Default is to offer the latest saved snapshot.
+ *
+ * @see [[Processor]]
+ * @see [[Recover]]
+ * @see [[PersistentBatch]]
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;UntypedProcessor will be removed. Instead extend `akka.persistence.UntypedPersistentActor` and use it's `persistAsync(command)(callback)` method to get equivalent semantics.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class UntypedProcessor extends akka.actor.UntypedActor with akka.persistence.Processor" id="akka.persistence;UntypedProcessor">UntypedProcessor</a> <a href="#akka.persistence;UntypedProcessor" title="akka.persistence.UntypedProcessor" class="keyword">extends</a> <a href="../../../actor/akka/actor/UntypedActor.scala.html#akka.actor;UntypedActor" title="akka.actor.UntypedActor">UntypedActor</a> <span class="keyword">with</span> <a href="#akka.persistence;Processor" title="akka.persistence.Processor">Processor</a>
+
+<span class="comment">/**
+ * Java API: compatible with lambda expressions
+ *
+ * An actor that persists (journals) messages of type [[Persistent]]. Messages of other types
+ * are not persisted.
+ * &lt;p/&gt;
+ * Example:
+ * &lt;pre&gt;
+ * class MyProcessor extends AbstractProcessor {
+ *   public MyProcessor() {
+ *     receive(ReceiveBuilder.
+ *       match(Persistent.class, p -&gt; {
+ *         Object payload = p.payload();
+ *         Long sequenceNr = p.sequenceNr();
+ *                 // ...
+ *       }).build()
+ *     );
+ *   }
+ * }
+ *
+ * // ...
+ *
+ * ActorRef processor = context().actorOf(Props.create(MyProcessor.class), &quot;myProcessor&quot;);
+ *
+ * processor.tell(Persistent.create(&quot;foo&quot;), null);
+ * processor.tell(&quot;bar&quot;, null);
+ * &lt;/pre&gt;
+ *
+ * During start and restart, persistent messages are replayed to a processor so that it can recover internal
+ * state from these messages. New messages sent to a processor during recovery do not interfere with replayed
+ * messages, hence applications don't need to wait for a processor to complete its recovery.
+ *
+ * Automated recovery can be turned off or customized by overriding the [[preStart]] and [[preRestart]] life
+ * cycle hooks. If automated recovery is turned off, an application can explicitly recover a processor by
+ * sending it a [[Recover]] message.
+ *
+ * [[Persistent]] messages are assigned sequence numbers that are generated on a per-processor basis. A sequence
+ * starts at `1L` and doesn't contain gaps unless a processor (logically) deletes a message.
+ *
+ * During recovery, a processor internally buffers new messages until recovery completes, so that new messages
+ * do not interfere with replayed messages. This internal buffer (the ''processor stash'') is isolated from the
+ * ''user stash'' inherited by `akka.actor.Stash`. `Processor` implementation classes can therefore use the
+ * ''user stash'' for stashing/unstashing both persistent and transient messages.
+ *
+ * Processors can also store snapshots of internal state by calling [[saveSnapshot]]. During recovery, a saved
+ * snapshot is offered to the processor with a [[SnapshotOffer]] message, followed by replayed messages, if any,
+ * that are younger than the snapshot. Default is to offer the latest saved snapshot.
+ *
+ * @see [[Processor]]
+ * @see [[Recover]]
+ * @see [[PersistentBatch]]
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;AbstractProcessor will be removed. Instead extend `akka.persistence.AbstractPersistentActor` and use it's `persistAsync(command)(callback)` method to get equivalent semantics.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+<span class="keyword">abstract</span> <span class="keyword">class</span> <a title="class AbstractProcessor extends akka.actor.AbstractActor with akka.persistence.Processor" id="akka.persistence;AbstractProcessor">AbstractProcessor</a> <a href="#akka.persistence;AbstractProcessor" title="akka.persistence.AbstractProcessor" class="keyword">extends</a> <a href="../../../actor/akka/actor/AbstractActor.scala.html#akka.actor;AbstractActor" title="akka.actor.AbstractActor">AbstractActor</a> <span class="keyword">with</span> <a href="#akka.persistence;Processor" title="akka.persistence.Processor">Processor</a>
+
+        </pre>
+    </body>
+</html>

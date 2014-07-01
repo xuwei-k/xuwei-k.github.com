@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>actor/akka/dispatch/Dispatcher.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+<span class="keyword">package</span> akka.dispatch
+
+<span class="keyword">import</span> akka.event.<a href="../event/Logging.scala.html#akka.event.Logging" title="akka.event.Logging.type">Logging</a>.Error
+<span class="keyword">import</span> akka.actor.ActorCell
+<span class="keyword">import</span> akka.event.Logging
+<span class="keyword">import</span> akka.dispatch.sysmsg.SystemMessage
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicReference
+<span class="keyword">import</span> java.util.concurrent.<span class="delimiter">{</span> ExecutorService, RejectedExecutionException <span class="delimiter">}</span>
+<span class="keyword">import</span> scala.concurrent.forkjoin.ForkJoinPool
+<span class="keyword">import</span> scala.concurrent.duration.Duration
+<span class="keyword">import</span> scala.concurrent.Awaitable
+<span class="keyword">import</span> scala.concurrent.duration.FiniteDuration
+<span class="keyword">import</span> scala.annotation.tailrec
+<span class="keyword">import</span> java.lang.reflect.ParameterizedType
+
+<span class="comment">/**
+ * The event-based ``Dispatcher`` binds a set of Actors to a thread pool backed up by a
+ * `BlockingQueue`.
+ *
+ * The preferred way of creating dispatchers is to define configuration of it and use the
+ * the `lookup` method in [[akka.dispatch.Dispatchers]].
+ *
+ * @param throughput positive integer indicates the dispatcher will only process so much messages at a time from the
+ *                   mailbox, without checking the mailboxes of other actors. Zero or negative means the dispatcher
+ *                   always continues until the mailbox is empty.
+ *                   Larger values (or zero or negative) increase throughput, smaller values increase fairness
+ */</span>
+<span class="keyword">class</span> <a title="class Dispatcher extends akka.dispatch.MessageDispatcher" id="akka.dispatch;Dispatcher">Dispatcher</a><a href="#akka.dispatch;Dispatcher" title="akka.dispatch.Dispatcher" class="delimiter">(</a>
+  <a title="akka.dispatch.MessageDispatcherConfigurator" id="akka.dispatch;Dispatcher._configurator">_configurator</a>: <a href="AbstractDispatcher.scala.html#akka.dispatch;MessageDispatcherConfigurator" title="akka.dispatch.MessageDispatcherConfigurator">MessageDispatcherConfigurator</a>,
+  <span class="keyword">val</span> <a title="String" id="akka.dispatch;Dispatcher.id">id</a>: <span title="String">String</span>,
+  <span class="keyword">val</span> <a title="Int" id="akka.dispatch;Dispatcher.throughput">throughput</a>: <span title="Int">Int</span>,
+  <span class="keyword">val</span> <a title="scala.concurrent.duration.Duration" id="akka.dispatch;Dispatcher.throughputDeadlineTime">throughputDeadlineTime</a>: <span title="scala.concurrent.duration.Duration">Duration</span>,
+  <a title="akka.dispatch.ExecutorServiceFactoryProvider" id="akka.dispatch;Dispatcher.executorServiceFactoryProvider">executorServiceFactoryProvider</a>: <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceFactoryProvider" title="akka.dispatch.ExecutorServiceFactoryProvider">ExecutorServiceFactoryProvider</a>,
+  <span class="keyword">val</span> <a title="scala.concurrent.duration.FiniteDuration" id="akka.dispatch;Dispatcher.shutdownTimeout">shutdownTimeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <a href="AbstractDispatcher.scala.html#akka.dispatch;MessageDispatcher" title="akka.dispatch.MessageDispatcher">MessageDispatcher</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher._configurator" title="akka.dispatch.MessageDispatcherConfigurator">_configurator</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+  <span class="keyword">import</span> <a href="AbstractDispatcher.scala.html#akka.dispatch;MessageDispatcher.configurator" title="=&gt; akka.dispatch.MessageDispatcherConfigurator">configurator</a>.<a href="AbstractDispatcher.scala.html#akka.dispatch;MessageDispatcherConfigurator.prerequisites" title="=&gt; akka.dispatch.DispatcherPrerequisites">prerequisites</a>._
+
+  <span class="keyword">private</span> <span class="keyword">class</span> <a title="class LazyExecutorServiceDelegate extends Object with akka.dispatch.ExecutorServiceDelegate" id="akka.dispatch;Dispatcher;LazyExecutorServiceDelegate">LazyExecutorServiceDelegate</a><a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate" title="Dispatcher.this.LazyExecutorServiceDelegate" class="delimiter">(</a><a title="akka.dispatch.ExecutorServiceFactory" id="akka.dispatch;Dispatcher;LazyExecutorServiceDelegate.factory">factory</a>: <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceFactory" title="akka.dispatch.ExecutorServiceFactory">ExecutorServiceFactory</a><span class="delimiter">)</span> <span class="keyword">extends</span> <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceDelegate" title="akka.dispatch.ExecutorServiceDelegate">ExecutorServiceDelegate</a> <span class="delimiter">{</span>
+    <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="java.util.concurrent.ExecutorService" id="akka.dispatch;Dispatcher;LazyExecutorServiceDelegate.executor">executor</a>: <span title="java.util.concurrent.ExecutorService">ExecutorService</span> = <a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate.factory" title="akka.dispatch.ExecutorServiceFactory">factory</a>.<a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceFactory.createExecutorService" title="=&gt; java.util.concurrent.ExecutorService">createExecutorService</a>
+    <span class="keyword">def</span> <a title="()Dispatcher.this.LazyExecutorServiceDelegate" id="akka.dispatch;Dispatcher;LazyExecutorServiceDelegate.copy">copy</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate" title="Dispatcher.this.LazyExecutorServiceDelegate">LazyExecutorServiceDelegate</a> = <span title="Dispatcher.this.LazyExecutorServiceDelegate" class="keyword">new</span> <a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate" title="Dispatcher.this.LazyExecutorServiceDelegate">LazyExecutorServiceDelegate</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate.factory" title="akka.dispatch.ExecutorServiceFactory">factory</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  @volatile <span class="keyword">private</span> <span class="keyword">var</span> <a title="Dispatcher.this.LazyExecutorServiceDelegate" id="akka.dispatch;Dispatcher.executorServiceDelegate_=">executorServiceDelegate</a>: <a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate" title="Dispatcher.this.LazyExecutorServiceDelegate">LazyExecutorServiceDelegate</a> =
+    <span title="Dispatcher.this.LazyExecutorServiceDelegate" class="keyword">new</span> <a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate" title="Dispatcher.this.LazyExecutorServiceDelegate">LazyExecutorServiceDelegate</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.executorServiceFactoryProvider" title="akka.dispatch.ExecutorServiceFactoryProvider">executorServiceFactoryProvider</a>.<a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceFactoryProvider.createExecutorServiceFactory" title="(id: String, threadFactory: java.util.concurrent.ThreadFactory)akka.dispatch.ExecutorServiceFactory">createExecutorServiceFactory</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.id" title="=&gt; String">id</a>, <a href="Dispatchers.scala.html#akka.dispatch;DispatcherPrerequisites.threadFactory" title="=&gt; java.util.concurrent.ThreadFactory">threadFactory</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">protected</span> <span class="keyword">final</span> <span class="keyword">def</span> <a title="=&gt; akka.dispatch.ExecutorServiceDelegate" id="akka.dispatch;Dispatcher.executorService">executorService</a>: <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceDelegate" title="akka.dispatch.ExecutorServiceDelegate">ExecutorServiceDelegate</a> = <a href="#akka.dispatch;Dispatcher.executorServiceDelegate_=" title="=&gt; Dispatcher.this.LazyExecutorServiceDelegate">executorServiceDelegate</a>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receiver: akka.actor.ActorCell, invocation: akka.dispatch.Envelope)Unit" id="akka.dispatch;Dispatcher.dispatch">dispatch</a><span class="delimiter">(</span><a title="akka.actor.ActorCell" id="akka.dispatch;Dispatcher.dispatch.receiver">receiver</a>: <a href="../actor/ActorCell.scala.html#akka.actor;ActorCell" title="akka.actor.ActorCell">ActorCell</a>, <a title="akka.dispatch.Envelope" id="akka.dispatch;Dispatcher.dispatch.invocation">invocation</a>: <a href="AbstractDispatcher.scala.html#akka.dispatch;Envelope" title="akka.dispatch.Envelope">Envelope</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="akka.dispatch.Mailbox" id="akka.dispatch;Dispatcher.dispatch.mbox">mbox</a> = <a href="#akka.dispatch;Dispatcher.dispatch.receiver" title="akka.actor.ActorCell">receiver</a>.<a href="../actor/dungeon/Dispatch.scala.html#akka.actor.dungeon;Dispatch.mailbox" title="=&gt; akka.dispatch.Mailbox">mailbox</a>
+    <a href="#akka.dispatch;Dispatcher.dispatch.mbox" title="akka.dispatch.Mailbox">mbox</a>.<a href="Mailbox.scala.html#akka.dispatch;Mailbox.enqueue" title="(receiver: akka.actor.ActorRef, msg: akka.dispatch.Envelope)Unit">enqueue</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.dispatch.receiver" title="akka.actor.ActorCell">receiver</a>.<a href="../actor/ActorCell.scala.html#akka.actor;ActorCell.self" title="=&gt; akka.actor.InternalActorRef">self</a>, <a href="#akka.dispatch;Dispatcher.dispatch.invocation" title="akka.dispatch.Envelope">invocation</a><span class="delimiter">)</span>
+    <a href="#akka.dispatch;Dispatcher.registerForExecution" title="(mbox: akka.dispatch.Mailbox, hasMessageHint: Boolean, hasSystemMessageHint: Boolean)Boolean">registerForExecution</a><span title="Unit" class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.dispatch.mbox" title="akka.dispatch.Mailbox">mbox</a>, <span title="Boolean(true)" class="keyword">true</span>, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receiver: akka.actor.ActorCell, invocation: akka.dispatch.sysmsg.SystemMessage)Unit" id="akka.dispatch;Dispatcher.systemDispatch">systemDispatch</a><span class="delimiter">(</span><a title="akka.actor.ActorCell" id="akka.dispatch;Dispatcher.systemDispatch.receiver">receiver</a>: <a href="../actor/ActorCell.scala.html#akka.actor;ActorCell" title="akka.actor.ActorCell">ActorCell</a>, <a title="akka.dispatch.sysmsg.SystemMessage" id="akka.dispatch;Dispatcher.systemDispatch.invocation">invocation</a>: <a href="sysmsg/SystemMessage.scala.html#akka.dispatch.sysmsg;SystemMessage" title="akka.dispatch.sysmsg.SystemMessage">SystemMessage</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="akka.dispatch.Mailbox" id="akka.dispatch;Dispatcher.systemDispatch.mbox">mbox</a> = <a href="#akka.dispatch;Dispatcher.systemDispatch.receiver" title="akka.actor.ActorCell">receiver</a>.<a href="../actor/dungeon/Dispatch.scala.html#akka.actor.dungeon;Dispatch.mailbox" title="=&gt; akka.dispatch.Mailbox">mailbox</a>
+    <a href="#akka.dispatch;Dispatcher.systemDispatch.mbox" title="akka.dispatch.Mailbox">mbox</a>.<a href="Mailbox.scala.html#akka.dispatch;SystemMessageQueue.systemEnqueue" title="(receiver: akka.actor.ActorRef, message: akka.dispatch.sysmsg.SystemMessage)Unit">systemEnqueue</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.systemDispatch.receiver" title="akka.actor.ActorCell">receiver</a>.<a href="../actor/ActorCell.scala.html#akka.actor;ActorCell.self" title="=&gt; akka.actor.InternalActorRef">self</a>, <a href="#akka.dispatch;Dispatcher.systemDispatch.invocation" title="akka.dispatch.sysmsg.SystemMessage">invocation</a><span class="delimiter">)</span>
+    <a href="#akka.dispatch;Dispatcher.registerForExecution" title="(mbox: akka.dispatch.Mailbox, hasMessageHint: Boolean, hasSystemMessageHint: Boolean)Boolean">registerForExecution</a><span title="Unit" class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.systemDispatch.mbox" title="akka.dispatch.Mailbox">mbox</a>, <span title="Boolean(false)" class="keyword">false</span>, <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(invocation: akka.dispatch.TaskInvocation)Unit" id="akka.dispatch;Dispatcher.executeTask">executeTask</a><span class="delimiter">(</span><a title="akka.dispatch.TaskInvocation" id="akka.dispatch;Dispatcher.executeTask.invocation">invocation</a>: <a href="AbstractDispatcher.scala.html#akka.dispatch;TaskInvocation" title="akka.dispatch.TaskInvocation">TaskInvocation</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="keyword">try</span> <span class="delimiter">{</span>
+      <a href="#akka.dispatch;Dispatcher.executorService" title="=&gt; akka.dispatch.ExecutorServiceDelegate">executorService</a> <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceDelegate.execute" title="(command: Runnable)Unit">execute</a> <a href="#akka.dispatch;Dispatcher.executeTask.invocation" title="akka.dispatch.TaskInvocation">invocation</a>
+    <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a title="java.util.concurrent.RejectedExecutionException" id="akka.dispatch;Dispatcher.executeTask.e">e</a>: <span title="java.util.concurrent.RejectedExecutionException">RejectedExecutionException</span> ⇒
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+          <a href="#akka.dispatch;Dispatcher.executorService" title="=&gt; akka.dispatch.ExecutorServiceDelegate">executorService</a> <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceDelegate.execute" title="(command: Runnable)Unit">execute</a> <a href="#akka.dispatch;Dispatcher.executeTask.invocation" title="akka.dispatch.TaskInvocation">invocation</a>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a title="java.util.concurrent.RejectedExecutionException" id="akka.dispatch;Dispatcher.executeTask.e2">e2</a>: <span title="java.util.concurrent.RejectedExecutionException">RejectedExecutionException</span> ⇒
+            <a href="AbstractDispatcher.scala.html#akka.dispatch;MessageDispatcher.eventStream" title="=&gt; akka.event.EventStream">eventStream</a>.<a href="../event/EventBus.scala.html#akka.event;SubchannelClassification.publish(de973626dc)" title="(event: Dispatcher.this.eventStream.Event)Unit">publish</a><span class="delimiter">(</span><a href="../event/Logging.scala.html#akka.event.Logging;Error" title="(cause: Throwable, logSource: String, logClass: Class[_], message: Any)akka.event.Logging.Error">Error</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.executeTask.e" title="java.util.concurrent.RejectedExecutionException">e</a>, <a href="#akka.dispatch;Dispatcher" title="()Class[_]">getClass</a>.<span title="()String">getName</span>, <a href="#akka.dispatch;Dispatcher" title="()Class[_]">getClass</a>, <span title="String(&quot;executeTask was rejected twice!&quot;)" class="string">&quot;executeTask was rejected twice!&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+            <span title="Nothing" class="keyword">throw</span> <a href="#akka.dispatch;Dispatcher.executeTask.e2" title="java.util.concurrent.RejectedExecutionException">e2</a>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(actor: akka.actor.Cell, mailboxType: akka.dispatch.MailboxType)akka.dispatch.Mailbox" id="akka.dispatch;Dispatcher.createMailbox">createMailbox</a><span class="delimiter">(</span><a title="akka.actor.Cell" id="akka.dispatch;Dispatcher.createMailbox.actor">actor</a>: akka.actor.<a href="../actor/ActorCell.scala.html#akka.actor;Cell" title="akka.actor.Cell">Cell</a>, <a title="akka.dispatch.MailboxType" id="akka.dispatch;Dispatcher.createMailbox.mailboxType">mailboxType</a>: <a href="Mailbox.scala.html#akka.dispatch;MailboxType" title="akka.dispatch.MailboxType">MailboxType</a><span class="delimiter">)</span>: <a href="Mailbox.scala.html#akka.dispatch;Mailbox" title="akka.dispatch.Mailbox">Mailbox</a> = <span class="delimiter">{</span>
+    <a href="#akka.dispatch;Dispatcher.createMailbox;$anon" title="akka.dispatch.Mailbox with akka.dispatch.DefaultSystemMessageQueue" class="keyword">new</a> <a href="Mailbox.scala.html#akka.dispatch;Mailbox" title="anonymous class $anon extends akka.dispatch.Mailbox with akka.dispatch.DefaultSystemMessageQueue" id="akka.dispatch;Dispatcher.createMailbox;$anon">Mailbox</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.createMailbox.mailboxType" title="akka.dispatch.MailboxType">mailboxType</a>.<a href="Mailbox.scala.html#akka.dispatch;MailboxType.create" title="(owner: Option[akka.actor.ActorRef], system: Option[akka.actor.ActorSystem])akka.dispatch.MessageQueue">create</a><span class="delimiter">(</span><span title="(x: akka.actor.ActorRef)Some[akka.actor.ActorRef]">Some</span><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.createMailbox.actor" title="akka.actor.Cell">actor</a>.<a href="../actor/ActorCell.scala.html#akka.actor;Cell.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>, <span title="(x: akka.actor.ActorSystem)Some[akka.actor.ActorSystem]">Some</span><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.createMailbox.actor" title="akka.actor.Cell">actor</a>.<a href="../actor/ActorCell.scala.html#akka.actor;Cell.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="keyword">with</span> <a href="Mailbox.scala.html#akka.dispatch;DefaultSystemMessageQueue" title="akka.dispatch.DefaultSystemMessageQueue">DefaultSystemMessageQueue</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="()Unit" id="akka.dispatch;Dispatcher.shutdown">shutdown</a>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="keyword">val</span> <a title="Dispatcher.this.LazyExecutorServiceDelegate" id="akka.dispatch;Dispatcher.shutdown.newDelegate">newDelegate</a> = <a href="#akka.dispatch;Dispatcher.executorServiceDelegate_=" title="=&gt; Dispatcher.this.LazyExecutorServiceDelegate">executorServiceDelegate</a>.<a href="#akka.dispatch;Dispatcher;LazyExecutorServiceDelegate.copy" title="()Dispatcher.this.LazyExecutorServiceDelegate">copy</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="comment">// Doesn't matter which one we copy</span>
+    <span class="keyword">val</span> <a title="Dispatcher.this.LazyExecutorServiceDelegate" id="akka.dispatch;Dispatcher.shutdown.es">es</a> = <a href="#akka.dispatch;Dispatcher" title="(x$1: Dispatcher.this.LazyExecutorServiceDelegate)Dispatcher.this.LazyExecutorServiceDelegate">synchronized</a> <span class="delimiter">{</span>
+      <span class="keyword">val</span> <a title="Dispatcher.this.LazyExecutorServiceDelegate" id="akka.dispatch;Dispatcher.shutdown.es.service">service</a> = <a href="#akka.dispatch;Dispatcher.executorServiceDelegate_=" title="=&gt; Dispatcher.this.LazyExecutorServiceDelegate">executorServiceDelegate</a>
+      <a href="#akka.dispatch;Dispatcher.executorServiceDelegate_=" title="(x$1: Dispatcher.this.LazyExecutorServiceDelegate)Unit">executorServiceDelegate</a> = <a href="#akka.dispatch;Dispatcher.shutdown.newDelegate" title="Dispatcher.this.LazyExecutorServiceDelegate">newDelegate</a> <span class="comment">// just a quick getAndSet</span>
+      <a href="#akka.dispatch;Dispatcher.shutdown.es.service" title="Dispatcher.this.LazyExecutorServiceDelegate">service</a>
+    <span class="delimiter">}</span>
+    <a href="#akka.dispatch;Dispatcher.shutdown.es" title="Dispatcher.this.LazyExecutorServiceDelegate">es</a>.<a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceDelegate.shutdown" title="()Unit">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Returns if it was registered
+   *
+   * INTERNAL API
+   */</span>
+  <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">override</span> <span class="keyword">def</span> <a title="(mbox: akka.dispatch.Mailbox, hasMessageHint: Boolean, hasSystemMessageHint: Boolean)Boolean" id="akka.dispatch;Dispatcher.registerForExecution">registerForExecution</a><span class="delimiter">(</span><a title="akka.dispatch.Mailbox" id="akka.dispatch;Dispatcher.registerForExecution.mbox">mbox</a>: <a href="Mailbox.scala.html#akka.dispatch;Mailbox" title="akka.dispatch.Mailbox">Mailbox</a>, <a title="Boolean" id="akka.dispatch;Dispatcher.registerForExecution.hasMessageHint">hasMessageHint</a>: <span title="Boolean">Boolean</span>, <a title="Boolean" id="akka.dispatch;Dispatcher.registerForExecution.hasSystemMessageHint">hasSystemMessageHint</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    <span title="Boolean" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.registerForExecution.mbox" title="akka.dispatch.Mailbox">mbox</a>.<a href="Mailbox.scala.html#akka.dispatch;Mailbox.canBeScheduledForExecution" title="(hasMessageHint: Boolean, hasSystemMessageHint: Boolean)Boolean">canBeScheduledForExecution</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.registerForExecution.hasMessageHint" title="Boolean">hasMessageHint</a>, <a href="#akka.dispatch;Dispatcher.registerForExecution.hasSystemMessageHint" title="Boolean">hasSystemMessageHint</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="comment">//This needs to be here to ensure thread safety and no races</span>
+      <span title="Boolean" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher.registerForExecution.mbox" title="akka.dispatch.Mailbox">mbox</a>.<a href="Mailbox.scala.html#akka.dispatch;Mailbox.setAsScheduled" title="()Boolean">setAsScheduled</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="keyword">try</span> <span class="delimiter">{</span>
+          <a href="#akka.dispatch;Dispatcher.executorService" title="=&gt; akka.dispatch.ExecutorServiceDelegate">executorService</a> <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceDelegate.execute" title="(command: Runnable)Unit">execute</a> <a href="#akka.dispatch;Dispatcher.registerForExecution.mbox" title="akka.dispatch.Mailbox">mbox</a>
+          <span title="Boolean(true)" class="keyword">true</span>
+        <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <span title="java.util.concurrent.RejectedExecutionException">e</span>: <span title="java.util.concurrent.RejectedExecutionException">RejectedExecutionException</span> ⇒
+            <span class="keyword">try</span> <span class="delimiter">{</span>
+              <a href="#akka.dispatch;Dispatcher.executorService" title="=&gt; akka.dispatch.ExecutorServiceDelegate">executorService</a> <a href="ThreadPoolBuilder.scala.html#akka.dispatch;ExecutorServiceDelegate.execute" title="(command: Runnable)Unit">execute</a> <a href="#akka.dispatch;Dispatcher.registerForExecution.mbox" title="akka.dispatch.Mailbox">mbox</a>
+              <span title="Boolean(true)" class="keyword">true</span>
+            <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span> <span class="comment">//Retry once</span>
+              <span class="keyword">case</span> <span title="java.util.concurrent.RejectedExecutionException">e</span>: <span title="java.util.concurrent.RejectedExecutionException">RejectedExecutionException</span> ⇒
+                <a href="#akka.dispatch;Dispatcher.registerForExecution.mbox" title="akka.dispatch.Mailbox">mbox</a>.<a href="Mailbox.scala.html#akka.dispatch;Mailbox.setAsIdle" title="()Boolean">setAsIdle</a><span class="delimiter">(</span><span class="delimiter">)</span>
+                <a href="AbstractDispatcher.scala.html#akka.dispatch;MessageDispatcher.eventStream" title="=&gt; akka.event.EventStream">eventStream</a>.<a href="../event/EventBus.scala.html#akka.event;SubchannelClassification.publish(de973626dc)" title="(event: Dispatcher.this.eventStream.Event)Unit">publish</a><span class="delimiter">(</span><a href="../event/Logging.scala.html#akka.event.Logging;Error" title="(cause: Throwable, logSource: String, logClass: Class[_], message: Any)akka.event.Logging.Error">Error</a><span class="delimiter">(</span><span title="java.util.concurrent.RejectedExecutionException">e</span>, <a href="#akka.dispatch;Dispatcher" title="()Class[_]">getClass</a>.<span title="()String">getName</span>, <a href="#akka.dispatch;Dispatcher" title="()Class[_]">getClass</a>, <span title="String(&quot;registerForExecution was rejected twice!&quot;)" class="string">&quot;registerForExecution was rejected twice!&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+                <span title="Nothing" class="keyword">throw</span> <span title="java.util.concurrent.RejectedExecutionException">e</span>
+            <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Boolean(false)" class="keyword">false</span>
+    <span class="delimiter">}</span> <span class="keyword">else</span> <span title="Boolean(false)" class="keyword">false</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="String" id="akka.dispatch;Dispatcher.toString">toString</a>: <span title="String">String</span> = <a href="../event/Logging.scala.html#akka.event.Logging" title="akka.event.Logging.type">Logging</a>.<a href="../event/Logging.scala.html#akka.event.Logging.simpleName(09be6fff70)" title="(obj: AnyRef)String">simpleName</a><span class="delimiter">(</span><a href="#akka.dispatch;Dispatcher" title="akka.dispatch.Dispatcher" class="keyword">this</a><span class="delimiter">)</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot;[&quot;)" class="string">&quot;[&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.dispatch;Dispatcher.id" title="=&gt; String">id</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;]&quot;)" class="string">&quot;]&quot;</span>
+<span class="delimiter">}</span>
+
+<span class="keyword">object</span> <a title="akka.dispatch.PriorityGenerator.type" id="akka.dispatch.PriorityGenerator">PriorityGenerator</a> <a href="#akka.dispatch.PriorityGenerator" title="akka.dispatch.PriorityGenerator.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Creates a PriorityGenerator that uses the supplied function as priority generator
+   */</span>
+  <span class="keyword">def</span> <a title="(priorityFunction: Any =&gt; Int)akka.dispatch.PriorityGenerator" id="akka.dispatch.PriorityGenerator.apply">apply</a><span class="delimiter">(</span><a title="Any =&gt; Int" id="akka.dispatch.PriorityGenerator.apply.priorityFunction">priorityFunction</a>: Any ⇒ Int<span class="delimiter">)</span>: <a href="#akka.dispatch;PriorityGenerator" title="akka.dispatch.PriorityGenerator">PriorityGenerator</a> = <a href="#akka.dispatch.PriorityGenerator.apply;$anon" title="akka.dispatch.PriorityGenerator" class="keyword">new</a> <a href="#akka.dispatch;PriorityGenerator" title="anonymous class $anon extends akka.dispatch.PriorityGenerator" id="akka.dispatch.PriorityGenerator.apply;$anon">PriorityGenerator</a> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(message: Any)Int" id="akka.dispatch.PriorityGenerator.apply;$anon.gen">gen</a><span class="delimiter">(</span><a title="Any" id="akka.dispatch.PriorityGenerator.apply;$anon.gen.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <a href="#akka.dispatch.PriorityGenerator.apply.priorityFunction" title="(v1: Any)Int">priorityFunction</a><span class="delimiter">(</span><a href="#akka.dispatch.PriorityGenerator.apply;$anon.gen.message" title="Any">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * A PriorityGenerator is a convenience API to create a Comparator that orders the messages of a
+ * PriorityDispatcher
+ */</span>
+<span title="AnyRef" class="keyword">abstract</span> <span class="keyword">class</span> <a title="class PriorityGenerator extends Object with java.util.Comparator[akka.dispatch.Envelope]" id="akka.dispatch;PriorityGenerator">PriorityGenerator</a> <a href="#akka.dispatch;PriorityGenerator" title="akka.dispatch.PriorityGenerator" class="keyword">extends</a> java.util.<span title="java.util.Comparator[akka.dispatch.Envelope]">Comparator</span><span class="delimiter">[</span>Envelope<span class="delimiter">]</span> <span class="delimiter">{</span>
+  <span class="keyword">def</span> <a title="(message: Any)Int" id="akka.dispatch;PriorityGenerator.gen">gen</a><span class="delimiter">(</span><a title="Any" id="akka.dispatch;PriorityGenerator.gen.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Int">Int</span>
+
+  <span class="keyword">final</span> <span class="keyword">def</span> <a title="(thisMessage: akka.dispatch.Envelope, thatMessage: akka.dispatch.Envelope)Int" id="akka.dispatch;PriorityGenerator.compare">compare</a><span class="delimiter">(</span><a title="akka.dispatch.Envelope" id="akka.dispatch;PriorityGenerator.compare.thisMessage">thisMessage</a>: <a href="AbstractDispatcher.scala.html#akka.dispatch;Envelope" title="akka.dispatch.Envelope">Envelope</a>, <a title="akka.dispatch.Envelope" id="akka.dispatch;PriorityGenerator.compare.thatMessage">thatMessage</a>: <a href="AbstractDispatcher.scala.html#akka.dispatch;Envelope" title="akka.dispatch.Envelope">Envelope</a><span class="delimiter">)</span>: <span title="Int">Int</span> =
+    <a href="#akka.dispatch;PriorityGenerator.gen" title="(message: Any)Int">gen</a><span class="delimiter">(</span><a href="#akka.dispatch;PriorityGenerator.compare.thisMessage" title="akka.dispatch.Envelope">thisMessage</a>.<a href="AbstractDispatcher.scala.html#akka.dispatch;Envelope.message" title="=&gt; Any">message</a><span class="delimiter">)</span> <span title="(x: Int)Int">-</span> <a href="#akka.dispatch;PriorityGenerator.gen" title="(message: Any)Int">gen</a><span class="delimiter">(</span><a href="#akka.dispatch;PriorityGenerator.compare.thatMessage" title="akka.dispatch.Envelope">thatMessage</a>.<a href="AbstractDispatcher.scala.html#akka.dispatch;Envelope.message" title="=&gt; Any">message</a><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
