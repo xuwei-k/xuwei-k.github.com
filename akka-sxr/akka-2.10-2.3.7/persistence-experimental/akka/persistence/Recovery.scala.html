@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>persistence-experimental/akka/persistence/Recovery.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+<span class="keyword">package</span> akka.persistence
+
+<span class="keyword">import</span> akka.actor._
+<span class="keyword">import</span> akka.dispatch.Envelope
+<span class="keyword">import</span> akka.persistence.<a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol" title="akka.persistence.JournalProtocol.type">JournalProtocol</a>._
+<span class="keyword">import</span> akka.persistence.<a href="Snapshot.scala.html#akka.persistence.SnapshotProtocol" title="akka.persistence.SnapshotProtocol.type">SnapshotProtocol</a>.LoadSnapshotResult
+
+<span class="keyword">import</span> scala.util.control.NonFatal
+
+<span class="comment">/**
+ * Recovery state machine that loads snapshots and replays messages.
+ *
+ * @see [[PersistentActor]]
+ * @see [[PersistentView]]
+ */</span>
+<span class="keyword">trait</span> <a title="trait Recovery extends AnyRef with akka.actor.Actor with akka.persistence.Snapshotter with akka.actor.Stash with akka.actor.StashFactory" id="akka.persistence;Recovery">Recovery</a> <span title="Unit" class="keyword">extends</span> <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor" title="akka.actor.Actor">Actor</a> <span class="keyword">with</span> <a href="Snapshotter.scala.html#akka.persistence;Snapshotter" title="akka.persistence.Snapshotter">Snapshotter</a> <span class="keyword">with</span> <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;Stash" title="akka.actor.Stash">Stash</a> <span class="keyword">with</span> <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashFactory" title="akka.actor.StashFactory">StashFactory</a> <span class="delimiter">{</span>
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Recovery state.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">trait</span> <a title="trait State extends AnyRef" id="akka.persistence;Recovery;State">State</a> <span title="Unit" class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery;State.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery;State.aroundReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery;State.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+
+    <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery;State.process">process</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery;State.process.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery;State.process.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> =
+      <a href="#akka.persistence;Recovery;State.process.receive" title="Recovery.this.Receive">receive</a>.<span title="(x: Any, default: Any =&gt; Unit)Unit">applyOrElse</span><span class="delimiter">(</span><a href="#akka.persistence;Recovery;State.process.message" title="Any">message</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.unhandled" title="(message: Any)Unit">unhandled</a><span class="delimiter">)</span>
+
+    <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, persistent: akka.persistence.Persistent)Unit" id="akka.persistence;Recovery;State.processPersistent">processPersistent</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery;State.processPersistent.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="akka.persistence.Persistent" id="akka.persistence;Recovery;State.processPersistent.persistent">persistent</a>: <a href="Persistent.scala.html#akka.persistence;Persistent" title="akka.persistence.Persistent">Persistent</a><span class="delimiter">)</span> =
+      <a href="#akka.persistence;Recovery.withCurrentPersistent" title="(persistent: akka.persistence.Persistent)(body: akka.persistence.Persistent =&gt; Unit)Unit">withCurrentPersistent</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery;State.processPersistent.persistent" title="akka.persistence.Persistent">persistent</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#akka.persistence;Recovery.runReceive" title="(receive: Recovery.this.Receive)(msg: akka.persistence.Persistent)Unit">runReceive</a><a href="#akka.persistence;Recovery;State.processPersistent.$anonfun.msg" title="akka.persistence.Persistent" class="delimiter">(</a><a href="#akka.persistence;Recovery;State.processPersistent.receive" title="Recovery.this.Receive">receive</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    <span class="keyword">protected</span> <span class="keyword">def</span> <a title="(cause: Throwable)Unit" id="akka.persistence;Recovery;State.recordFailure">recordFailure</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;Recovery;State.recordFailure.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;Recovery._recoveryFailureCause_=" title="(x$1: Throwable)Unit">_recoveryFailureCause</a> = <a href="#akka.persistence;Recovery;State.recordFailure.cause" title="Throwable">cause</a>
+      <a href="#akka.persistence;Recovery._recoveryFailureMessage_=" title="(x$1: akka.dispatch.Envelope)Unit">_recoveryFailureMessage</a> = <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="akka.actor.ActorCell" class="delimiter">[</span><a href="../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorCell" title="akka.actor.ActorCell">ActorCell</a><span class="delimiter">]</span>.<a href="../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorCell.currentMessage" title="=&gt; akka.dispatch.Envelope">currentMessage</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * This is used to deliver a persistent message to the actor’s behavior
+   * through withCurrentPersistent().
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive)(msg: akka.persistence.Persistent)Unit" id="akka.persistence;Recovery.runReceive">runReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.runReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.persistence.Persistent" id="akka.persistence;Recovery.runReceive.msg">msg</a>: <a href="Persistent.scala.html#akka.persistence;Persistent" title="akka.persistence.Persistent">Persistent</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Recovery.runReceive.receive" title="Recovery.this.Receive">receive</a>.<span title="(x: akka.persistence.Persistent, default: akka.persistence.Persistent =&gt; Unit)Unit">applyOrElse</span><span class="delimiter">(</span><a href="#akka.persistence;Recovery.runReceive.msg" title="akka.persistence.Persistent">msg</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.unhandled" title="(message: Any)Unit">unhandled</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Initial state, waits for `Recover` request, submit a `LoadSnapshot` request to the snapshot
+   * store and changes to `recoveryStarted` state.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">val</span> <a title="recoveryPending extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.recoveryPending">recoveryPending</a> = <a href="#akka.persistence;Recovery.recoveryPending;$anon" title="Recovery.this.State" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.recoveryPending;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Recovery.recoveryPending;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;recovery pending&quot;)" class="string">&quot;recovery pending&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery.recoveryPending;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Recover<span class="delimiter">(</span><a title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.fromSnap">fromSnap</a>, <a title="Long" id="akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.toSnr">toSnr</a>, <a title="Long" id="akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.replayMax">replayMax</a><span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;Recovery._currentState_=" title="(x$1: Recovery.this.State)Unit">_currentState</a> = <a href="#akka.persistence;Recovery.recoveryStarted" title="(replayMax: Long)Recovery.this.State">recoveryStarted</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.replayMax" title="Long">replayMax</a><span class="delimiter">)</span>
+        <a href="Snapshotter.scala.html#akka.persistence;Snapshotter.loadSnapshot" title="(persistenceId: String, criteria: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long)Unit">loadSnapshot</a><span class="delimiter">(</span><a href="Snapshotter.scala.html#akka.persistence;Snapshotter.snapshotterId" title="=&gt; String">snapshotterId</a>, <a href="#akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.fromSnap" title="akka.persistence.SnapshotSelectionCriteria">fromSnap</a>, <a href="#akka.persistence;Recovery.recoveryPending;$anon.aroundReceive.toSnr" title="Long">toSnr</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> _ ⇒ <a href="#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Processes a loaded snapshot, if any. A loaded snapshot is offered with a `SnapshotOffer`
+   * message to the actor's current behavior. Then initiates a message replay, either starting
+   * from the loaded snapshot or from scratch, and switches to `replayStarted` state.
+   *
+   * @param replayMax maximum number of messages to replay.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(replayMax: Long)Recovery.this.State" id="akka.persistence;Recovery.recoveryStarted">recoveryStarted</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;Recovery.recoveryStarted.replayMax">replayMax</a>: <span title="Long">Long</span><span class="delimiter">)</span> = <a href="#akka.persistence;Recovery.recoveryStarted;$anon" title="Recovery.this.State" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.recoveryStarted;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Recovery.recoveryStarted;$anon.toString">toString</a>: <span title="String">String</span> = <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;recovery started (replayMax = [&quot;)">recovery started (replayMax = [$</span><span class="delimiter">{</span><a href="#akka.persistence;Recovery.recoveryStarted.replayMax" title="Long">replayMax</a><span class="delimiter">}</span><span title="String(&quot;])&quot;)" class="string">])&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a title="akka.persistence.Recover" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.r">r</a>: <a href="#akka.persistence;Recover" title="akka.persistence.Recover">Recover</a> ⇒ <span class="comment">// ignore</span>
+      <span class="keyword">case</span> LoadSnapshotResult<span class="delimiter">(</span><a title="Option[akka.persistence.SelectedSnapshot]" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.sso">sso</a>, <a title="Long" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.toSnr">toSnr</a><span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.sso" title="Option[akka.persistence.SelectedSnapshot]">sso</a>.<span title="(f: akka.persistence.SelectedSnapshot =&gt; Unit)Unit">foreach</span> <a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.$anonfun.x0$1" title="Unit" class="delimiter">{</a>
+          <span class="keyword">case</span> SelectedSnapshot<span class="delimiter">(</span><a title="akka.persistence.SnapshotMetadata" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.$anonfun.metadata">metadata</a>, <a title="Any" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.$anonfun.snapshot">snapshot</a><span class="delimiter">)</span> ⇒
+            <a href="#akka.persistence;Recovery.updateLastSequenceNr(9574a2b89e)" title="(value: Long)Unit">updateLastSequenceNr</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.$anonfun.metadata" title="akka.persistence.SnapshotMetadata">metadata</a>.<a href="Snapshot.scala.html#akka.persistence;SnapshotMetadata.sequenceNr" title="=&gt; Long">sequenceNr</a><span class="delimiter">)</span>
+            <a href="#akka.persistence;Recovery;State.process" title="(receive: Recovery.this.Receive, message: Any)Unit">process</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.receive" title="Recovery.this.Receive">receive</a>, <a href="Snapshot.scala.html#akka.persistence;SnapshotOffer" title="(metadata: akka.persistence.SnapshotMetadata, snapshot: Any)akka.persistence.SnapshotOffer">SnapshotOffer</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.$anonfun.metadata" title="akka.persistence.SnapshotMetadata">metadata</a>, <a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.$anonfun.snapshot" title="Any">snapshot</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <a href="#akka.persistence;Recovery._currentState_=" title="(x$1: Recovery.this.State)Unit">_currentState</a> = <a href="#akka.persistence;Recovery.replayStarted" title="(await: Boolean)Recovery.this.State">replayStarted</a><span class="delimiter">(</span>await = <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+        <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;ReplayMessages" title="(fromSequenceNr: Long, toSequenceNr: Long, max: Long, persistenceId: String, persistentActor: akka.actor.ActorRef, replayDeleted: Boolean)akka.persistence.JournalProtocol.ReplayMessages">ReplayMessages</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.lastSequenceNr" title="=&gt; Long">lastSequenceNr</a> <span title="(x: Long)Long">+</span> <span title="Long(1L)" class="long">1L</span>, <a href="#akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.toSnr" title="Long">toSnr</a>, <a href="#akka.persistence;Recovery.recoveryStarted.replayMax" title="Long">replayMax</a>, <a href="#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="Any" id="akka.persistence;Recovery.recoveryStarted;$anon.aroundReceive.other">other</a> ⇒ <a href="#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Processes replayed messages, if any. The actor's current behavior is invoked with the replayed
+   * [[Persistent]] messages. If processing of a replayed message fails, the exception is caught and
+   * stored for being thrown later and state is changed to `recoveryFailed`. If replay succeeds the
+   * `onReplaySuccess` method is called, otherwise `onReplayFailure`.
+   *
+   * @param await if `true` processing of further messages will be delayed until replay completes,
+   *              otherwise, the actor's behavior is invoked immediately with these messages.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(await: Boolean)Recovery.this.State" id="akka.persistence;Recovery.replayStarted">replayStarted</a><span class="delimiter">(</span><a title="Boolean" id="akka.persistence;Recovery.replayStarted.await">await</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> = <a href="#akka.persistence;Recovery.replayStarted;$anon" title="Recovery.this.State" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.replayStarted;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Recovery.replayStarted;$anon.toString">toString</a>: <span title="String">String</span> = <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;replay started (await = [&quot;)">replay started (await = [$</span><span class="delimiter">{</span><a href="#akka.persistence;Recovery.replayStarted.await" title="Boolean">await</a><span class="delimiter">}</span><span title="String(&quot;])&quot;)" class="string">])&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a title="akka.persistence.Recover" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive.r">r</a>: <a href="#akka.persistence;Recover" title="akka.persistence.Recover">Recover</a> ⇒ <span class="comment">// ignore</span>
+      <span class="keyword">case</span> ReplayedMessage<span class="delimiter">(</span><a title="akka.persistence.PersistentRepr" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive.p">p</a><span class="delimiter">)</span> ⇒
+        <span class="keyword">try</span> <a href="#akka.persistence;Recovery;State.processPersistent" title="(receive: Recovery.this.Receive, persistent: akka.persistence.Persistent)Unit">processPersistent</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.receive" title="Recovery.this.Receive">receive</a>, <a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.p" title="akka.persistence.PersistentRepr">p</a><span class="delimiter">)</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.<unapply-selector>" title="(t: Throwable)Option[Throwable]">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive.t">t</a><span class="delimiter">)</span> ⇒
+            <a href="#akka.persistence;Recovery._currentState_=" title="(x$1: Recovery.this.State)Unit">_currentState</a> = <a href="#akka.persistence;Recovery.replayFailed" title="=&gt; Recovery.this.State{def replayCompleted(): Unit}">replayFailed</a> <span class="comment">// delay throwing exception to prepareRestart</span>
+            <a href="#akka.persistence;Recovery;State.recordFailure" title="(cause: Throwable)Unit">recordFailure</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.t" title="Throwable">t</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="keyword">case</span> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol.ReplayMessagesSuccess" title="akka.persistence.JournalProtocol.ReplayMessagesSuccess.type">ReplayMessagesSuccess</a>        ⇒ <a href="#akka.persistence;Recovery.onReplaySuccess" title="(receive: Recovery.this.Receive, awaitReplay: Boolean)Unit">onReplaySuccess</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.receive" title="Recovery.this.Receive">receive</a>, <a href="#akka.persistence;Recovery.replayStarted.await" title="Boolean">await</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> ReplayMessagesFailure<span class="delimiter">(</span><a title="Throwable" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive.cause">cause</a><span class="delimiter">)</span> ⇒ <a href="#akka.persistence;Recovery.onReplayFailure" title="(receive: Recovery.this.Receive, awaitReplay: Boolean, cause: Throwable)Unit">onReplayFailure</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.receive" title="Recovery.this.Receive">receive</a>, <a href="#akka.persistence;Recovery.replayStarted.await" title="Boolean">await</a>, <a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.cause" title="Throwable">cause</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="Any" id="akka.persistence;Recovery.replayStarted;$anon.aroundReceive.other">other</a> ⇒
+        <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;Recovery.replayStarted.await" title="Boolean">await</a><span class="delimiter">)</span> <a href="#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="keyword">else</span> <a href="#akka.persistence;Recovery;State.process" title="(receive: Recovery.this.Receive, message: Any)Unit">process</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.receive" title="Recovery.this.Receive">receive</a>, <a href="#akka.persistence;Recovery.replayStarted;$anon.aroundReceive.other" title="Any">other</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Consumes remaining replayed messages and then changes to `prepareRestart`. The
+   * message that caused the exception during replay, is re-added to the mailbox and
+   * re-received in `prepareRestart`.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">val</span> <a title="replayFailed extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.replayFailed">replayFailed</a> = <a href="#akka.persistence;Recovery.replayFailed;$anon" title="Recovery.this.State{def replayCompleted(): Unit}" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.replayFailed;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Recovery.replayFailed;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;replay failed&quot;)" class="string">&quot;replay failed&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery.replayFailed;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.replayFailed;$anon.aroundReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery.replayFailed;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;Recovery.replayFailed;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> ReplayMessagesFailure<span class="delimiter">(</span>_<span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;Recovery.replayFailed;$anon.replayCompleted" title="()Unit">replayCompleted</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="comment">// journal couldn't tell the maximum stored sequence number, hence the next</span>
+        <span class="comment">// replay must be a full replay (up to the highest stored sequence number)</span>
+        <a href="#akka.persistence;Recovery.updateLastSequenceNr(9574a2b89e)" title="(value: Long)Unit">updateLastSequenceNr</a><span class="delimiter">(</span>Long.<span title="Long(9223372036854775807L)">MaxValue</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol.ReplayMessagesSuccess" title="akka.persistence.JournalProtocol.ReplayMessagesSuccess.type">ReplayMessagesSuccess</a> ⇒ <a href="#akka.persistence;Recovery.replayFailed;$anon.replayCompleted" title="()Unit">replayCompleted</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="keyword">case</span> ReplayedMessage<span class="delimiter">(</span><a title="akka.persistence.PersistentRepr" id="akka.persistence;Recovery.replayFailed;$anon.aroundReceive.p">p</a><span class="delimiter">)</span>    ⇒ <a href="#akka.persistence;Recovery.updateLastSequenceNr(076a7e764e)" title="(persistent: akka.persistence.Persistent)Unit">updateLastSequenceNr</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.replayFailed;$anon.aroundReceive.p" title="akka.persistence.PersistentRepr">p</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.persistence.Recover" id="akka.persistence;Recovery.replayFailed;$anon.aroundReceive.r">r</a>: <a href="#akka.persistence;Recover" title="akka.persistence.Recover">Recover</a>            ⇒ <span class="comment">// ignore</span>
+      <span class="keyword">case</span> _                     ⇒ <a href="#akka.persistence;Recovery.receiverStash" title="=&gt; akka.actor.StashSupport">receiverStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="keyword">def</span> <a title="()Unit" id="akka.persistence;Recovery.replayFailed;$anon.replayCompleted">replayCompleted</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;Recovery._currentState_=" title="(x$1: Recovery.this.State)Unit">_currentState</a> = <a href="#akka.persistence;Recovery.prepareRestart" title="=&gt; Recovery.this.State">prepareRestart</a>
+      <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.mailbox" title="=&gt; akka.dispatch.DequeBasedMessageQueueSemantics">mailbox</a>.<a href="../../../actor/akka/dispatch/Mailbox.scala.html#akka.dispatch;DequeBasedMessageQueueSemantics.enqueueFirst" title="(receiver: akka.actor.ActorRef, handle: akka.dispatch.Envelope)Unit">enqueueFirst</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.persistence;Recovery._recoveryFailureMessage_=" title="=&gt; akka.dispatch.Envelope">_recoveryFailureMessage</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Re-receives the replayed message that caused an exception and re-throws that exception.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">val</span> <a title="prepareRestart extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.prepareRestart">prepareRestart</a> = <a href="#akka.persistence;Recovery.prepareRestart;$anon" title="Recovery.this.State" class="keyword">new</a> <a title="anonymous class $anon extends AnyRef with Recovery.this.State" id="akka.persistence;Recovery.prepareRestart;$anon">State</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.persistence;Recovery.prepareRestart;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;prepare restart&quot;)" class="string">&quot;prepare restart&quot;</span>
+
+    <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery.prepareRestart;$anon.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.prepareRestart;$anon.aroundReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery.prepareRestart;$anon.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;Recovery.prepareRestart;$anon.aroundReceive.message" title="Any">message</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> ReplayedMessage<span class="delimiter">(</span>_<span class="delimiter">)</span> ⇒ <span title="Nothing" class="keyword">throw</span> <a href="#akka.persistence;Recovery._recoveryFailureCause_=" title="=&gt; Throwable">_recoveryFailureCause</a>
+      <span class="keyword">case</span> _                  ⇒ <span class="comment">// ignore</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Throwable" id="akka.persistence;Recovery._recoveryFailureCause_=">_recoveryFailureCause</a>: <span title="Throwable">Throwable</span> = _
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="akka.dispatch.Envelope" id="akka.persistence;Recovery._recoveryFailureMessage_=">_recoveryFailureMessage</a>: <a href="../../../actor/akka/dispatch/AbstractDispatcher.scala.html#akka.dispatch;Envelope" title="akka.dispatch.Envelope">Envelope</a> = _
+
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="Long" id="akka.persistence;Recovery._lastSequenceNr_=">_lastSequenceNr</a>: <span title="Long">Long</span> = <span title="Long(0L)" class="long">0L</span>
+  <span class="keyword">private</span> <span class="keyword">var</span> <a title="akka.persistence.Persistent" id="akka.persistence;Recovery._currentPersistent_=">_currentPersistent</a>: <a href="Persistent.scala.html#akka.persistence;Persistent" title="akka.persistence.Persistent">Persistent</a> = _
+
+  <span class="comment">/**
+   * Id of the processor for which messages should be replayed.
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;Override `persistenceId` instead. Processor will be removed.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="=&gt; String" id="akka.persistence;Recovery.processorId">processorId</a>: <span title="String">String</span> = <a href="#akka.persistence;Recovery.extension" title="=&gt; akka.persistence.Persistence">extension</a>.<a href="Persistence.scala.html#akka.persistence;Persistence.persistenceId" title="(persistentActor: akka.actor.ActorRef)String">persistenceId</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span> <span class="comment">// TODO: remove processorId</span>
+
+  <span class="comment">/**
+   * Id of the persistent entity for which messages should be replayed.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; String" id="akka.persistence;Recovery.persistenceId">persistenceId</a>: <span title="String">String</span>
+
+  <span class="comment">/** INTERNAL API */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(persistent: akka.persistence.Persistent)(body: akka.persistence.Persistent =&gt; Unit)Unit" id="akka.persistence;Recovery.withCurrentPersistent">withCurrentPersistent</a><span class="delimiter">(</span><a title="akka.persistence.Persistent" id="akka.persistence;Recovery.withCurrentPersistent.persistent">persistent</a>: <a href="Persistent.scala.html#akka.persistence;Persistent" title="akka.persistence.Persistent">Persistent</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.persistence.Persistent =&gt; Unit" id="akka.persistence;Recovery.withCurrentPersistent.body">body</a>: Persistent ⇒ Unit<span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="keyword">try</span> <span class="delimiter">{</span>
+    <a href="#akka.persistence;Recovery._currentPersistent_=" title="(x$1: akka.persistence.Persistent)Unit">_currentPersistent</a> = <a href="#akka.persistence;Recovery.withCurrentPersistent.persistent" title="akka.persistence.Persistent">persistent</a>
+    <a href="#akka.persistence;Recovery.updateLastSequenceNr(076a7e764e)" title="(persistent: akka.persistence.Persistent)Unit">updateLastSequenceNr</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.withCurrentPersistent.persistent" title="akka.persistence.Persistent">persistent</a><span class="delimiter">)</span>
+    <a href="#akka.persistence;Recovery.withCurrentPersistent.body" title="(v1: akka.persistence.Persistent)Unit">body</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.withCurrentPersistent.persistent" title="akka.persistence.Persistent">persistent</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span> <span class="keyword">finally</span> <a href="#akka.persistence;Recovery._currentPersistent_=" title="(x$1: akka.persistence.Persistent)Unit">_currentPersistent</a> = <span title="Null(null)" class="keyword">null</span>
+
+  <span class="comment">/** INTERNAL API. */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(persistent: akka.persistence.Persistent)Unit" id="akka.persistence;Recovery.updateLastSequenceNr(076a7e764e)">updateLastSequenceNr</a><span class="delimiter">(</span><a title="akka.persistence.Persistent" id="akka.persistence;Recovery.updateLastSequenceNr(076a7e764e).persistent">persistent</a>: <a href="Persistent.scala.html#akka.persistence;Persistent" title="akka.persistence.Persistent">Persistent</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.persistence;Recovery.updateLastSequenceNr(076a7e764e).persistent" title="akka.persistence.Persistent">persistent</a>.<a href="Persistent.scala.html#akka.persistence;Persistent.sequenceNr" title="=&gt; Long">sequenceNr</a> <span title="(x: Long)Boolean">&gt;</span> <a href="#akka.persistence;Recovery._lastSequenceNr_=" title="=&gt; Long">_lastSequenceNr</a><span class="delimiter">)</span> <a href="#akka.persistence;Recovery._lastSequenceNr_=" title="(x$1: Long)Unit">_lastSequenceNr</a> = <a href="#akka.persistence;Recovery.updateLastSequenceNr(076a7e764e).persistent" title="akka.persistence.Persistent">persistent</a>.<a href="Persistent.scala.html#akka.persistence;Persistent.sequenceNr" title="=&gt; Long">sequenceNr</a>
+
+  <span class="comment">/** INTERNAL API. */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(value: Long)Unit" id="akka.persistence;Recovery.updateLastSequenceNr(9574a2b89e)">updateLastSequenceNr</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;Recovery.updateLastSequenceNr(9574a2b89e).value">value</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;Recovery._lastSequenceNr_=" title="(x$1: Long)Unit">_lastSequenceNr</a> = <a href="#akka.persistence;Recovery.updateLastSequenceNr(9574a2b89e).value" title="Long">value</a>
+
+  <span class="comment">/**
+   * Returns the current persistent message if there is any.
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;currentPersistentMessage will be removed, sequence number can be retrieved with `lastSequenceNr`.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">implicit</span> <span class="keyword">def</span> <a title="=&gt; Option[akka.persistence.Persistent]" id="akka.persistence;Recovery.currentPersistentMessage">currentPersistentMessage</a>: <span title="Option[akka.persistence.Persistent]">Option</span><span class="delimiter">[</span>Persistent<span class="delimiter">]</span> = <span title="(x: akka.persistence.Persistent)Option[akka.persistence.Persistent]">Option</span><span class="delimiter">(</span><a href="#akka.persistence;Recovery._currentPersistent_=" title="=&gt; akka.persistence.Persistent">_currentPersistent</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: returns the current persistent message or `null` if there is none.
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;getCurrentPersistentMessage will be removed, sequence number can be retrieved with `lastSequenceNr`.&quot;</span>, since = <span class="string">&quot;2.3.4&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="=&gt; akka.persistence.Persistent" id="akka.persistence;Recovery.getCurrentPersistentMessage">getCurrentPersistentMessage</a> = <a href="#akka.persistence;Recovery.currentPersistentMessage" title="=&gt; Option[akka.persistence.Persistent]">currentPersistentMessage</a>.<span title="(default: =&gt; akka.persistence.Persistent)akka.persistence.Persistent">getOrElse</span><span class="delimiter">(</span><span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Highest received sequence number so far or `0L` if this actor hasn't received a persistent
+   * message yet. Usually equal to the sequence number of `currentPersistentMessage` (unless a
+   * receiver implementation is about to re-order persistent messages using `stash()` and `unstash()`).
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Long" id="akka.persistence;Recovery.lastSequenceNr">lastSequenceNr</a>: <span title="Long">Long</span> = <a href="#akka.persistence;Recovery._lastSequenceNr_=" title="=&gt; Long">_lastSequenceNr</a>
+
+  <span class="comment">/**
+   * Returns `lastSequenceNr`.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Long" id="akka.persistence;Recovery.snapshotSequenceNr">snapshotSequenceNr</a>: <span title="Long">Long</span> = <a href="#akka.persistence;Recovery.lastSequenceNr" title="=&gt; Long">lastSequenceNr</a>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">var</span> <a title="Recovery.this.State" id="akka.persistence;Recovery._currentState_=">_currentState</a>: <a href="#akka.persistence;Recovery;State" title="Recovery.this.State">State</a> = <a href="#akka.persistence;Recovery.recoveryPending" title="=&gt; Recovery.this.State">recoveryPending</a>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Called whenever a message replay succeeds.
+   *
+   * @param receive the actor's current behavior.
+   * @param awaitReplay `awaitReplay` value of the calling `replayStarted` state.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, awaitReplay: Boolean)Unit" id="akka.persistence;Recovery.onReplaySuccess">onReplaySuccess</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.onReplaySuccess.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Boolean" id="akka.persistence;Recovery.onReplaySuccess.awaitReplay">awaitReplay</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   *
+   * Called whenever a message replay fails.
+   *
+   * @param receive the actor's current behavior.
+   * @param awaitReplay `awaitReplay` value of the calling `replayStarted` state.
+   * @param cause failure cause.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, awaitReplay: Boolean, cause: Throwable)Unit" id="akka.persistence;Recovery.onReplayFailure">onReplayFailure</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.onReplayFailure.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Boolean" id="akka.persistence;Recovery.onReplayFailure.awaitReplay">awaitReplay</a>: <span title="Boolean">Boolean</span>, <a title="Throwable" id="akka.persistence;Recovery.onReplayFailure.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">val</span> <a title="akka.persistence.Persistence" id="akka.persistence;Recovery.extension">extension</a> = <a href="../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.persistence.Persistence">Persistence</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="akka.actor.ActorRef" id="akka.persistence;Recovery.journal">journal</a> = <a href="#akka.persistence;Recovery.extension" title="=&gt; akka.persistence.Persistence">extension</a>.<a href="Persistence.scala.html#akka.persistence;Persistence.journalFor" title="(persistenceId: String)akka.actor.ActorRef">journalFor</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.persistenceId" title="=&gt; String">persistenceId</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>persistence<span class="delimiter">]</span> <span class="keyword">val</span> <a title="akka.actor.StashSupport" id="akka.persistence;Recovery.receiverStash">receiverStash</a> = <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashFactory.createStash" title="()(implicit ctx: akka.actor.ActorContext, implicit ref: akka.actor.ActorRef)akka.actor.StashSupport">createStash</a><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext" class="delimiter">(</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">protected</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(receive: Recovery.this.Receive, message: Any)Unit" id="akka.persistence;Recovery.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="Recovery.this.Receive" id="akka.persistence;Recovery.aroundReceive.receive">receive</a>: <span title="Recovery.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;Recovery.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;Recovery._currentState_=" title="=&gt; Recovery.this.State">_currentState</a>.<a href="#akka.persistence;Recovery;State.aroundReceive" title="(receive: Recovery.this.Receive, message: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;Recovery.aroundReceive.receive" title="Recovery.this.Receive">receive</a>, <a href="#akka.persistence;Recovery.aroundReceive.message" title="Any">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Instructs a persistent actor to recover itself. Recovery will start from a snapshot if the persistent actor has
+ * previously saved one or more snapshots and at least one of these snapshots matches the specified
+ * `fromSnapshot` criteria. Otherwise, recovery will start from scratch by replaying all journaled
+ * messages.
+ *
+ * If recovery starts from a snapshot, the persistent actor is offered that snapshot with a [[SnapshotOffer]]
+ * message, followed by replayed messages, if any, that are younger than the snapshot, up to the
+ * specified upper sequence number bound (`toSequenceNr`).
+ *
+ * @param fromSnapshot criteria for selecting a saved snapshot from which recovery should start. Default
+ *                     is latest (= youngest) snapshot.
+ * @param toSequenceNr upper sequence number bound (inclusive) for recovery. Default is no upper bound.
+ * @param replayMax maximum number of messages to replay. Default is no limit.
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+<span class="keyword">case class</span> <a title="class Recover extends AnyRef with Product with Serializable" id="akka.persistence;Recover">Recover</a><a href="#akka.persistence;Recover" title="Product" class="delimiter">(</a><a title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence.Recover.<init>$default$1">fromSnapshot</a>: <a href="Snapshot.scala.html#akka.persistence;SnapshotSelectionCriteria" title="akka.persistence.SnapshotSelectionCriteria">SnapshotSelectionCriteria</a> = <a href="Snapshot.scala.html#akka.persistence.SnapshotSelectionCriteria" title="akka.persistence.SnapshotSelectionCriteria.type">SnapshotSelectionCriteria</a>.<a href="Snapshot.scala.html#akka.persistence.SnapshotSelectionCriteria.Latest" title="=&gt; akka.persistence.SnapshotSelectionCriteria">Latest</a>, <a title="Long" id="akka.persistence.Recover.<init>$default$2">toSequenceNr</a>: <span title="Long">Long</span> = Long.<span title="Long(9223372036854775807L)">MaxValue</span>, <a title="Long" id="akka.persistence.Recover.<init>$default$3">replayMax</a>: <span title="Long">Long</span> = Long.<span title="Long(9223372036854775807L)">MaxValue</span><span class="delimiter">)</span>
+
+<span class="keyword">object</span> <a title="akka.persistence.Recover.type" id="akka.persistence.Recover.readResolve">Recover</a> <a href="#akka.persistence.Recover.readResolve" title="akka.persistence.Recover.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Java API.
+   *
+   * @see [[Recover]]
+   */</span>
+  <span class="keyword">def</span> <a title="()akka.persistence.Recover" id="akka.persistence.Recover.create(12fb6fc251)">create</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#akka.persistence;Recover" title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long, replayMax: Long)akka.persistence.Recover">Recover</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API.
+   *
+   * @see [[Recover]]
+   */</span>
+  <span class="keyword">def</span> <a title="(toSequenceNr: Long)akka.persistence.Recover" id="akka.persistence.Recover.create(b143516dd5)">create</a><span class="delimiter">(</span><a title="Long" id="akka.persistence.Recover.create(b143516dd5).toSequenceNr">toSequenceNr</a>: <span title="Long">Long</span><span class="delimiter">)</span> =
+    <a href="#akka.persistence.Recover.<init>$default$1" title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence.Recover.create(b143516dd5).x$3">Recover</a><span class="delimiter">(</span>toSequenceNr = <a href="#akka.persistence.Recover.create(b143516dd5).toSequenceNr" title="Long" id="akka.persistence.Recover.create(b143516dd5).x$1">toSequenceNr</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API.
+   *
+   * @see [[Recover]]
+   */</span>
+  <span class="keyword">def</span> <a title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria)akka.persistence.Recover" id="akka.persistence.Recover.create(76aa433a75)">create</a><span class="delimiter">(</span><a title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence.Recover.create(76aa433a75).fromSnapshot">fromSnapshot</a>: <a href="Snapshot.scala.html#akka.persistence;SnapshotSelectionCriteria" title="akka.persistence.SnapshotSelectionCriteria">SnapshotSelectionCriteria</a><span class="delimiter">)</span> =
+    <a href="#akka.persistence;Recover" title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long, replayMax: Long)akka.persistence.Recover">Recover</a><span class="delimiter">(</span>fromSnapshot = <a href="#akka.persistence.Recover.create(76aa433a75).fromSnapshot" title="akka.persistence.SnapshotSelectionCriteria">fromSnapshot</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API.
+   *
+   * @see [[Recover]]
+   */</span>
+  <span class="keyword">def</span> <a title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long)akka.persistence.Recover" id="akka.persistence.Recover.create(de1677aa53)">create</a><span class="delimiter">(</span><a title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence.Recover.create(de1677aa53).fromSnapshot">fromSnapshot</a>: <a href="Snapshot.scala.html#akka.persistence;SnapshotSelectionCriteria" title="akka.persistence.SnapshotSelectionCriteria">SnapshotSelectionCriteria</a>, <a title="Long" id="akka.persistence.Recover.create(de1677aa53).toSequenceNr">toSequenceNr</a>: <span title="Long">Long</span><span class="delimiter">)</span> =
+    <a href="#akka.persistence;Recover" title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long, replayMax: Long)akka.persistence.Recover">Recover</a><span class="delimiter">(</span><a href="#akka.persistence.Recover.create(de1677aa53).fromSnapshot" title="akka.persistence.SnapshotSelectionCriteria">fromSnapshot</a>, <a href="#akka.persistence.Recover.create(de1677aa53).toSequenceNr" title="Long">toSequenceNr</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API.
+   *
+   * @see [[Recover]]
+   */</span>
+  <span class="keyword">def</span> <a title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long, replayMax: Long)akka.persistence.Recover" id="akka.persistence.Recover.create(e51ab35e88)">create</a><span class="delimiter">(</span><a title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence.Recover.create(e51ab35e88).fromSnapshot">fromSnapshot</a>: <a href="Snapshot.scala.html#akka.persistence;SnapshotSelectionCriteria" title="akka.persistence.SnapshotSelectionCriteria">SnapshotSelectionCriteria</a>, <a title="Long" id="akka.persistence.Recover.create(e51ab35e88).toSequenceNr">toSequenceNr</a>: <span title="Long">Long</span>, <a title="Long" id="akka.persistence.Recover.create(e51ab35e88).replayMax">replayMax</a>: <span title="Long">Long</span><span class="delimiter">)</span> =
+    <a href="#akka.persistence;Recover" title="(fromSnapshot: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long, replayMax: Long)akka.persistence.Recover">Recover</a><span class="delimiter">(</span><a href="#akka.persistence.Recover.create(e51ab35e88).fromSnapshot" title="akka.persistence.SnapshotSelectionCriteria">fromSnapshot</a>, <a href="#akka.persistence.Recover.create(e51ab35e88).toSequenceNr" title="Long">toSequenceNr</a>, <a href="#akka.persistence.Recover.create(e51ab35e88).replayMax" title="Long">replayMax</a><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

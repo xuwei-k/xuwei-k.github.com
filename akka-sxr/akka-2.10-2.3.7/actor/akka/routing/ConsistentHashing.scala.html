@@ -1,0 +1,586 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>actor/akka/routing/ConsistentHashing.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+<span class="keyword">package</span> akka.routing
+
+<span class="keyword">import</span> scala.collection.immutable
+<span class="keyword">import</span> akka.actor.ActorContext
+<span class="keyword">import</span> akka.actor.Props
+<span class="keyword">import</span> akka.dispatch.Dispatchers
+<span class="keyword">import</span> com.typesafe.config.Config
+<span class="keyword">import</span> akka.actor.SupervisorStrategy
+<span class="keyword">import</span> akka.japi.<a href="../japi/JavaAPI.scala.html#akka.japi.Util" title="akka.japi.Util.type">Util</a>.immutableSeq
+<span class="keyword">import</span> akka.actor.Address
+<span class="keyword">import</span> akka.actor.ExtendedActorSystem
+<span class="keyword">import</span> akka.actor.ActorSystem
+<span class="keyword">import</span> java.util.concurrent.atomic.AtomicReference
+<span class="keyword">import</span> akka.actor.ActorRef
+<span class="keyword">import</span> akka.serialization.SerializationExtension
+<span class="keyword">import</span> scala.util.control.NonFatal
+<span class="keyword">import</span> akka.event.Logging
+<span class="keyword">import</span> akka.actor.ActorPath
+
+<span class="keyword">object</span> <a title="akka.routing.ConsistentHashingRouter.type" id="akka.routing.ConsistentHashingRouter.readResolve">ConsistentHashingRouter</a> <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type" class="delimiter">{</a>
+
+  <span class="comment">/**
+   * If you don't define the `hashMapping` when
+   * constructing the [[akka.routing.ConsistentHashingRouter]]
+   * the messages need to implement this interface to define what
+   * data to use for the consistent hash key. Note that it's not
+   * the hash, but the data to be hashed.
+   *
+   * If returning an `Array[Byte]` or String it will be used as is,
+   * otherwise the configured [[akka.serialization.Serializer]]
+   * will be applied to the returned data.
+   *
+   * If messages can't implement this interface themselves,
+   * it's possible to wrap the messages in
+   * [[akka.routing.ConsistentHashingRouter.ConsistentHashableEnvelope]],
+   * or use [[akka.routing.ConsistentHashingRouter.ConsistentHashableEnvelope]]
+   */</span>
+  <span class="keyword">trait</span> <a title="trait ConsistentHashable extends AnyRef" id="akka.routing.ConsistentHashingRouter;ConsistentHashable">ConsistentHashable</a> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="=&gt; Any" id="akka.routing.ConsistentHashingRouter;ConsistentHashable.consistentHashKey">consistentHashKey</a>: <span title="Any">Any</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * If you don't define the `hashMapping` when
+   * constructing the [[akka.routing.ConsistentHashingRouter]]
+   * and messages can't implement [[akka.routing.ConsistentHashingRouter.ConsistentHashable]]
+   * themselves they can we wrapped by this envelope instead. The
+   * router will only send the wrapped message to the destination,
+   * i.e. the envelope will be stripped off.
+   */</span>
+  @SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+  <span class="keyword">final</span> <span class="keyword">case class</span> <a title="class ConsistentHashableEnvelope extends AnyRef with akka.routing.ConsistentHashingRouter.ConsistentHashable with akka.routing.RouterEnvelope with Product with Serializable" id="akka.routing.ConsistentHashingRouter.ConsistentHashableEnvelope.readResolve">ConsistentHashableEnvelope</a><a href="#akka.routing.ConsistentHashingRouter.ConsistentHashableEnvelope.readResolve" title="Product" class="delimiter">(</a><a title="Any" id="akka.routing.ConsistentHashingRouter;ConsistentHashableEnvelope.message">message</a>: <span title="Any">Any</span>, <a title="Any" id="akka.routing.ConsistentHashingRouter;ConsistentHashableEnvelope.hashKey">hashKey</a>: <span title="Any">Any</span><span class="delimiter">)</span>
+    <span class="keyword">extends</span> <a href="#akka.routing.ConsistentHashingRouter;ConsistentHashable" title="akka.routing.ConsistentHashingRouter.ConsistentHashable">ConsistentHashable</a> <span class="keyword">with</span> <a href="Router.scala.html#akka.routing;RouterEnvelope" title="akka.routing.RouterEnvelope">RouterEnvelope</a> <span class="delimiter">{</span>
+    <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; Any" id="akka.routing.ConsistentHashingRouter;ConsistentHashableEnvelope.consistentHashKey">consistentHashKey</a>: <span title="Any">Any</span> = <a href="#akka.routing.ConsistentHashingRouter;ConsistentHashableEnvelope.hashKey" title="=&gt; Any">hashKey</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Partial function from message to the data to
+   * use for the consistent hash key. Note that it's not
+   * the hash that is to be returned, but the data to be hashed.
+   *
+   * If returning an `Array[Byte]` or String it will be used as is,
+   * otherwise the configured [[akka.serialization.Serializer]]
+   * will be applied to the returned data.
+   */</span>
+  <span class="keyword">type</span> <a title="PartialFunction[Any,Any]" id="akka.routing.ConsistentHashingRouter;ConsistentHashMapping">ConsistentHashMapping</a> = <span title="PartialFunction[Any,Any]">PartialFunction</span><span class="delimiter">[</span>Any, Any<span class="delimiter">]</span>
+
+  @SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+  <span class="keyword">object</span> <a title="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.type" id="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping">emptyConsistentHashMapping</a> <a href="#akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping" title="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.type" class="keyword">extends</a> <span title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping">ConsistentHashMapping</span> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(x: Any)Boolean" id="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.isDefinedAt">isDefinedAt</a><span class="delimiter">(</span><a title="Any" id="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.isDefinedAt.x">x</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <span title="Boolean(false)" class="keyword">false</span>
+    <span class="keyword">def</span> <a title="(x: Any)Nothing" id="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.apply">apply</a><span class="delimiter">(</span><a title="Any" id="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.apply.x">x</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)UnsupportedOperationException" class="keyword">new</span> <span title="UnsupportedOperationException">UnsupportedOperationException</span><span class="delimiter">(</span><span title="String(&quot;Empty ConsistentHashMapping apply()&quot;)" class="string">&quot;Empty ConsistentHashMapping apply()&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * JAVA API
+   * Mapping from message to the data to use for the consistent hash key.
+   * Note that it's not the hash that is to be returned, but the data to be
+   * hashed.
+   *
+   * May return `null` to indicate that the message is not handled by
+   * this mapping.
+   *
+   * If returning an `Array[Byte]` or String it will be used as is,
+   * otherwise the configured [[akka.serialization.Serializer]]
+   * will be applied to the returned data.
+   */</span>
+  <span class="keyword">trait</span> <a title="trait ConsistentHashMapper extends AnyRef" id="akka.routing.ConsistentHashingRouter;ConsistentHashMapper">ConsistentHashMapper</a> <span class="delimiter">{</span>
+    <span class="keyword">def</span> <a title="(message: Any)Any" id="akka.routing.ConsistentHashingRouter;ConsistentHashMapper.hashKey">hashKey</a><span class="delimiter">(</span><a title="Any" id="akka.routing.ConsistentHashingRouter;ConsistentHashMapper.hashKey.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Any">Any</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">def</span> <a title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing.ConsistentHashingRouter.hashMappingAdapter">hashMappingAdapter</a><span class="delimiter">(</span><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper" id="akka.routing.ConsistentHashingRouter.hashMappingAdapter.mapper">mapper</a>: <a href="#akka.routing.ConsistentHashingRouter;ConsistentHashMapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">ConsistentHashMapper</a><span class="delimiter">)</span>: <span title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping">ConsistentHashMapping</span> = <a title="anonymous class $anonfun extends scala.runtime.AbstractPartialFunction[Any,Any] with Serializable" id="akka.routing.ConsistentHashingRouter.hashMappingAdapter;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    <span class="keyword">case</span> <a title="Any" id="akka.routing.ConsistentHashingRouter.hashMappingAdapter;$anonfun.isDefinedAt.message">message</a> <span class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter.mapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">mapper</a>.<a href="#akka.routing.ConsistentHashingRouter;ConsistentHashMapper.hashKey" title="(message: Any)Any">hashKey</a><span class="delimiter">(</span><a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter;$anonfun.isDefinedAt.message" title="Any">message</a><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="AnyRef" class="delimiter">[</span><span title="AnyRef">AnyRef</span><span class="delimiter">]</span> <span title="(x$1: AnyRef)Boolean">ne</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> ⇒
+      <a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter.mapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">mapper</a>.<a href="#akka.routing.ConsistentHashingRouter;ConsistentHashMapper.hashKey" title="(message: Any)Any">hashKey</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter;$anonfun.isDefinedAt.message" title="Any">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Creates a new ConsistentHashingRouter, routing to the specified routees
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;Use ConsistentHashingGroup&quot;</span>, <span class="string">&quot;2.3&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="(routees: scala.collection.immutable.Iterable[akka.actor.ActorRef])akka.routing.ConsistentHashingRouter" id="akka.routing.ConsistentHashingRouter.apply(ca6fd6c8a4)">apply</a><span class="delimiter">(</span><a title="scala.collection.immutable.Iterable[akka.actor.ActorRef]" id="akka.routing.ConsistentHashingRouter.apply(ca6fd6c8a4).routees">routees</a>: immutable.<span title="scala.collection.immutable.Iterable[akka.actor.ActorRef]">Iterable</span><span class="delimiter">[</span>ActorRef<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> =
+    <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing.ConsistentHashingRouter.apply(ca6fd6c8a4).x$10" class="keyword">new</a> <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a><span class="delimiter">(</span>routees = <a href="#akka.routing.ConsistentHashingRouter.apply(ca6fd6c8a4).routees" title="scala.collection.immutable.Iterable[akka.actor.ActorRef]">routees</a> <a title="scala.collection.immutable.Iterable[String]" id="akka.routing.ConsistentHashingRouter.apply(ca6fd6c8a4).x$4">map</a> <span class="delimiter">(</span><a href="#akka.routing.ConsistentHashingRouter.apply(ca6fd6c8a4).x$4.$anonfun.x$1" title="akka.actor.ActorRef">_</a>.<a href="../actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a>.<span title="()String">toString</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API to create router with the supplied 'routees' actors.
+   */</span>
+  @deprecated<span class="delimiter">(</span><span class="string">&quot;Use ConsistentHashingGroup&quot;</span>, <span class="string">&quot;2.3&quot;</span><span class="delimiter">)</span>
+  <span class="keyword">def</span> <a title="(routees: Iterable[akka.actor.ActorRef])akka.routing.ConsistentHashingRouter" id="akka.routing.ConsistentHashingRouter.create">create</a><span class="delimiter">(</span><a title="Iterable[akka.actor.ActorRef]" id="akka.routing.ConsistentHashingRouter.create.routees">routees</a>: java.lang.<span title="Iterable[akka.actor.ActorRef]">Iterable</span><span class="delimiter">[</span>ActorRef<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> = <a href="#akka.routing.ConsistentHashingRouter.apply(ca6fd6c8a4)" title="(routees: scala.collection.immutable.Iterable[akka.actor.ActorRef])akka.routing.ConsistentHashingRouter">apply</a><span class="delimiter">(</span><a href="../japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[akka.actor.ActorRef])scala.collection.immutable.Seq[akka.actor.ActorRef]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.routing.ConsistentHashingRouter.create.routees" title="Iterable[akka.actor.ActorRef]">routees</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+<span title="AnyRef" class="keyword">object</span> <a title="akka.routing.ConsistentHashingRoutingLogic.type" id="akka.routing.ConsistentHashingRoutingLogic.readResolve">ConsistentHashingRoutingLogic</a> <a href="#akka.routing.ConsistentHashingRoutingLogic.readResolve" title="akka.routing.ConsistentHashingRoutingLogic.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Address to use for the selfAddress parameter
+   */</span>
+  <span class="keyword">def</span> <a title="(system: akka.actor.ActorSystem)akka.actor.Address" id="akka.routing.ConsistentHashingRoutingLogic.defaultAddress">defaultAddress</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.routing.ConsistentHashingRoutingLogic.defaultAddress.system">system</a>: <a href="../actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span>: <a href="../actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a> =
+    <a href="#akka.routing.ConsistentHashingRoutingLogic.defaultAddress.system" title="akka.actor.ActorSystem">system</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="akka.actor.ExtendedActorSystem" class="delimiter">[</span><a href="../actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem" title="akka.actor.ExtendedActorSystem">ExtendedActorSystem</a><span class="delimiter">]</span>.<a href="../actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem.provider" title="=&gt; akka.actor.ActorRefProvider">provider</a>.<a href="../actor/ActorRefProvider.scala.html#akka.actor;ActorRefProvider.getDefaultAddress" title="=&gt; akka.actor.Address">getDefaultAddress</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Uses consistent hashing to select a routee based on the sent message.
+ *
+ * There is 3 ways to define what data to use for the consistent hash key.
+ *
+ * 1. You can define `hashMapping` / `withHashMapper`
+ * of the router to map incoming messages to their consistent hash key.
+ * This makes the decision transparent for the sender.
+ *
+ * 2. The messages may implement [[akka.routing.ConsistentHashingRouter.ConsistentHashable]].
+ * The key is part of the message and it's convenient to define it together
+ * with the message definition.
+ *
+ * 3. The messages can be be wrapped in a [[akka.routing.ConsistentHashingRouter.ConsistentHashableEnvelope]]
+ * to define what data to use for the consistent hash key. The sender knows
+ * the key to use.
+ *
+ * These ways to define the consistent hash key can be use together and at
+ * the same time for one router. The `hashMapping` is tried first.
+ *
+ * @param virtualNodesFactor number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+ *
+ * @param hashMapping partial function from message to the data to
+ *   use for the consistent hash key
+ *
+ * @param system the actor system hosting this router
+ *
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+<span class="keyword">final</span> <span class="keyword">case class</span> <a title="(system: akka.actor.ActorSystem, virtualNodesFactor: Int, hashMapping: akka.routing.ConsistentHashingRouter.ConsistentHashMapping)akka.routing.ConsistentHashingRoutingLogic" id="akka.routing;ConsistentHashingRoutingLogic.equals">ConsistentHashingRoutingLogic</a><a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="Product" class="delimiter">(</a>
+  <a title="akka.actor.ActorSystem" id="akka.routing;ConsistentHashingRoutingLogic.copy$default$1">system</a>: <a href="../actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a>,
+  <a title="Int" id="akka.routing;ConsistentHashingRoutingLogic.copy$default$2">virtualNodesFactor</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span>,
+  <a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingRoutingLogic.copy$default$3">hashMapping</a>: ConsistentHashingRouter.<span title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping">ConsistentHashMapping</span> = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping" title="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.type">emptyConsistentHashMapping</a><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <a href="Router.scala.html#akka.routing;RoutingLogic" title="akka.routing.RoutingLogic">RoutingLogic</a> <span class="delimiter">{</span>
+
+  <span class="keyword">import</span> <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>._
+
+  <span class="comment">/**
+   * Java API
+   * @param system the actor system hosting this router
+   */</span>
+  <span class="keyword">def</span> <a title="(system: akka.actor.ActorSystem)akka.routing.ConsistentHashingRoutingLogic" id="akka.routing;ConsistentHashingRoutingLogic.<init>(419d6dad24)" class="keyword">this</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.routing;ConsistentHashingRoutingLogic.<init>(419d6dad24).system">system</a>: <a href="../actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span> =
+    <a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="ConsistentHashingRoutingLogic.this.type" class="keyword">this</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.<init>(419d6dad24).system" title="akka.actor.ActorSystem">system</a>, virtualNodesFactor = <span title="Int(0)" class="int">0</span>, hashMapping = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping" title="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.type">emptyConsistentHashMapping</a><span class="delimiter">)</span>
+
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="akka.actor.Address" id="akka.routing;ConsistentHashingRoutingLogic.selfAddress">selfAddress</a> = <a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$1" title="=&gt; akka.actor.ActorSystem">system</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="akka.actor.ExtendedActorSystem" class="delimiter">[</span><a href="../actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem" title="akka.actor.ExtendedActorSystem">ExtendedActorSystem</a><span class="delimiter">]</span>.<a href="../actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem.provider" title="=&gt; akka.actor.ActorRefProvider">provider</a>.<a href="../actor/ActorRefProvider.scala.html#akka.actor;ActorRefProvider.getDefaultAddress" title="=&gt; akka.actor.Address">getDefaultAddress</a>
+  <span class="keyword">val</span> <a title="Int" id="akka.routing;ConsistentHashingRoutingLogic.vnodes">vnodes</a> =
+    <span title="Int" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$2" title="=&gt; Int">virtualNodesFactor</a> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$1" title="=&gt; akka.actor.ActorSystem">system</a>.<a href="../actor/ActorSystem.scala.html#akka.actor;ActorSystem.settings" title="=&gt; akka.actor.ActorSystem.Settings">settings</a>.<a href="../actor/ActorSystem.scala.html#akka.actor.ActorSystem;Settings.DefaultVirtualNodesFactor" title="=&gt; Int">DefaultVirtualNodesFactor</a>
+    <span class="keyword">else</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$2" title="=&gt; Int">virtualNodesFactor</a>
+
+  <span class="keyword">private</span> <span class="keyword">lazy</span> <span class="keyword">val</span> <a title="akka.event.LoggingAdapter" id="akka.routing;ConsistentHashingRoutingLogic.log">log</a> = <a href="../event/Logging.scala.html#akka.event.Logging.apply(882ba4a885)" title="(system: akka.actor.ActorSystem, logSource: Class[?0])(implicit evidence$3: akka.event.LogSource[Class[?0]])akka.event.LoggingAdapter">Logging</a><a href="../event/Logging.scala.html#akka.event.LogSource.fromAnyClass" title="akka.event.LogSource[Class[?0]]" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$1" title="=&gt; akka.actor.ActorSystem">system</a>, <a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="()Class[_]">getClass</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Setting the number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+   */</span>
+  <span class="keyword">def</span> <a title="(vnodes: Int)akka.routing.ConsistentHashingRoutingLogic" id="akka.routing;ConsistentHashingRoutingLogic.withVirtualNodesFactor">withVirtualNodesFactor</a><span class="delimiter">(</span><a title="Int" id="akka.routing;ConsistentHashingRoutingLogic.withVirtualNodesFactor.vnodes">vnodes</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="akka.routing.ConsistentHashingRoutingLogic">ConsistentHashingRoutingLogic</a> = <a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$1" title="akka.actor.ActorSystem" id="akka.routing;ConsistentHashingRoutingLogic.withVirtualNodesFactor.x$13">copy</a><span class="delimiter">(</span>virtualNodesFactor = <a href="#akka.routing;ConsistentHashingRoutingLogic.withVirtualNodesFactor.vnodes" title="Int" id="akka.routing;ConsistentHashingRoutingLogic.withVirtualNodesFactor.x$11">vnodes</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: Setting the mapping from message to the data to use for the consistent hash key.
+   */</span>
+  <span class="keyword">def</span> <a title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingRoutingLogic" id="akka.routing;ConsistentHashingRoutingLogic.withHashMapper">withHashMapper</a><span class="delimiter">(</span><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper" id="akka.routing;ConsistentHashingRoutingLogic.withHashMapper.mapper">mapper</a>: ConsistentHashingRouter.<a href="#akka.routing.ConsistentHashingRouter;ConsistentHashMapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">ConsistentHashMapper</a><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="akka.routing.ConsistentHashingRoutingLogic">ConsistentHashingRoutingLogic</a> =
+    <a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$1" title="akka.actor.ActorSystem" id="akka.routing;ConsistentHashingRoutingLogic.withHashMapper.x$16">copy</a><span class="delimiter">(</span>hashMapping = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter" title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMappingAdapter</a><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingRoutingLogic.withHashMapper.x$14" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingRoutingLogic.withHashMapper.mapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">mapper</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">// tuple of routees and the ConsistentHash, updated together in updateConsistentHash</span>
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="java.util.concurrent.atomic.AtomicReference[(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])]" id="akka.routing;ConsistentHashingRoutingLogic.consistentHashRef">consistentHashRef</a> = <span title="java.util.concurrent.atomic.AtomicReference[(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])]" class="keyword">new</span> <span title="java.util.concurrent.atomic.AtomicReference[(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])]">AtomicReference</span><span class="delimiter">[</span><span class="delimiter">(</span>immutable.IndexedSeq<span class="delimiter">[</span>Routee<span class="delimiter">]</span>, ConsistentHash<span class="delimiter">[</span>ConsistentRoutee<span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">]</span><span class="delimiter">(</span><span title="(_1: Null, _2: Null)(Null, Null)" class="delimiter">(</span><span title="Null(null)" class="keyword">null</span>, <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(message: Any, routees: scala.collection.immutable.IndexedSeq[akka.routing.Routee])akka.routing.Routee" id="akka.routing;ConsistentHashingRoutingLogic.select">select</a><span class="delimiter">(</span><a title="Any" id="akka.routing;ConsistentHashingRoutingLogic.select.message">message</a>: <span title="Any">Any</span>, <a title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]" id="akka.routing;ConsistentHashingRoutingLogic.select.routees">routees</a>: immutable.<span title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">IndexedSeq</span><span class="delimiter">[</span>Routee<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="Router.scala.html#akka.routing;Routee" title="akka.routing.Routee">Routee</a> =
+    <span title="akka.routing.Routee" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.routees" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">routees</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <a href="Router.scala.html#akka.routing.NoRoutee" title="akka.routing.NoRoutee.type">NoRoutee</a>
+    <span class="keyword">else</span> <span class="delimiter">{</span>
+
+      <span class="comment">// update consistentHash when routees has changed</span>
+      <span class="comment">// changes to routees are rare and when no changes this is a quick operation</span>
+      <span class="keyword">def</span> <a title="()akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]" id="akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash">updateConsistentHash</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="ConsistentHash.scala.html#akka.routing;ConsistentHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">ConsistentHash</a><span class="delimiter">[</span>ConsistentRoutee<span class="delimiter">]</span> = <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])" id="akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldConsistentHashTuple">oldConsistentHashTuple</a> = <a href="#akka.routing;ConsistentHashingRoutingLogic.consistentHashRef" title="=&gt; java.util.concurrent.atomic.AtomicReference[(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])]">consistentHashRef</a>.<span title="()(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])">get</span>
+        <span class="keyword">val</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldRoutees" title="(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.x$2" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]" id="akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldRoutees">oldRoutees</a>, <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.x$2" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]" id="akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldConsistentHash">oldConsistentHash</a><span class="delimiter">)</span> = <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldConsistentHashTuple" title="(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])">oldConsistentHashTuple</a>
+
+        <span title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.routees" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">routees</a> <span title="(x$1: AnyRef)Boolean">ne</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldRoutees" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">oldRoutees</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span class="comment">// when other instance, same content, no need to re-hash, but try to set routees</span>
+          <span class="keyword">val</span> <a title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]" id="akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.consistentHash">consistentHash</a> =
+            <span title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.routees" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">routees</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldRoutees" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">oldRoutees</a><span class="delimiter">)</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldConsistentHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">oldConsistentHash</a>
+            <span class="keyword">else</span> <a href="ConsistentHash.scala.html#akka.routing.ConsistentHash.apply" title="(nodes: Iterable[akka.routing.ConsistentRoutee], virtualNodesFactor: Int)(implicit evidence$2: scala.reflect.ClassTag[akka.routing.ConsistentRoutee])akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">ConsistentHash</a><span title="(runtimeClass1: Class[_])scala.reflect.ClassTag[akka.routing.ConsistentRoutee]" class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.routees" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">routees</a>.<span title="(f: akka.routing.Routee =&gt; akka.routing.ConsistentRoutee)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.IndexedSeq[akka.routing.Routee],akka.routing.ConsistentRoutee,scala.collection.immutable.IndexedSeq[akka.routing.ConsistentRoutee]])scala.collection.immutable.IndexedSeq[akka.routing.ConsistentRoutee]">map</span><span title="scala.collection.generic.CanBuildFrom[scala.collection.immutable.IndexedSeq.Coll,akka.routing.ConsistentRoutee,scala.collection.immutable.IndexedSeq[akka.routing.ConsistentRoutee]]" class="delimiter">(</span><a href="#akka.routing.ConsistentRoutee.readResolve" title="(routee: akka.routing.Routee, selfAddress: akka.actor.Address)akka.routing.ConsistentRoutee">ConsistentRoutee</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.consistentHash.$anonfun.x$3" title="akka.routing.Routee">_</a>, <a href="#akka.routing;ConsistentHashingRoutingLogic.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a><span class="delimiter">)</span><span class="delimiter">)</span>, <a href="#akka.routing;ConsistentHashingRoutingLogic.vnodes" title="=&gt; Int">vnodes</a><span class="delimiter">)</span> <span class="comment">// re-hash</span>
+          <span class="comment">// ignore, don't update, in case of CAS failure</span>
+          <a href="#akka.routing;ConsistentHashingRoutingLogic.consistentHashRef" title="=&gt; java.util.concurrent.atomic.AtomicReference[(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])]">consistentHashRef</a>.<span title="(x$1: (scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]), x$2: (scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]))Boolean">compareAndSet</span><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldConsistentHashTuple" title="(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])">oldConsistentHashTuple</a>, <span title="(_1: scala.collection.immutable.IndexedSeq[akka.routing.Routee], _2: akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])(scala.collection.immutable.IndexedSeq[akka.routing.Routee], akka.routing.ConsistentHash[akka.routing.ConsistentRoutee])" class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.routees" title="scala.collection.immutable.IndexedSeq[akka.routing.Routee]">routees</a>, <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.consistentHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">consistentHash</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.consistentHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">consistentHash</a>
+        <span class="delimiter">}</span> <span class="keyword">else</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash.oldConsistentHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">oldConsistentHash</a>
+      <span class="delimiter">}</span>
+
+      <span class="keyword">def</span> <a title="(hashData: Any)akka.routing.Routee" id="akka.routing;ConsistentHashingRoutingLogic.select.target">target</a><span class="delimiter">(</span><a title="Any" id="akka.routing;ConsistentHashingRoutingLogic.select.target.hashData">hashData</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="Router.scala.html#akka.routing;Routee" title="akka.routing.Routee">Routee</a> = <span class="keyword">try</span> <span class="delimiter">{</span>
+        <span class="keyword">val</span> <a title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]" id="akka.routing;ConsistentHashingRoutingLogic.select.target.currentConsistenHash">currentConsistenHash</a> = <a href="#akka.routing;ConsistentHashingRoutingLogic.select.updateConsistentHash" title="()akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">updateConsistentHash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span title="akka.routing.Routee" class="keyword">if</span> <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.currentConsistenHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">currentConsistenHash</a>.<a href="ConsistentHash.scala.html#akka.routing;ConsistentHash.isEmpty" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <a href="Router.scala.html#akka.routing.NoRoutee" title="akka.routing.NoRoutee.type">NoRoutee</a>
+        <span class="keyword">else</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.hashData" title="Any">hashData</a> <span title="akka.routing.Routee" class="keyword">match</span> <span class="delimiter">{</span>
+          <span class="keyword">case</span> <a title="Array[Byte]" id="akka.routing;ConsistentHashingRoutingLogic.select.target.bytes">bytes</a>: <span title="Array[Byte]">Array</span><span class="delimiter">[</span>Byte<span class="delimiter">]</span> ⇒ <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.currentConsistenHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">currentConsistenHash</a>.<a href="ConsistentHash.scala.html#akka.routing;ConsistentHash.nodeFor(e19e0496cf)" title="(key: Array[Byte])akka.routing.ConsistentRoutee">nodeFor</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.bytes" title="Array[Byte]">bytes</a><span class="delimiter">)</span>.<a href="#akka.routing;ConsistentRoutee.routee" title="=&gt; akka.routing.Routee">routee</a>
+          <span class="keyword">case</span> <a title="String" id="akka.routing;ConsistentHashingRoutingLogic.select.target.str">str</a>: <span title="String">String</span>        ⇒ <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.currentConsistenHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">currentConsistenHash</a>.<a href="ConsistentHash.scala.html#akka.routing;ConsistentHash.nodeFor(94748ca6b4)" title="(key: String)akka.routing.ConsistentRoutee">nodeFor</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.str" title="String">str</a><span class="delimiter">)</span>.<a href="#akka.routing;ConsistentRoutee.routee" title="=&gt; akka.routing.Routee">routee</a>
+          <span class="keyword">case</span> <a title="AnyRef" id="akka.routing;ConsistentHashingRoutingLogic.select.target.x">x</a>: <span title="AnyRef">AnyRef</span>          ⇒ <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.currentConsistenHash" title="akka.routing.ConsistentHash[akka.routing.ConsistentRoutee]">currentConsistenHash</a>.<a href="ConsistentHash.scala.html#akka.routing;ConsistentHash.nodeFor(e19e0496cf)" title="(key: Array[Byte])akka.routing.ConsistentRoutee">nodeFor</a><span class="delimiter">(</span><a href="../actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.serialization.Serialization">SerializationExtension</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$1" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span>.<a href="../serialization/Serialization.scala.html#akka.serialization;Serialization.serialize" title="(o: AnyRef)scala.util.Try[Array[Byte]]">serialize</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.x" title="AnyRef">x</a><span class="delimiter">)</span>.<span title="=&gt; Array[Byte]">get</span><span class="delimiter">)</span>.<a href="#akka.routing;ConsistentRoutee.routee" title="=&gt; akka.routing.Routee">routee</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.<unapply-selector>" title="(t: Throwable)Option[Throwable]">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="akka.routing;ConsistentHashingRoutingLogic.select.target.e">e</a><span class="delimiter">)</span> ⇒
+          <span class="comment">// serialization failed</span>
+          <a href="#akka.routing;ConsistentHashingRoutingLogic.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.warning(2f488eb77c)" title="(template: String, arg1: Any, arg2: Any)Unit">warning</a><span class="delimiter">(</span><span title="String(&quot;Couldn\'t route message with consistent hash key [{}] due to [{}]&quot;)" class="string">&quot;Couldn't route message with consistent hash key [{}] due to [{}]&quot;</span>, <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.hashData" title="Any">hashData</a>, <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target.e" title="Throwable">e</a>.<span title="()String">getMessage</span><span class="delimiter">)</span>
+          <a href="Router.scala.html#akka.routing.NoRoutee" title="akka.routing.NoRoutee.type">NoRoutee</a>
+      <span class="delimiter">}</span>
+
+      <a href="#akka.routing;ConsistentHashingRoutingLogic.select.message" title="Any">message</a> <span title="akka.routing.Routee" class="keyword">match</span> <span class="delimiter">{</span>
+        <span class="keyword">case</span> _ <span class="keyword">if</span> <a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$3" title="=&gt; akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMapping</a>.<span title="(x: Any)Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.message" title="Any">message</a><span class="delimiter">)</span> ⇒ <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target" title="(hashData: Any)akka.routing.Routee">target</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.copy$default$3" title="(v1: Any)Any">hashMapping</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.message" title="Any">message</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="keyword">case</span> <a title="akka.routing.ConsistentHashingRouter.ConsistentHashable" id="akka.routing;ConsistentHashingRoutingLogic.select.hashable">hashable</a>: <a href="#akka.routing.ConsistentHashingRouter;ConsistentHashable" title="akka.routing.ConsistentHashingRouter.ConsistentHashable">ConsistentHashable</a>          ⇒ <a href="#akka.routing;ConsistentHashingRoutingLogic.select.target" title="(hashData: Any)akka.routing.Routee">target</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.select.hashable" title="akka.routing.ConsistentHashingRouter.ConsistentHashable">hashable</a>.<a href="#akka.routing.ConsistentHashingRouter;ConsistentHashable.consistentHashKey" title="=&gt; Any">consistentHashKey</a><span class="delimiter">)</span>
+        <span class="keyword">case</span> <a title="Any" id="akka.routing;ConsistentHashingRoutingLogic.select.other">other</a> ⇒
+          <a href="#akka.routing;ConsistentHashingRoutingLogic.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.warning(6c666e4343)" title="(template: String, arg1: Any, arg2: Any, arg3: Any)Unit">warning</a><span class="delimiter">(</span><span title="String(&quot;Message [{}] must be handled by hashMapping, or implement [{}] or be wrapped in [{}]&quot;)" class="string">&quot;Message [{}] must be handled by hashMapping, or implement [{}] or be wrapped in [{}]&quot;</span>,
+            <a href="#akka.routing;ConsistentHashingRoutingLogic.select.message" title="Any">message</a>.<span title="()Class[_]">getClass</span>.<span title="()String">getName</span>, classOf<span title="Class[akka.routing.ConsistentHashingRouter.ConsistentHashable](classOf[akka.routing.ConsistentHashingRouter$$ConsistentHashable])" class="delimiter">[</span>ConsistentHashable<span class="delimiter">]</span>.<span title="()String">getName</span>,
+            classOf<span title="Class[akka.routing.ConsistentHashingRouter.ConsistentHashableEnvelope](classOf[akka.routing.ConsistentHashingRouter$$ConsistentHashableEnvelope])" class="delimiter">[</span>ConsistentHashableEnvelope<span class="delimiter">]</span>.<span title="()String">getName</span><span class="delimiter">)</span>
+          <a href="Router.scala.html#akka.routing.NoRoutee" title="akka.routing.NoRoutee.type">NoRoutee</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * A router pool that uses consistent hashing to select a routee based on the
+ * sent message. The selection is described in [[akka.routing.ConsistentHashingRoutingLogic]].
+ *
+ * The configuration parameter trumps the constructor arguments. This means that
+ * if you provide `nrOfInstances` during instantiation they will be ignored if
+ * the router is defined in the configuration file for the actor being used.
+ *
+ * &lt;h1&gt;Supervision Setup&lt;/h1&gt;
+ *
+ * Any routees that are created by a router will be created as the router's children.
+ * The router is therefore also the children's supervisor.
+ *
+ * The supervision strategy of the router actor can be configured with
+ * [[#withSupervisorStrategy]]. If no strategy is provided, routers default to
+ * a strategy of “always escalate”. This means that errors are passed up to the
+ * router's supervisor for handling.
+ *
+ * The router's supervisor will treat the error as an error with the router itself.
+ * Therefore a directive to stop or restart will cause the router itself to stop or
+ * restart. The router, in turn, will cause its children to stop and restart.
+ *
+ * @param nrOfInstances initial number of routees in the pool
+ *
+ * @param resizer optional resizer that dynamically adjust the pool size
+ *
+ * @param virtualNodesFactor number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+ *
+ * @param hashMapping partial function from message to the data to
+ *   use for the consistent hash key
+ *
+ * @param supervisorStrategy strategy for supervising the routees, see 'Supervision Setup'
+ *
+ * @param routerDispatcher dispatcher to use for the router head actor, which handles
+ *   supervision, death watch and router management messages
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+<span class="keyword">final</span> <span class="keyword">case class</span> <a title="class ConsistentHashingPool extends AnyRef with akka.routing.Pool with akka.routing.PoolOverrideUnsetConfig[akka.routing.ConsistentHashingPool] with Product with Serializable" id="akka.routing.ConsistentHashingPool.readResolve">ConsistentHashingPool</a><a href="#akka.routing.ConsistentHashingPool.readResolve" title="Product" class="delimiter">(</a>
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="Int" id="akka.routing;ConsistentHashingPool.nrOfInstances">nrOfInstances</a>: <span title="Int">Int</span>, <span class="keyword">override</span> <span class="keyword">val</span> <a title="Option[akka.routing.Resizer]" id="akka.routing.ConsistentHashingPool.apply$default$2">resizer</a>: <span title="Option[akka.routing.Resizer]">Option</span><span class="delimiter">[</span>Resizer<span class="delimiter">]</span> = <span title="None.type">None</span>,
+  <span class="keyword">val</span> <a title="Int" id="akka.routing.ConsistentHashingPool.apply$default$3">virtualNodesFactor</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span>,
+  <span class="keyword">val</span> <a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing.ConsistentHashingPool.apply$default$4">hashMapping</a>: ConsistentHashingRouter.<span title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping">ConsistentHashMapping</span> = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping" title="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.type">emptyConsistentHashMapping</a>,
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="akka.actor.SupervisorStrategy" id="akka.routing.ConsistentHashingPool.apply$default$5">supervisorStrategy</a>: <a href="../actor/FaultHandling.scala.html#akka.actor;SupervisorStrategy" title="akka.actor.SupervisorStrategy">SupervisorStrategy</a> = <a href="RouterConfig.scala.html#akka.routing.Pool" title="akka.routing.Pool.type">Pool</a>.<a href="RouterConfig.scala.html#akka.routing.Pool.defaultSupervisorStrategy" title="=&gt; akka.actor.SupervisorStrategy">defaultSupervisorStrategy</a>,
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="String" id="akka.routing.ConsistentHashingPool.apply$default$6">routerDispatcher</a>: <span title="String">String</span> = Dispatchers.<span title="String(&quot;akka.actor.default-dispatcher&quot;)">DefaultDispatcherId</span>,
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="Boolean" id="akka.routing.ConsistentHashingPool.apply$default$7">usePoolDispatcher</a>: <span title="Boolean">Boolean</span> = <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <a href="RouterConfig.scala.html#akka.routing;Pool" title="akka.routing.Pool">Pool</a> <span class="keyword">with</span> <a href="RouterConfig.scala.html#akka.routing;PoolOverrideUnsetConfig" title="akka.routing.PoolOverrideUnsetConfig[akka.routing.ConsistentHashingPool]">PoolOverrideUnsetConfig</a><span class="delimiter">[</span>ConsistentHashingPool<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+  <span class="keyword">def</span> <a title="(config: com.typesafe.config.Config)akka.routing.ConsistentHashingPool" id="akka.routing;ConsistentHashingPool.<init>(c63cde0c6a)" class="keyword">this</a><span class="delimiter">(</span><a title="com.typesafe.config.Config" id="akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).config">config</a>: <span title="com.typesafe.config.Config">Config</span><span class="delimiter">)</span> =
+    <a href="#akka.routing.ConsistentHashingPool.apply$default$3" title="Int" id="akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).x$23" class="keyword">this</a><span class="delimiter">(</span>
+      nrOfInstances = <a href="#akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).config" title="com.typesafe.config.Config">config</a>.<span title="(x$1: String)Int">getInt</span><a title="Int" id="akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).x$17" class="delimiter">(</a><span title="String(&quot;nr-of-instances&quot;)" class="string">&quot;nr-of-instances&quot;</span><span class="delimiter">)</span>,
+      resizer = <a href="Resizer.scala.html#akka.routing.DefaultResizer" title="akka.routing.DefaultResizer.type">DefaultResizer</a>.<a href="Resizer.scala.html#akka.routing.DefaultResizer.fromConfig" title="(resizerConfig: com.typesafe.config.Config)Option[akka.routing.DefaultResizer]">fromConfig</a><a title="Option[akka.routing.DefaultResizer]" id="akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).x$18" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).config" title="com.typesafe.config.Config">config</a><span class="delimiter">)</span>,
+      usePoolDispatcher = <a href="#akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).config" title="com.typesafe.config.Config">config</a>.<span title="(x$1: String)Boolean">hasPath</span><a title="Boolean" id="akka.routing;ConsistentHashingPool.<init>(c63cde0c6a).x$19" class="delimiter">(</a><span title="String(&quot;pool-dispatcher&quot;)" class="string">&quot;pool-dispatcher&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API
+   * @param nr initial number of routees in the pool
+   */</span>
+  <span class="keyword">def</span> <a title="(nr: Int)akka.routing.ConsistentHashingPool" id="akka.routing;ConsistentHashingPool.<init>(9a38bd5370)" class="keyword">this</a><span class="delimiter">(</span><a title="Int" id="akka.routing;ConsistentHashingPool.<init>(9a38bd5370).nr">nr</a>: <span title="Int">Int</span><span class="delimiter">)</span> = <a href="#akka.routing.ConsistentHashingPool.readResolve" title="ConsistentHashingPool.this.type" class="keyword">this</a><span class="delimiter">(</span>nrOfInstances = <a href="#akka.routing;ConsistentHashingPool.<init>(9a38bd5370).nr" title="Int">nr</a><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(system: akka.actor.ActorSystem)akka.routing.Router" id="akka.routing;ConsistentHashingPool.createRouter">createRouter</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.routing;ConsistentHashingPool.createRouter.system">system</a>: <a href="../actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span>: <a href="Router.scala.html#akka.routing;Router" title="akka.routing.Router">Router</a> =
+    <a href="Router.scala.html#akka.routing;Router.<init>(e072339920)" title="(logic: akka.routing.RoutingLogic)akka.routing.Router" class="keyword">new</a> <a href="Router.scala.html#akka.routing;Router" title="akka.routing.Router">Router</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="(system: akka.actor.ActorSystem, virtualNodesFactor: Int, hashMapping: akka.routing.ConsistentHashingRouter.ConsistentHashMapping)akka.routing.ConsistentHashingRoutingLogic">ConsistentHashingRoutingLogic</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingPool.createRouter.system" title="akka.actor.ActorSystem">system</a>, <a href="#akka.routing.ConsistentHashingPool.apply$default$3" title="=&gt; Int">virtualNodesFactor</a>, <a href="#akka.routing.ConsistentHashingPool.apply$default$4" title="=&gt; akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMapping</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Setting the supervisor strategy to be used for the “head” Router actor.
+   */</span>
+  <span class="keyword">def</span> <a title="(strategy: akka.actor.SupervisorStrategy)akka.routing.ConsistentHashingPool" id="akka.routing;ConsistentHashingPool.withSupervisorStrategy">withSupervisorStrategy</a><span class="delimiter">(</span><a title="akka.actor.SupervisorStrategy" id="akka.routing;ConsistentHashingPool.withSupervisorStrategy.strategy">strategy</a>: <a href="../actor/FaultHandling.scala.html#akka.actor;SupervisorStrategy" title="akka.actor.SupervisorStrategy">SupervisorStrategy</a><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingPool.readResolve" title="akka.routing.ConsistentHashingPool">ConsistentHashingPool</a> = <a href="#akka.routing;ConsistentHashingPool.nrOfInstances" title="Int" id="akka.routing;ConsistentHashingPool.withSupervisorStrategy.x$30">copy</a><span class="delimiter">(</span>supervisorStrategy = <a href="#akka.routing;ConsistentHashingPool.withSupervisorStrategy.strategy" title="akka.actor.SupervisorStrategy" id="akka.routing;ConsistentHashingPool.withSupervisorStrategy.x$24">strategy</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Setting the resizer to be used.
+   */</span>
+  <span class="keyword">def</span> <a title="(resizer: akka.routing.Resizer)akka.routing.ConsistentHashingPool" id="akka.routing;ConsistentHashingPool.withResizer">withResizer</a><span class="delimiter">(</span><a title="akka.routing.Resizer" id="akka.routing;ConsistentHashingPool.withResizer.resizer">resizer</a>: <a href="Resizer.scala.html#akka.routing;Resizer" title="akka.routing.Resizer">Resizer</a><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingPool.readResolve" title="akka.routing.ConsistentHashingPool">ConsistentHashingPool</a> = <a href="#akka.routing;ConsistentHashingPool.nrOfInstances" title="Int" id="akka.routing;ConsistentHashingPool.withResizer.x$37">copy</a><span class="delimiter">(</span>resizer = <span title="(x: akka.routing.Resizer)Some[akka.routing.Resizer]">Some</span><a title="Some[akka.routing.Resizer]" id="akka.routing;ConsistentHashingPool.withResizer.x$31" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingPool.withResizer.resizer" title="akka.routing.Resizer">resizer</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Setting the dispatcher to be used for the router head actor,  which handles
+   * supervision, death watch and router management messages.
+   */</span>
+  <span class="keyword">def</span> <a title="(dispatcherId: String)akka.routing.ConsistentHashingPool" id="akka.routing;ConsistentHashingPool.withDispatcher">withDispatcher</a><span class="delimiter">(</span><a title="String" id="akka.routing;ConsistentHashingPool.withDispatcher.dispatcherId">dispatcherId</a>: <span title="String">String</span><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingPool.readResolve" title="akka.routing.ConsistentHashingPool">ConsistentHashingPool</a> = <a href="#akka.routing;ConsistentHashingPool.nrOfInstances" title="Int" id="akka.routing;ConsistentHashingPool.withDispatcher.x$44">copy</a><span class="delimiter">(</span>routerDispatcher = <a href="#akka.routing;ConsistentHashingPool.withDispatcher.dispatcherId" title="String" id="akka.routing;ConsistentHashingPool.withDispatcher.x$38">dispatcherId</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Setting the number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+   */</span>
+  <span class="keyword">def</span> <a title="(vnodes: Int)akka.routing.ConsistentHashingPool" id="akka.routing;ConsistentHashingPool.withVirtualNodesFactor">withVirtualNodesFactor</a><span class="delimiter">(</span><a title="Int" id="akka.routing;ConsistentHashingPool.withVirtualNodesFactor.vnodes">vnodes</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingPool.readResolve" title="akka.routing.ConsistentHashingPool">ConsistentHashingPool</a> = <a href="#akka.routing;ConsistentHashingPool.nrOfInstances" title="Int" id="akka.routing;ConsistentHashingPool.withVirtualNodesFactor.x$51">copy</a><span class="delimiter">(</span>virtualNodesFactor = <a href="#akka.routing;ConsistentHashingPool.withVirtualNodesFactor.vnodes" title="Int" id="akka.routing;ConsistentHashingPool.withVirtualNodesFactor.x$45">vnodes</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: Setting the mapping from message to the data to use for the consistent hash key.
+   */</span>
+  <span class="keyword">def</span> <a title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingPool" id="akka.routing;ConsistentHashingPool.withHashMapper">withHashMapper</a><span class="delimiter">(</span><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper" id="akka.routing;ConsistentHashingPool.withHashMapper.mapper">mapper</a>: ConsistentHashingRouter.<a href="#akka.routing.ConsistentHashingRouter;ConsistentHashMapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">ConsistentHashMapper</a><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingPool.readResolve" title="akka.routing.ConsistentHashingPool">ConsistentHashingPool</a> =
+    <a href="#akka.routing;ConsistentHashingPool.nrOfInstances" title="Int" id="akka.routing;ConsistentHashingPool.withHashMapper.x$58">copy</a><span class="delimiter">(</span>hashMapping = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter" title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMappingAdapter</a><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingPool.withHashMapper.x$52" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingPool.withHashMapper.mapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">mapper</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Uses the resizer and/or the supervisor strategy of the given Routerconfig
+   * if this RouterConfig doesn't have one, i.e. the resizer defined in code is used if
+   * resizer was not defined in config.
+   * Uses the the `hashMapping` defined in code, since that can't be defined in configuration.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig" id="akka.routing;ConsistentHashingPool.withFallback">withFallback</a><span class="delimiter">(</span><a title="akka.routing.RouterConfig" id="akka.routing;ConsistentHashingPool.withFallback.other">other</a>: <a href="RouterConfig.scala.html#akka.routing;RouterConfig" title="akka.routing.RouterConfig">RouterConfig</a><span class="delimiter">)</span>: <a href="RouterConfig.scala.html#akka.routing;RouterConfig" title="akka.routing.RouterConfig">RouterConfig</a> = <a href="#akka.routing;ConsistentHashingPool.withFallback.other" title="akka.routing.RouterConfig">other</a> <span title="akka.routing.RouterConfig" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> _: <a href="RouterConfig.scala.html#akka.routing;FromConfig" title="akka.routing.FromConfig">FromConfig</a> | _: <a href="RouterConfig.scala.html#akka.routing;NoRouter" title="akka.routing.NoRouter">NoRouter</a>          ⇒ <a href="#akka.routing.ConsistentHashingPool.readResolve" title="ConsistentHashingPool.this.type" class="keyword">this</a>.<a href="RouterConfig.scala.html#akka.routing;PoolOverrideUnsetConfig.overrideUnsetConfig" title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig">overrideUnsetConfig</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingPool.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <span title="akka.routing.ConsistentHashingPool">otherRouter</span>: <a href="#akka.routing.ConsistentHashingPool.readResolve" title="akka.routing.ConsistentHashingPool">ConsistentHashingPool</a>   ⇒ <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingPool.nrOfInstances" title="Int" id="akka.routing;ConsistentHashingPool.withFallback.x$65">copy</a><span class="delimiter">(</span>hashMapping = <span title="akka.routing.ConsistentHashingPool">otherRouter</span>.<a href="#akka.routing.ConsistentHashingPool.apply$default$4" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingPool.withFallback.x$59">hashMapping</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="RouterConfig.scala.html#akka.routing;PoolOverrideUnsetConfig.overrideUnsetConfig" title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig">overrideUnsetConfig</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingPool.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <span title="akka.routing.ConsistentHashingRouter">otherRouter</span>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> ⇒ <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingPool.nrOfInstances" title="Int" id="akka.routing;ConsistentHashingPool.withFallback.x$72">copy</a><span class="delimiter">(</span>hashMapping = <span title="akka.routing.ConsistentHashingRouter">otherRouter</span>.<a href="#akka.routing;ConsistentHashingRouter.copy$default$7" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingPool.withFallback.x$66">hashMapping</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="RouterConfig.scala.html#akka.routing;PoolOverrideUnsetConfig.overrideUnsetConfig" title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig">overrideUnsetConfig</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingPool.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> _                                    ⇒ <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)IllegalArgumentException" class="keyword">new</span> <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Expected ConsistentHashingPool, got [%s]&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingPool.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * A router group that uses consistent hashing to select a routee based on the
+ * sent message. The selection is described in [[akka.routing.ConsistentHashingRoutingLogic]].
+ *
+ * The configuration parameter trumps the constructor arguments. This means that
+ * if you provide `paths` during instantiation they will be ignored if
+ * the router is defined in the configuration file for the actor being used.
+ *
+ * @param paths string representation of the actor paths of the routees, messages are
+ *   sent with [[akka.actor.ActorSelection]] to these paths
+ *
+ * @param virtualNodesFactor number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+ *
+ * @param hashMapping partial function from message to the data to
+ *   use for the consistent hash key
+ *
+ * @param routerDispatcher dispatcher to use for the router head actor, which handles
+ *   router management messages
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+<span class="keyword">final</span> <span class="keyword">case class</span> <a title="class ConsistentHashingGroup extends AnyRef with akka.routing.Group with Product with Serializable" id="akka.routing.ConsistentHashingGroup.readResolve">ConsistentHashingGroup</a><a href="#akka.routing.ConsistentHashingGroup.readResolve" title="Product" class="delimiter">(</a>
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="scala.collection.immutable.Iterable[String]" id="akka.routing;ConsistentHashingGroup.paths">paths</a>: immutable.<span title="scala.collection.immutable.Iterable[String]">Iterable</span><span class="delimiter">[</span>String<span class="delimiter">]</span>,
+  <span class="keyword">val</span> <a title="Int" id="akka.routing.ConsistentHashingGroup.apply$default$2">virtualNodesFactor</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span>,
+  <span class="keyword">val</span> <a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing.ConsistentHashingGroup.apply$default$3">hashMapping</a>: ConsistentHashingRouter.<span title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping">ConsistentHashMapping</span> = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping" title="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.type">emptyConsistentHashMapping</a>,
+  <span class="keyword">override</span> <span class="keyword">val</span> <a title="String" id="akka.routing.ConsistentHashingGroup.apply$default$4">routerDispatcher</a>: <span title="String">String</span> = Dispatchers.<span title="String(&quot;akka.actor.default-dispatcher&quot;)">DefaultDispatcherId</span><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <a href="RouterConfig.scala.html#akka.routing;Group" title="akka.routing.Group">Group</a> <span class="delimiter">{</span>
+
+  <span class="keyword">def</span> <a title="(config: com.typesafe.config.Config)akka.routing.ConsistentHashingGroup" id="akka.routing;ConsistentHashingGroup.<init>(9989c59aa3)" class="keyword">this</a><span class="delimiter">(</span><a title="com.typesafe.config.Config" id="akka.routing;ConsistentHashingGroup.<init>(9989c59aa3).config">config</a>: <span title="com.typesafe.config.Config">Config</span><span class="delimiter">)</span> =
+    <a href="#akka.routing.ConsistentHashingGroup.readResolve" title="ConsistentHashingGroup.this.type" class="keyword">this</a><span class="delimiter">(</span>paths = <a href="../japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[String])scala.collection.immutable.Seq[String]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingGroup.<init>(9989c59aa3).config" title="com.typesafe.config.Config">config</a>.<span title="(x$1: String)java.util.List[String]">getStringList</span><span class="delimiter">(</span><span title="String(&quot;routees.paths&quot;)" class="string">&quot;routees.paths&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API
+   * @param routeePaths string representation of the actor paths of the routees, messages are
+   *   sent with [[akka.actor.ActorSelection]] to these paths
+   */</span>
+  <span class="keyword">def</span> <a title="(routeePaths: Iterable[String])akka.routing.ConsistentHashingGroup" id="akka.routing;ConsistentHashingGroup.<init>(17ec339b60)" class="keyword">this</a><span class="delimiter">(</span><a title="Iterable[String]" id="akka.routing;ConsistentHashingGroup.<init>(17ec339b60).routeePaths">routeePaths</a>: java.lang.<span title="Iterable[String]">Iterable</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="#akka.routing.ConsistentHashingGroup.readResolve" title="ConsistentHashingGroup.this.type" class="keyword">this</a><span class="delimiter">(</span>paths = <a href="../japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[String])scala.collection.immutable.Seq[String]">immutableSeq</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingGroup.<init>(17ec339b60).routeePaths" title="Iterable[String]">routeePaths</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(system: akka.actor.ActorSystem)akka.routing.Router" id="akka.routing;ConsistentHashingGroup.createRouter">createRouter</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.routing;ConsistentHashingGroup.createRouter.system">system</a>: <a href="../actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span>: <a href="Router.scala.html#akka.routing;Router" title="akka.routing.Router">Router</a> =
+    <a href="Router.scala.html#akka.routing;Router.<init>(e072339920)" title="(logic: akka.routing.RoutingLogic)akka.routing.Router" class="keyword">new</a> <a href="Router.scala.html#akka.routing;Router" title="akka.routing.Router">Router</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="(system: akka.actor.ActorSystem, virtualNodesFactor: Int, hashMapping: akka.routing.ConsistentHashingRouter.ConsistentHashMapping)akka.routing.ConsistentHashingRoutingLogic">ConsistentHashingRoutingLogic</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingGroup.createRouter.system" title="akka.actor.ActorSystem">system</a>, <a href="#akka.routing.ConsistentHashingGroup.apply$default$2" title="=&gt; Int">virtualNodesFactor</a>, <a href="#akka.routing.ConsistentHashingGroup.apply$default$3" title="=&gt; akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMapping</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Setting the dispatcher to be used for the router head actor, which handles
+   * router management messages
+   */</span>
+  <span class="keyword">def</span> <a title="(dispatcherId: String)akka.routing.ConsistentHashingGroup" id="akka.routing;ConsistentHashingGroup.withDispatcher">withDispatcher</a><span class="delimiter">(</span><a title="String" id="akka.routing;ConsistentHashingGroup.withDispatcher.dispatcherId">dispatcherId</a>: <span title="String">String</span><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingGroup.readResolve" title="akka.routing.ConsistentHashingGroup">ConsistentHashingGroup</a> = <a href="#akka.routing;ConsistentHashingGroup.paths" title="scala.collection.immutable.Iterable[String]" id="akka.routing;ConsistentHashingGroup.withDispatcher.x$76">copy</a><span class="delimiter">(</span>routerDispatcher = <a href="#akka.routing;ConsistentHashingGroup.withDispatcher.dispatcherId" title="String" id="akka.routing;ConsistentHashingGroup.withDispatcher.x$73">dispatcherId</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Setting the number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+   */</span>
+  <span class="keyword">def</span> <a title="(vnodes: Int)akka.routing.ConsistentHashingGroup" id="akka.routing;ConsistentHashingGroup.withVirtualNodesFactor">withVirtualNodesFactor</a><span class="delimiter">(</span><a title="Int" id="akka.routing;ConsistentHashingGroup.withVirtualNodesFactor.vnodes">vnodes</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingGroup.readResolve" title="akka.routing.ConsistentHashingGroup">ConsistentHashingGroup</a> = <a href="#akka.routing;ConsistentHashingGroup.paths" title="scala.collection.immutable.Iterable[String]" id="akka.routing;ConsistentHashingGroup.withVirtualNodesFactor.x$80">copy</a><span class="delimiter">(</span>virtualNodesFactor = <a href="#akka.routing;ConsistentHashingGroup.withVirtualNodesFactor.vnodes" title="Int" id="akka.routing;ConsistentHashingGroup.withVirtualNodesFactor.x$77">vnodes</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: Setting the mapping from message to the data to use for the consistent hash key.
+   */</span>
+  <span class="keyword">def</span> <a title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingGroup" id="akka.routing;ConsistentHashingGroup.withHashMapper">withHashMapper</a><span class="delimiter">(</span><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper" id="akka.routing;ConsistentHashingGroup.withHashMapper.mapper">mapper</a>: ConsistentHashingRouter.<a href="#akka.routing.ConsistentHashingRouter;ConsistentHashMapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">ConsistentHashMapper</a><span class="delimiter">)</span>: <a href="#akka.routing.ConsistentHashingGroup.readResolve" title="akka.routing.ConsistentHashingGroup">ConsistentHashingGroup</a> =
+    <a href="#akka.routing;ConsistentHashingGroup.paths" title="scala.collection.immutable.Iterable[String]" id="akka.routing;ConsistentHashingGroup.withHashMapper.x$84">copy</a><span class="delimiter">(</span>hashMapping = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter" title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMappingAdapter</a><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingGroup.withHashMapper.x$81" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingGroup.withHashMapper.mapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">mapper</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Uses the the `hashMapping` defined in code, since that can't be defined in configuration.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig" id="akka.routing;ConsistentHashingGroup.withFallback">withFallback</a><span class="delimiter">(</span><a title="akka.routing.RouterConfig" id="akka.routing;ConsistentHashingGroup.withFallback.other">other</a>: <a href="RouterConfig.scala.html#akka.routing;RouterConfig" title="akka.routing.RouterConfig">RouterConfig</a><span class="delimiter">)</span>: <a href="RouterConfig.scala.html#akka.routing;RouterConfig" title="akka.routing.RouterConfig">RouterConfig</a> = <a href="#akka.routing;ConsistentHashingGroup.withFallback.other" title="akka.routing.RouterConfig">other</a> <span title="akka.routing.RouterConfig" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> _: <a href="RouterConfig.scala.html#akka.routing;FromConfig" title="akka.routing.FromConfig">FromConfig</a> | _: <a href="RouterConfig.scala.html#akka.routing;NoRouter" title="akka.routing.NoRouter">NoRouter</a>         ⇒ <a href="#akka.routing.ConsistentHashingGroup.readResolve" title="akka.routing.ConsistentHashingGroup" class="keyword">super</a>.<a href="RouterConfig.scala.html#akka.routing;RouterConfig.withFallback" title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig">withFallback</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingGroup.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a title="akka.routing.ConsistentHashingGroup" id="akka.routing;ConsistentHashingGroup.withFallback.otherRouter">otherRouter</a>: <a href="#akka.routing.ConsistentHashingGroup.readResolve" title="akka.routing.ConsistentHashingGroup">ConsistentHashingGroup</a> ⇒ <a href="#akka.routing;ConsistentHashingGroup.paths" title="scala.collection.immutable.Iterable[String]" id="akka.routing;ConsistentHashingGroup.withFallback.x$88">copy</a><span class="delimiter">(</span>hashMapping = <a href="#akka.routing;ConsistentHashingGroup.withFallback.otherRouter" title="akka.routing.ConsistentHashingGroup">otherRouter</a>.<a href="#akka.routing.ConsistentHashingGroup.apply$default$3" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingGroup.withFallback.x$85">hashMapping</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> _                                   ⇒ <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)IllegalArgumentException" class="keyword">new</span> <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Expected ConsistentHashingGroup, got [%s]&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingGroup.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ * Important to use ActorRef with full address, with host and port, in the hash ring,
+ * so that same ring is produced on different nodes.
+ * The ConsistentHash uses toString of the ring nodes, and the ActorRef itself
+ * isn't a good representation, because LocalActorRef doesn't include the
+ * host and port.
+ */</span>
+<span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">case class</span> <a title="class ConsistentRoutee extends AnyRef with Product with Serializable" id="akka.routing.ConsistentRoutee.readResolve">ConsistentRoutee</a><a href="#akka.routing.ConsistentRoutee.readResolve" title="Product" class="delimiter">(</a><a title="akka.routing.Routee" id="akka.routing;ConsistentRoutee.routee">routee</a>: <a href="Router.scala.html#akka.routing;Routee" title="akka.routing.Routee">Routee</a>, <a title="akka.actor.Address" id="akka.routing;ConsistentRoutee.selfAddress">selfAddress</a>: <a href="../actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.routing;ConsistentRoutee.toString">toString</a>: <span title="String">String</span> = <a href="#akka.routing;ConsistentRoutee.routee" title="=&gt; akka.routing.Routee">routee</a> <span title="String" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> ActorRefRoutee<span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.routing;ConsistentRoutee.toString.ref">ref</a><span class="delimiter">)</span>       ⇒ <a href="#akka.routing;ConsistentRoutee.toStringWithfullAddress" title="(path: akka.actor.ActorPath)String">toStringWithfullAddress</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentRoutee.toString.ref" title="akka.actor.ActorRef">ref</a>.<a href="../actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> ActorSelectionRoutee<span class="delimiter">(</span><a title="akka.actor.ActorSelection" id="akka.routing;ConsistentRoutee.toString.sel">sel</a><span class="delimiter">)</span> ⇒ <a href="#akka.routing;ConsistentRoutee.toStringWithfullAddress" title="(path: akka.actor.ActorPath)String">toStringWithfullAddress</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentRoutee.toString.sel" title="akka.actor.ActorSelection">sel</a>.<a href="../actor/ActorSelection.scala.html#akka.actor;ActorSelection.anchorPath" title="=&gt; akka.actor.ActorPath">anchorPath</a><span class="delimiter">)</span> <span title="(x$1: Any)String">+</span> <a href="#akka.routing;ConsistentRoutee.toString.sel" title="akka.actor.ActorSelection">sel</a>.<a href="../actor/ActorSelection.scala.html#akka.actor;ActorSelection.pathString" title="=&gt; String">pathString</a>
+    <span class="keyword">case</span> <a title="akka.routing.Routee" id="akka.routing;ConsistentRoutee.toString.other">other</a>                     ⇒ <a href="#akka.routing;ConsistentRoutee.toString.other" title="akka.routing.Routee">other</a>.<span title="()String">toString</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">private</span> <span class="keyword">def</span> <a title="(path: akka.actor.ActorPath)String" id="akka.routing;ConsistentRoutee.toStringWithfullAddress">toStringWithfullAddress</a><span class="delimiter">(</span><a title="akka.actor.ActorPath" id="akka.routing;ConsistentRoutee.toStringWithfullAddress.path">path</a>: <a href="../actor/ActorPath.scala.html#akka.actor;ActorPath" title="akka.actor.ActorPath">ActorPath</a><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span>
+    <a href="#akka.routing;ConsistentRoutee.toStringWithfullAddress.path" title="akka.actor.ActorPath">path</a>.<a href="../actor/ActorPath.scala.html#akka.actor;ActorPath.address" title="=&gt; akka.actor.Address">address</a> <span title="String" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Address<span class="delimiter">(</span>_, _, <span title="None.type">None</span>, <span title="None.type">None</span><span class="delimiter">)</span> ⇒ <a href="#akka.routing;ConsistentRoutee.toStringWithfullAddress.path" title="akka.actor.ActorPath">path</a>.<a href="../actor/ActorPath.scala.html#akka.actor;ActorPath.toStringWithAddress" title="(address: akka.actor.Address)String">toStringWithAddress</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentRoutee.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.actor.Address" id="akka.routing;ConsistentRoutee.toStringWithfullAddress.a">a</a>                         ⇒ <a href="#akka.routing;ConsistentRoutee.toStringWithfullAddress.path" title="akka.actor.ActorPath">path</a>.<span title="()String">toString</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * A Router that uses consistent hashing to select a connection based on the
+ * sent message.
+ *
+ * There is 3 ways to define what data to use for the consistent hash key.
+ *
+ * 1. You can define `hashMapping` / `withHashMapper`
+ * of the router to map incoming messages to their consistent hash key.
+ * This makes the decision transparent for the sender.
+ *
+ * 2. The messages may implement [[akka.routing.ConsistentHashingRouter.ConsistentHashable]].
+ * The key is part of the message and it's convenient to define it together
+ * with the message definition.
+ *
+ * 3. The messages can be be wrapped in a [[akka.routing.ConsistentHashingRouter.ConsistentHashableEnvelope]]
+ * to define what data to use for the consistent hash key. The sender knows
+ * the key to use.
+ *
+ * These ways to define the consistent hash key can be use together and at
+ * the same time for one router. The `hashMapping` is tried first.
+ *
+ * Please note that providing both 'nrOfInstances' and 'routees' does not make logical
+ * sense as this means that the router should both create new actors and use the 'routees'
+ * actor(s). In this case the 'nrOfInstances' will be ignored and the 'routees' will be used.
+ * &lt;br&gt;
+ * &lt;b&gt;The&lt;/b&gt; configuration parameter trumps the constructor arguments. This means that
+ * if you provide either 'nrOfInstances' or 'routees' during instantiation they will
+ * be ignored if the router is defined in the configuration file for the actor being used.
+ *
+ * &lt;h1&gt;Supervision Setup&lt;/h1&gt;
+ *
+ * Any routees that are created by a router will be created as the router's children.
+ * The router is therefore also the children's supervisor.
+ *
+ * The supervision strategy of the router actor can be configured with
+ * [[#withSupervisorStrategy]]. If no strategy is provided, routers default to
+ * a strategy of “always escalate”. This means that errors are passed up to the
+ * router's supervisor for handling.
+ *
+ * The router's supervisor will treat the error as an error with the router itself.
+ * Therefore a directive to stop or restart will cause the router itself to stop or
+ * restart. The router, in turn, will cause its children to stop and restart.
+ *
+ * @param routees string representation of the actor paths of the routees that will be looked up
+ *   using `actorFor` in [[akka.actor.ActorRefProvider]]
+ * @param virtualNodesFactor number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+ * @param hashMapping partial function from message to the data to
+ *   use for the consistent hash key
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;Use ConsistentHashingPool or ConsistentHashingGroup&quot;</span>, <span class="string">&quot;2.3&quot;</span><span class="delimiter">)</span>
+<span class="keyword">case class</span> <a title="(nrOfInstances: Int, routees: scala.collection.immutable.Iterable[String], resizer: Option[akka.routing.Resizer], routerDispatcher: String, supervisorStrategy: akka.actor.SupervisorStrategy, virtualNodesFactor: Int, hashMapping: akka.routing.ConsistentHashingRouter.ConsistentHashMapping)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.equals">ConsistentHashingRouter</a><a href="#akka.routing;ConsistentHashingRouter.equals" title="Product" class="delimiter">(</a>
+  <a title="=&gt; Int" id="akka.routing;ConsistentHashingRouter.copy$default$1">nrOfInstances</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span>, <a title="=&gt; scala.collection.immutable.Iterable[String]" id="akka.routing;ConsistentHashingRouter.copy$default$2">routees</a>: immutable.<span title="scala.collection.immutable.Iterable[String]">Iterable</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span title="scala.collection.immutable.Nil.type">Nil</span>, <span class="keyword">override</span> <span class="keyword">val</span> <a title="=&gt; Option[akka.routing.Resizer]" id="akka.routing;ConsistentHashingRouter.copy$default$3">resizer</a>: <span title="Option[akka.routing.Resizer]">Option</span><span class="delimiter">[</span>Resizer<span class="delimiter">]</span> = <span title="None.type">None</span>,
+  <span class="keyword">val</span> <a title="=&gt; String" id="akka.routing;ConsistentHashingRouter.copy$default$4">routerDispatcher</a>: <span title="String">String</span> = Dispatchers.<span title="String(&quot;akka.actor.default-dispatcher&quot;)">DefaultDispatcherId</span>,
+  <span class="keyword">val</span> <a title="=&gt; akka.actor.SupervisorStrategy" id="akka.routing;ConsistentHashingRouter.copy$default$5">supervisorStrategy</a>: <a href="../actor/FaultHandling.scala.html#akka.actor;SupervisorStrategy" title="akka.actor.SupervisorStrategy">SupervisorStrategy</a> = <a href="RouterConfig.scala.html#akka.routing.Pool" title="akka.routing.Pool.type">Pool</a>.<a href="RouterConfig.scala.html#akka.routing.Pool.defaultSupervisorStrategy" title="=&gt; akka.actor.SupervisorStrategy">defaultSupervisorStrategy</a>,
+  <span class="keyword">val</span> <a title="=&gt; Int" id="akka.routing;ConsistentHashingRouter.copy$default$6">virtualNodesFactor</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span>,
+  <span class="keyword">val</span> <a title="=&gt; akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingRouter.copy$default$7">hashMapping</a>: ConsistentHashingRouter.<span title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping">ConsistentHashMapping</span> = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping" title="akka.routing.ConsistentHashingRouter.emptyConsistentHashMapping.type">emptyConsistentHashMapping</a><span class="delimiter">)</span>
+  <span class="keyword">extends</span> <a href="DeprecatedRouting.scala.html#akka.routing;DeprecatedRouterConfig" title="akka.routing.DeprecatedRouterConfig">DeprecatedRouterConfig</a> <span class="keyword">with</span> <a href="RouterConfig.scala.html#akka.routing;PoolOverrideUnsetConfig" title="akka.routing.PoolOverrideUnsetConfig[akka.routing.ConsistentHashingRouter]">PoolOverrideUnsetConfig</a><span class="delimiter">[</span>ConsistentHashingRouter<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+  <span class="comment">/**
+   * Java API: Constructor that sets nrOfInstances to be created.
+   */</span>
+  <span class="keyword">def</span> <a title="(nr: Int)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.<init>(3c5eb30304)" class="keyword">this</a><span class="delimiter">(</span><a title="Int" id="akka.routing;ConsistentHashingRouter.<init>(3c5eb30304).nr">nr</a>: <span title="Int">Int</span><span class="delimiter">)</span> = <a href="#akka.routing;ConsistentHashingRouter.equals" title="ConsistentHashingRouter.this.type" class="keyword">this</a><span class="delimiter">(</span>nrOfInstances = <a href="#akka.routing;ConsistentHashingRouter.<init>(3c5eb30304).nr" title="Int">nr</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: Constructor that sets the routees to be used.
+   *
+   * @param routeePaths string representation of the actor paths of the routees that will be looked up
+   *   using `actorFor` in [[akka.actor.ActorRefProvider]]
+   */</span>
+  <span class="keyword">def</span> <a title="(routeePaths: Iterable[String])akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.<init>(aa2dce8d02)" class="keyword">this</a><span class="delimiter">(</span><a title="Iterable[String]" id="akka.routing;ConsistentHashingRouter.<init>(aa2dce8d02).routeePaths">routeePaths</a>: java.lang.<span title="Iterable[String]">Iterable</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span> = <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.<init>(aa2dce8d02).x$95" class="keyword">this</a><span class="delimiter">(</span>routees = <a href="../japi/JavaAPI.scala.html#akka.japi.Util.immutableSeq(42d3e3f9ec)" title="(iterable: Iterable[String])scala.collection.immutable.Seq[String]">immutableSeq</a><a title="scala.collection.immutable.Seq[String]" id="akka.routing;ConsistentHashingRouter.<init>(aa2dce8d02).x$89" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingRouter.<init>(aa2dce8d02).routeePaths" title="Iterable[String]">routeePaths</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API: Constructor that sets the resizer to be used.
+   */</span>
+  <span class="keyword">def</span> <a title="(resizer: akka.routing.Resizer)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.<init>(51f4e0a682)" class="keyword">this</a><span class="delimiter">(</span><a title="akka.routing.Resizer" id="akka.routing;ConsistentHashingRouter.<init>(51f4e0a682).resizer">resizer</a>: <a href="Resizer.scala.html#akka.routing;Resizer" title="akka.routing.Resizer">Resizer</a><span class="delimiter">)</span> = <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.<init>(51f4e0a682).x$102" class="keyword">this</a><span class="delimiter">(</span>resizer = <span title="(x: akka.routing.Resizer)Some[akka.routing.Resizer]">Some</span><a title="Some[akka.routing.Resizer]" id="akka.routing;ConsistentHashingRouter.<init>(51f4e0a682).x$96" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingRouter.<init>(51f4e0a682).resizer" title="akka.routing.Resizer">resizer</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="=&gt; scala.collection.immutable.Iterable[String]" id="akka.routing;ConsistentHashingRouter.paths">paths</a>: immutable.<span title="scala.collection.immutable.Iterable[String]">Iterable</span><span class="delimiter">[</span>String<span class="delimiter">]</span> = <a href="#akka.routing;ConsistentHashingRouter.copy$default$2" title="=&gt; scala.collection.immutable.Iterable[String]">routees</a>
+
+  <span class="comment">/**
+   * Java API for setting routerDispatcher
+   */</span>
+  <span class="keyword">def</span> <a title="(dispatcherId: String)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.withDispatcher">withDispatcher</a><span class="delimiter">(</span><a title="String" id="akka.routing;ConsistentHashingRouter.withDispatcher.dispatcherId">dispatcherId</a>: <span title="String">String</span><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> = <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.withDispatcher.x$109">copy</a><span class="delimiter">(</span>routerDispatcher = <a href="#akka.routing;ConsistentHashingRouter.withDispatcher.dispatcherId" title="String" id="akka.routing;ConsistentHashingRouter.withDispatcher.x$103">dispatcherId</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API for setting the supervisor strategy to be used for the “head”
+   * Router actor.
+   */</span>
+  <span class="keyword">def</span> <a title="(strategy: akka.actor.SupervisorStrategy)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.withSupervisorStrategy">withSupervisorStrategy</a><span class="delimiter">(</span><a title="akka.actor.SupervisorStrategy" id="akka.routing;ConsistentHashingRouter.withSupervisorStrategy.strategy">strategy</a>: <a href="../actor/FaultHandling.scala.html#akka.actor;SupervisorStrategy" title="akka.actor.SupervisorStrategy">SupervisorStrategy</a><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> = <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.withSupervisorStrategy.x$116">copy</a><span class="delimiter">(</span>supervisorStrategy = <a href="#akka.routing;ConsistentHashingRouter.withSupervisorStrategy.strategy" title="akka.actor.SupervisorStrategy" id="akka.routing;ConsistentHashingRouter.withSupervisorStrategy.x$110">strategy</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API for setting the resizer to be used.
+   */</span>
+  <span class="keyword">def</span> <a title="(resizer: akka.routing.Resizer)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.withResizer">withResizer</a><span class="delimiter">(</span><a title="akka.routing.Resizer" id="akka.routing;ConsistentHashingRouter.withResizer.resizer">resizer</a>: <a href="Resizer.scala.html#akka.routing;Resizer" title="akka.routing.Resizer">Resizer</a><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> = <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.withResizer.x$123">copy</a><span class="delimiter">(</span>resizer = <span title="(x: akka.routing.Resizer)Some[akka.routing.Resizer]">Some</span><a title="Some[akka.routing.Resizer]" id="akka.routing;ConsistentHashingRouter.withResizer.x$117" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingRouter.withResizer.resizer" title="akka.routing.Resizer">resizer</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API for setting the number of virtual nodes per node, used in [[akka.routing.ConsistentHash]]
+   */</span>
+  <span class="keyword">def</span> <a title="(vnodes: Int)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.withVirtualNodesFactor">withVirtualNodesFactor</a><span class="delimiter">(</span><a title="Int" id="akka.routing;ConsistentHashingRouter.withVirtualNodesFactor.vnodes">vnodes</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> = <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.withVirtualNodesFactor.x$130">copy</a><span class="delimiter">(</span>virtualNodesFactor = <a href="#akka.routing;ConsistentHashingRouter.withVirtualNodesFactor.vnodes" title="Int" id="akka.routing;ConsistentHashingRouter.withVirtualNodesFactor.x$124">vnodes</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API for setting the mapping from message to the data to use for the consistent hash key.
+   */</span>
+  <span class="keyword">def</span> <a title="(mapping: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.withHashMapper">withHashMapper</a><span class="delimiter">(</span><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper" id="akka.routing;ConsistentHashingRouter.withHashMapper.mapping">mapping</a>: ConsistentHashingRouter.<a href="#akka.routing.ConsistentHashingRouter;ConsistentHashMapper" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">ConsistentHashMapper</a><span class="delimiter">)</span> =
+    <a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.withHashMapper.x$137">copy</a><span class="delimiter">(</span>hashMapping = <a href="#akka.routing.ConsistentHashingRouter.readResolve" title="akka.routing.ConsistentHashingRouter.type">ConsistentHashingRouter</a>.<a href="#akka.routing.ConsistentHashingRouter.hashMappingAdapter" title="(mapper: akka.routing.ConsistentHashingRouter.ConsistentHashMapper)akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMappingAdapter</a><a title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingRouter.withHashMapper.x$131" class="delimiter">(</a><a href="#akka.routing;ConsistentHashingRouter.withHashMapper.mapping" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapper">mapping</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Uses the resizer and/or the supervisor strategy of the given Routerconfig
+   * if this RouterConfig doesn't have one, i.e. the resizer defined in code is used if
+   * resizer was not defined in config.
+   * Uses the the `hashMapping` defined in code, since that can't be defined in configuration.
+   */</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig" id="akka.routing;ConsistentHashingRouter.withFallback">withFallback</a><span class="delimiter">(</span><a title="akka.routing.RouterConfig" id="akka.routing;ConsistentHashingRouter.withFallback.other">other</a>: <a href="RouterConfig.scala.html#akka.routing;RouterConfig" title="akka.routing.RouterConfig">RouterConfig</a><span class="delimiter">)</span>: <a href="RouterConfig.scala.html#akka.routing;RouterConfig" title="akka.routing.RouterConfig">RouterConfig</a> = <a href="#akka.routing;ConsistentHashingRouter.withFallback.other" title="akka.routing.RouterConfig">other</a> <span title="akka.routing.RouterConfig" class="keyword">match</span> <span class="delimiter">{</span>
+    <span class="keyword">case</span> _: <a href="RouterConfig.scala.html#akka.routing;FromConfig" title="akka.routing.FromConfig">FromConfig</a> | _: <a href="RouterConfig.scala.html#akka.routing;NoRouter" title="akka.routing.NoRouter">NoRouter</a>          ⇒ <a href="#akka.routing;ConsistentHashingRouter.equals" title="ConsistentHashingRouter.this.type" class="keyword">this</a>.<a href="RouterConfig.scala.html#akka.routing;PoolOverrideUnsetConfig.overrideUnsetConfig" title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig">overrideUnsetConfig</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRouter.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a title="akka.routing.ConsistentHashingRouter" id="akka.routing;ConsistentHashingRouter.withFallback.otherRouter">otherRouter</a>: <a href="#akka.routing;ConsistentHashingRouter.equals" title="akka.routing.ConsistentHashingRouter">ConsistentHashingRouter</a> ⇒ <span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRouter.copy$default$1" title="Int" id="akka.routing;ConsistentHashingRouter.withFallback.x$144">copy</a><span class="delimiter">(</span>hashMapping = <a href="#akka.routing;ConsistentHashingRouter.withFallback.otherRouter" title="akka.routing.ConsistentHashingRouter">otherRouter</a>.<a href="#akka.routing;ConsistentHashingRouter.copy$default$7" title="akka.routing.ConsistentHashingRouter.ConsistentHashMapping" id="akka.routing;ConsistentHashingRouter.withFallback.x$138">hashMapping</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="RouterConfig.scala.html#akka.routing;PoolOverrideUnsetConfig.overrideUnsetConfig" title="(other: akka.routing.RouterConfig)akka.routing.RouterConfig">overrideUnsetConfig</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRouter.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span>
+    <span class="keyword">case</span> _                                    ⇒ <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)IllegalArgumentException" class="keyword">new</span> <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Expected ConsistentHashingRouter, got [%s]&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRouter.withFallback.other" title="akka.routing.RouterConfig">other</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(system: akka.actor.ActorSystem)akka.routing.Router" id="akka.routing;ConsistentHashingRouter.createRouter">createRouter</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.routing;ConsistentHashingRouter.createRouter.system">system</a>: <a href="../actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span>: <a href="Router.scala.html#akka.routing;Router" title="akka.routing.Router">Router</a> =
+    <a href="Router.scala.html#akka.routing;Router.<init>(e072339920)" title="(logic: akka.routing.RoutingLogic)akka.routing.Router" class="keyword">new</a> <a href="Router.scala.html#akka.routing;Router" title="akka.routing.Router">Router</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRoutingLogic.equals" title="(system: akka.actor.ActorSystem, virtualNodesFactor: Int, hashMapping: akka.routing.ConsistentHashingRouter.ConsistentHashMapping)akka.routing.ConsistentHashingRoutingLogic">ConsistentHashingRoutingLogic</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentHashingRouter.createRouter.system" title="akka.actor.ActorSystem">system</a>, <a href="#akka.routing;ConsistentHashingRouter.copy$default$6" title="=&gt; Int">virtualNodesFactor</a>, <a href="#akka.routing;ConsistentHashingRouter.copy$default$7" title="=&gt; akka.routing.ConsistentHashingRouter.ConsistentHashMapping">hashMapping</a><span class="delimiter">)</span><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ * Important to use ActorRef with full address, with host and port, in the hash ring,
+ * so that same ring is produced on different nodes.
+ * The ConsistentHash uses toString of the ring nodes, and the ActorRef itself
+ * isn't a good representation, because LocalActorRef doesn't include the
+ * host and port.
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;Replaced by ConsistentRoutee&quot;</span>, <span class="string">&quot;2.3&quot;</span><span class="delimiter">)</span>
+<span class="keyword">private</span><span class="delimiter">[</span>akka<span class="delimiter">]</span> <span class="keyword">case class</span> <a title="class ConsistentActorRef extends AnyRef with Product with Serializable" id="akka.routing.ConsistentActorRef.readResolve">ConsistentActorRef</a><a href="#akka.routing.ConsistentActorRef.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.routing;ConsistentActorRef.actorRef">actorRef</a>: <a href="../actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>, <a title="akka.actor.Address" id="akka.routing;ConsistentActorRef.selfAddress">selfAddress</a>: <a href="../actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()String" id="akka.routing;ConsistentActorRef.toString">toString</a>: <span title="String">String</span> = <span class="delimiter">{</span>
+    <a href="#akka.routing;ConsistentActorRef.actorRef" title="=&gt; akka.actor.ActorRef">actorRef</a>.<a href="../actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a>.<a href="../actor/ActorPath.scala.html#akka.actor;ActorPath.address" title="=&gt; akka.actor.Address">address</a> <span title="String" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> Address<span class="delimiter">(</span>_, _, <span title="None.type">None</span>, <span title="None.type">None</span><span class="delimiter">)</span> ⇒ <a href="#akka.routing;ConsistentActorRef.actorRef" title="=&gt; akka.actor.ActorRef">actorRef</a>.<a href="../actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a>.<a href="../actor/ActorPath.scala.html#akka.actor;ActorPath.toStringWithAddress" title="(address: akka.actor.Address)String">toStringWithAddress</a><span class="delimiter">(</span><a href="#akka.routing;ConsistentActorRef.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a><span class="delimiter">)</span>
+      <span class="keyword">case</span> <a title="akka.actor.Address" id="akka.routing;ConsistentActorRef.toString.a">a</a>                         ⇒ <a href="#akka.routing;ConsistentActorRef.actorRef" title="=&gt; akka.actor.ActorRef">actorRef</a>.<a href="../actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a>.<span title="()String">toString</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+        </pre>
+    </body>
+</html>

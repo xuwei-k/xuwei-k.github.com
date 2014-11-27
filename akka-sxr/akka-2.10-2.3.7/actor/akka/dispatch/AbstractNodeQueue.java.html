@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>actor/akka/dispatch/AbstractNodeQueue.java</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */
+
+package akka.dispatch;
+
+import akka.util.Unsafe;
+
+import java.util.concurrent.atomic.AtomicReference;
+
+/**
+ * Lock-free MPSC linked queue implementation based on Dmitriy Vyukov's non-intrusive MPSC queue:
+ * http://www.1024cores.net/home/lock-free-algorithms/queues/non-intrusive-mpsc-node-based-queue
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public abstract class AbstractNodeQueue&lt;T&gt; extends AtomicReference&lt;AbstractNodeQueue.Node&lt;T&gt;&gt; {
+    // Extends AtomicReference for the &quot;head&quot; slot (which is the one that is appended to) since Unsafe does not expose XCHG operation intrinsically
+    @SuppressWarnings(&quot;unused&quot;)
+    private volatile Node&lt;T&gt; _tailDoNotCallMeDirectly;
+
+    protected AbstractNodeQueue() {
+       final Node&lt;T&gt; n = new Node&lt;T&gt;();
+       _tailDoNotCallMeDirectly = n;
+       set(n);
+    }
+
+    /*
+     * !!! There is a copy of this code in pollNode() !!!
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    protected final Node&lt;T&gt; peekNode() {
+        for(;;) {
+          final Node&lt;T&gt; tail = ((Node&lt;T&gt;)Unsafe.instance.getObjectVolatile(this, tailOffset));
+          final Node&lt;T&gt; next = tail.next();
+          if (next != null || get() == tail)
+            return next;
+        }
+    }
+
+    public final T peek() {
+        final Node&lt;T&gt; n = peekNode();
+        return (n != null) ? n.value : null;
+    }
+
+    public final void add(final T value) {
+        final Node&lt;T&gt; n = new Node&lt;T&gt;(value);
+        getAndSet(n).setNext(n);
+    }
+    
+    public final void addNode(final Node&lt;T&gt; n) {
+        n.setNext(null);
+        getAndSet(n).setNext(n);
+    }
+
+    public final boolean isEmpty() {
+        return peek() == null;
+    }
+
+    public final int count() {
+        int count = 0;
+        for(Node&lt;T&gt; n = peekNode();n != null; n = n.next())
+          ++count;
+        return count;
+    }
+
+    /*
+     * !!! There is a copy of this code in pollNode() !!!
+     */
+    public final T poll() {
+        final Node&lt;T&gt; next = peekNode();
+        if (next == null) return null;
+        else {
+            final T ret = next.value;
+            next.value = null;
+            Unsafe.instance.putOrderedObject(this, tailOffset, next);
+            return ret;
+        }
+    }
+    
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public final Node&lt;T&gt; pollNode() {
+      Node&lt;T&gt; tail;
+      Node&lt;T&gt; next;
+      for(;;) {
+        tail = ((Node&lt;T&gt;)Unsafe.instance.getObjectVolatile(this, tailOffset));
+        next = tail.next();
+        if (next != null || get() == tail)
+          break;
+      }
+      if (next == null) return null;
+      else {
+        tail.value = next.value;
+        next.value = null;
+        Unsafe.instance.putOrderedObject(this, tailOffset, next);
+        return tail;
+      }
+    }
+
+    private final static long tailOffset;
+
+    static {
+        try {
+          tailOffset = Unsafe.instance.objectFieldOffset(AbstractNodeQueue.class.getDeclaredField(&quot;_tailDoNotCallMeDirectly&quot;));
+        } catch(Throwable t){
+            throw new ExceptionInInitializerError(t);
+        }
+    }
+
+    public static class Node&lt;T&gt; {
+        public T value;
+        @SuppressWarnings(&quot;unused&quot;)
+        private volatile Node&lt;T&gt; _nextDoNotCallMeDirectly;
+
+        public Node() {
+            this(null);
+        }
+
+        public Node(final T value) {
+            this.value = value;
+        }
+
+        @SuppressWarnings(&quot;unchecked&quot;)
+        public final Node&lt;T&gt; next() {
+            return (Node&lt;T&gt;)Unsafe.instance.getObjectVolatile(this, nextOffset);
+        }
+
+        protected final void setNext(final Node&lt;T&gt; newNext) {
+          Unsafe.instance.putOrderedObject(this, nextOffset, newNext);
+        }
+        
+        private final static long nextOffset;
+        
+        static {
+            try {
+                nextOffset = Unsafe.instance.objectFieldOffset(Node.class.getDeclaredField(&quot;_nextDoNotCallMeDirectly&quot;));
+            } catch(Throwable t){
+                throw new ExceptionInInitializerError(t);
+            } 
+        }
+    } 
+}
+
+        </pre>
+    </body>
+</html>
