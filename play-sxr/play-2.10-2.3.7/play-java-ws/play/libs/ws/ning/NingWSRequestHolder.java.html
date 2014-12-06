@@ -1,0 +1,606 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>play-java-ws/play/libs/ws/ning/NingWSRequestHolder.java</title>
+        <script type="text/javascript" src="../../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */
+
+package play.libs.ws.ning;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.ning.http.client.FluentCaseInsensitiveStringsMap;
+import com.ning.http.client.PerRequestConfig;
+import com.ning.http.util.AsyncHttpProviderUtils;
+import org.jboss.netty.handler.codec.http.HttpHeaders;
+import play.libs.F;
+import play.libs.Json;
+import play.libs.ws.*;
+
+import java.io.File;
+import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.util.*;
+
+/**
+ * provides the User facing API for building WS request.
+ */
+public class NingWSRequestHolder implements WSRequestHolder {
+
+    private final String url;
+    private String method = &quot;GET&quot;;
+    private Object body = null;
+    private Map&lt;String, Collection&lt;String&gt;&gt; headers = new HashMap&lt;String, Collection&lt;String&gt;&gt;();
+    private Map&lt;String, Collection&lt;String&gt;&gt; queryParameters = new HashMap&lt;String, Collection&lt;String&gt;&gt;();
+
+    private String username = null;
+    private String password = null;
+    private WSAuthScheme scheme = null;
+    private WSSignatureCalculator calculator = null;
+    private NingWSClient client = null;
+
+    private int timeout = 0;
+    private Boolean followRedirects = null;
+    private String virtualHost = null;
+
+    public NingWSRequestHolder(NingWSClient client, String url) {
+        this.client = client;
+        URI reference = URI.create(url);
+
+        this.url = url;
+
+        String userInfo = reference.getUserInfo();
+        if (userInfo != null) {
+            this.setAuth(userInfo);
+        }
+        if (reference.getQuery() != null) {
+            this.setQueryString(reference.getQuery());
+        }
+    }
+
+    /**
+     * Sets a header with the given name, this can be called repeatedly.
+     *
+     * @param name
+     * @param value
+     */
+    @Override
+    public NingWSRequestHolder setHeader(String name, String value) {
+        if (headers.containsKey(name)) {
+            Collection&lt;String&gt; values = headers.get(name);
+            values.add(value);
+        } else {
+            List&lt;String&gt; values = new ArrayList&lt;String&gt;();
+            values.add(value);
+            headers.put(name, values);
+        }
+        return this;
+    }
+
+    /**
+     * Sets a query string
+     *
+     * @param query
+     */
+    @Override
+    public WSRequestHolder setQueryString(String query) {
+        String[] params = query.split(&quot;&amp;&quot;);
+        for (String param : params) {
+            String[] keyValue = param.split(&quot;=&quot;);
+            if (keyValue.length &gt; 2) {
+                throw new RuntimeException(new MalformedURLException(&quot;QueryString parameter should not have more than 2 = per part&quot;));
+            } else if (keyValue.length &gt;= 2) {
+                this.setQueryParameter(keyValue[0], keyValue[1]);
+            } else if (keyValue.length == 1 &amp;&amp; param.charAt(0) != '=') {
+                this.setQueryParameter(keyValue[0], null);
+            } else {
+                throw new RuntimeException(new MalformedURLException(&quot;QueryString part should not start with an = and not be empty&quot;));
+            }
+        }
+        return this;
+    }
+
+    /**
+     * Sets a query parameter with the given name,this can be called repeatedly.
+     *
+     * @param name
+     * @param value
+     */
+    @Override
+    public WSRequestHolder setQueryParameter(String name, String value) {
+        if (queryParameters.containsKey(name)) {
+            Collection&lt;String&gt; values = queryParameters.get(name);
+            values.add(value);
+        } else {
+            List&lt;String&gt; values = new ArrayList&lt;String&gt;();
+            values.add(value);
+            queryParameters.put(name, values);
+        }
+        return this;
+    }
+
+    /**
+     * Sets the authentication header for the current request using BASIC authentication.
+     *
+     * @param userInfo
+     */
+    @Override
+    public WSRequestHolder setAuth(String userInfo) {
+        this.scheme = WSAuthScheme.BASIC;
+
+        if (userInfo.equals(&quot;&quot;)) {
+            throw new RuntimeException(new MalformedURLException(&quot;userInfo should not be empty&quot;));
+        }
+
+        int split = userInfo.indexOf(&quot;:&quot;);
+
+        if (split == 0) { // We only have a password without user
+            this.username = &quot;&quot;;
+            this.password = userInfo.substring(1);
+        } else if (split == -1) { // We only have a username without password
+            this.username = userInfo;
+            this.password = &quot;&quot;;
+        } else {
+            this.username = userInfo.substring(0, split);
+            this.password = userInfo.substring(split + 1);
+        }
+
+        return this;
+    }
+
+    /**
+     * Sets the authentication header for the current request using BASIC authentication.
+     *
+     * @param username
+     * @param password
+     */
+    @Override
+    public WSRequestHolder setAuth(String username, String password) {
+        this.username = username;
+        this.password = password;
+        this.scheme = WSAuthScheme.BASIC;
+        return this;
+    }
+
+    /**
+     * Sets the authentication header for the current request.
+     *
+     * @param username
+     * @param password
+     * @param scheme   authentication scheme
+     */
+    @Override
+    public WSRequestHolder setAuth(String username, String password, WSAuthScheme scheme) {
+        this.username = username;
+        this.password = password;
+        this.scheme = scheme;
+        return this;
+    }
+
+    @Override
+    public WSRequestHolder sign(WSSignatureCalculator calculator) {
+        this.calculator = calculator;
+        return this;
+    }
+
+    /**
+     * Sets whether redirects (301, 302) should be followed automatically.
+     *
+     * @param followRedirects
+     */
+    @Override
+    public WSRequestHolder setFollowRedirects(Boolean followRedirects) {
+        this.followRedirects = followRedirects;
+        return this;
+    }
+
+    /**
+     * Sets the virtual host.
+     */
+    @Override
+    public WSRequestHolder setVirtualHost(String virtualHost) {
+        this.virtualHost = virtualHost;
+        return this;
+    }
+
+    /**
+     * Sets the request timeout in milliseconds.
+     *
+     * @param timeout
+     */
+    @Override
+    public WSRequestHolder setTimeout(int timeout) {
+        this.timeout = timeout;
+        return this;
+    }
+
+    /**
+     * Set the content type.  If the request body is a String, and no charset parameter is included, then it will
+     * default to UTF-8.
+     *
+     * @param contentType The content type
+     */
+    @Override
+    public WSRequestHolder setContentType(String contentType) {
+        return setHeader(HttpHeaders.Names.CONTENT_TYPE, contentType);
+    }
+
+    @Override
+    public WSRequestHolder setMethod(String method) {
+        this.method = method;
+        return this;
+    }
+
+    @Override
+    public WSRequestHolder setBody(String body) {
+        this.body = body;
+        return this;
+    }
+
+    @Override
+    public WSRequestHolder setBody(JsonNode body) {
+        this.body = body;
+        return this;
+    }
+
+    @Override
+    public WSRequestHolder setBody(InputStream body) {
+        this.body = body;
+        return this;
+    }
+
+    @Override
+    public WSRequestHolder setBody(File body) {
+        this.body = body;
+        return this;
+    }
+
+    /**
+     * @return the URL of the request.
+     */
+    @Override
+    public String getUrl() {
+        return this.url;
+    }
+
+    /**
+     * @return the headers (a copy to prevent side-effects).
+     */
+    @Override
+    public Map&lt;String, Collection&lt;String&gt;&gt; getHeaders() {
+        return new HashMap&lt;String, Collection&lt;String&gt;&gt;(this.headers);
+    }
+
+    /**
+     * @return the query parameters (a copy to prevent side-effects).
+     */
+    @Override
+    public Map&lt;String, Collection&lt;String&gt;&gt; getQueryParameters() {
+        return new HashMap&lt;String, Collection&lt;String&gt;&gt;(this.queryParameters);
+    }
+
+    /**
+     * @return the auth username, null if not an authenticated request.
+     */
+    @Override
+    public String getUsername() {
+        return this.username;
+    }
+
+    /**
+     * @return the auth password, null if not an authenticated request
+     */
+    @Override
+    public String getPassword() {
+        return this.password;
+    }
+
+    /**
+     * @return the auth scheme, null if not an authenticated request
+     */
+    @Override
+    public WSAuthScheme getScheme() {
+        return this.scheme;
+    }
+
+    /**
+     * @return the signature calculator (exemple: OAuth), null if none is set.
+     */
+    @Override
+    public WSSignatureCalculator getCalculator() {
+        return this.calculator;
+    }
+
+    /**
+     * @return the auth scheme (null if not an authenticated request)
+     */
+    @Override
+    public int getTimeout() {
+        return this.timeout;
+    }
+
+    /**
+     * @return true if the request is configure to follow redirect, false if it is configure not to, null if nothing is configured and the global client preference should be used instead.
+     */
+    @Override
+    public Boolean getFollowRedirects() {
+        return this.followRedirects;
+    }
+
+    // Intentionally package public.
+    String getVirtualHost() {
+        return this.virtualHost;
+    }
+
+    /**
+     * Perform a GET on the request asynchronously.
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; get() {
+        return execute(&quot;GET&quot;);
+    }
+
+    /**
+     * Perform a PATCH on the request asynchronously.
+     *
+     * @param body represented as String
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; patch(String body) {
+        setMethod(&quot;PATCH&quot;);
+        return executeString(body);
+    }
+
+    /**
+     * Perform a POST on the request asynchronously.
+     *
+     * @param body represented as String
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(String body) {
+        setMethod(&quot;POST&quot;);
+        return executeString(body);
+    }
+
+    /**
+     * Perform a PUT on the request asynchronously.
+     *
+     * @param body represented as String
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(String body) {
+        setMethod(&quot;PUT&quot;);
+        return executeString(body);
+    }
+
+    /**
+     * Perform a PATCH on the request asynchronously.
+     *
+     * @param body represented as JSON
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; patch(JsonNode body) {
+        setMethod(&quot;PATCH&quot;);
+        return executeJson(body);
+    }
+
+    /**
+     * Perform a POST on the request asynchronously.
+     *
+     * @param body represented as JSON
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(JsonNode body) {
+        setMethod(&quot;POST&quot;);
+        return executeJson(body);
+    }
+
+    /**
+     * Perform a PUT on the request asynchronously.
+     *
+     * @param body represented as JSON
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(JsonNode body) {
+        setMethod(&quot;PUT&quot;);
+        return executeJson(body);
+    }
+
+    /**
+     * Perform a PATCH on the request asynchronously.
+     *
+     * @param body represented as an InputStream
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; patch(InputStream body) {
+        setMethod(&quot;PATCH&quot;);
+        return executeIS(body);
+    }
+
+    /**
+     * Perform a POST on the request asynchronously.
+     *
+     * @param body represented as an InputStream
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(InputStream body) {
+        setMethod(&quot;POST&quot;);
+        return executeIS(body);
+    }
+
+    /**
+     * Perform a PUT on the request asynchronously.
+     *
+     * @param body represented as an InputStream
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(InputStream body) {
+        setMethod(&quot;PUT&quot;);
+        return executeIS(body);
+    }
+
+    /**
+     * Perform a POST on the request asynchronously.
+     *
+     * @param body represented as a File
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(File body) {
+        setMethod(&quot;POST&quot;);
+        return executeFile(body);
+    }
+
+    /**
+     * Perform a PUT on the request asynchronously.
+     *
+     * @param body represented as a File
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(File body) {
+        setMethod(&quot;PUT&quot;);
+        return executeFile(body);
+    }
+
+    /**
+     * Perform a DELETE on the request asynchronously.
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; delete() {
+        return execute(&quot;DELETE&quot;);
+    }
+
+    /**
+     * Perform a HEAD on the request asynchronously.
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; head() {
+        return execute(&quot;HEAD&quot;);
+    }
+
+    /**
+     * Perform an OPTIONS on the request asynchronously.
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; options() {
+        return execute(&quot;OPTIONS&quot;);
+    }
+
+    /**
+     * Execute an arbitrary method on the request asynchronously.
+     *
+     * @param method The method to execute
+     */
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; execute(String method) {
+        setMethod(method);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;WSResponse&gt; execute() {
+        if (body == null) {
+            NingWSRequest req = new NingWSRequest(client, method, url, queryParameters, headers);
+            return execute(req);
+        } else if (body instanceof String) {
+            return executeString((String) body);
+        } else if (body instanceof JsonNode) {
+            return executeJson((JsonNode) body);
+        } else if (body instanceof File) {
+            return executeFile((File) body);
+        } else if (body instanceof InputStream) {
+            return executeIS((InputStream) body);
+        } else {
+            throw new IllegalStateException(&quot;Impossible body: &quot; + body);
+        }
+    }
+
+    private F.Promise&lt;play.libs.ws.WSResponse&gt; executeString(String body) {
+        FluentCaseInsensitiveStringsMap headers = new FluentCaseInsensitiveStringsMap(this.headers);
+
+        // Detect and maybe add charset
+        String contentType = headers.getFirstValue(HttpHeaders.Names.CONTENT_TYPE);
+        if (contentType == null) {
+            contentType = &quot;text/plain&quot;;
+        }
+        String charset = AsyncHttpProviderUtils.parseCharset(contentType);
+        if (charset == null) {
+            charset = &quot;utf-8&quot;;
+            headers.replace(HttpHeaders.Names.CONTENT_TYPE, contentType + &quot;; charset=utf-8&quot;);
+        }
+
+        byte[] bodyBytes;
+        try {
+            bodyBytes = body.getBytes(charset);
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException(e);
+        }
+
+        NingWSRequest req = new NingWSRequest(client, method, url, queryParameters, headers, bodyBytes)
+                .setBody(body)
+                .setBodyEncoding(charset);
+        return execute(req);
+    }
+
+    private F.Promise&lt;play.libs.ws.WSResponse&gt; executeJson(JsonNode body) {
+        FluentCaseInsensitiveStringsMap headers = new FluentCaseInsensitiveStringsMap(this.headers);
+        headers.replace(HttpHeaders.Names.CONTENT_TYPE, &quot;application/json; charset=utf-8&quot;);
+        String bodyStr = Json.stringify(body);
+        byte[] bodyBytes;
+        try {
+            bodyBytes = bodyStr.getBytes(&quot;utf-8&quot;);
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException(e);
+        }
+
+        NingWSRequest req = new NingWSRequest(client, method, url, queryParameters, headers, bodyBytes)
+                .setBody(bodyStr)
+                .setBodyEncoding(&quot;utf-8&quot;);
+        return execute(req);
+
+    }
+
+    private F.Promise&lt;play.libs.ws.WSResponse&gt; executeIS(InputStream body) {
+        NingWSRequest req = new NingWSRequest(client, method, url, queryParameters, headers)
+                .setBody(body);
+        return execute(req);
+    }
+
+    private F.Promise&lt;play.libs.ws.WSResponse&gt; executeFile(File body) {
+        NingWSRequest req = new NingWSRequest(client, method, url, queryParameters, headers)
+                .setBody(body);
+        return execute(req);
+    }
+
+    private F.Promise&lt;WSResponse&gt; execute(NingWSRequest req) {
+        if (this.timeout &gt; 0) {
+            PerRequestConfig config = new PerRequestConfig();
+            config.setRequestTimeoutInMs(this.timeout);
+            req.setPerRequestConfig(config);
+        }
+        if (this.followRedirects != null) {
+            req.setFollowRedirects(this.followRedirects);
+        }
+        if (this.virtualHost != null) {
+            req.setVirtualHost(this.virtualHost);
+        }
+        if (this.username != null &amp;&amp; this.password != null &amp;&amp; this.scheme != null)
+            req.auth(this.username, this.password, this.scheme);
+        if (this.calculator != null)
+            this.calculator.sign(req);
+
+        return req.execute();
+    }
+}
+        </pre>
+    </body>
+</html>
