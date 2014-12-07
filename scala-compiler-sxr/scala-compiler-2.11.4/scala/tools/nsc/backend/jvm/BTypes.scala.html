@@ -1,0 +1,891 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>scala/tools/nsc/backend/jvm/BTypes.scala</title>
+        <script type="text/javascript" src="../../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/* NSC -- new Scala compiler
+ * Copyright 2005-2014 LAMP/EPFL
+ * @author  Martin Odersky
+ */</span>
+
+package scala.tools.nsc
+package backend.jvm
+
+import scala.tools.asm
+import asm.Opcodes
+
+<span class="comment">/**
+ * The BTypes component defines The BType class hierarchy. BTypes encapsulates all type information
+ * that is required after building the ASM nodes. This includes optimizations, geneartion of
+ * InnerClass attributes and generation of stack map frames.
+ *
+ * This representation is immutable and independent of the compiler data structures, hence it can
+ * be queried by concurrent threads.
+ */</span>
+abstract class <a title="class BTypes extends AnyRef" id="scala.tools.nsc.backend.jvm;BTypes">BTypes</a> <a href="#scala.tools.nsc.backend.jvm;BTypes" title="scala.tools.nsc.backend.jvm.BTypes" class="delimiter">{</a>
+  <span class="comment">/**
+   * A map from internal names to ClassBTypes. Every ClassBType is added to this map on its
+   * construction.
+   *
+   * This map is used when computing stack map frames. The asm.ClassWriter invokes the method
+   * `getCommonSuperClass`. In this method we need to obtain the ClassBType for a given internal
+   * name. The method assumes that every class type that appears in the bytecode exists in the map.
+   *
+   * Concurrent because stack map frames are computed when in the class writer, which might run
+   * on multiple classes concurrently.
+   */</span>
+  protected val <a title="=&gt; scala.collection.concurrent.Map[String,BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes.classBTypeFromInternalNameMap">classBTypeFromInternalNameMap</a>: collection.concurrent.<a href="../../../../collection/concurrent/Map.scala.html#scala.collection.concurrent;Map" title="scala.collection.concurrent.Map[String,BTypes.this.ClassBType]">Map</a><span class="delimiter">[</span>String, ClassBType<span class="delimiter">]</span>
+
+  <span class="comment">/**
+   * The string represented by the `offset` / `length` values of a ClassBType, see comment of that
+   * class.
+   */</span>
+  protected def <a title="(offset: Int, lenght: Int)String" id="scala.tools.nsc.backend.jvm;BTypes.internalNameString">internalNameString</a><span class="delimiter">(</span><a title="Int" id="scala.tools.nsc.backend.jvm;BTypes.internalNameString.offset">offset</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a>, <a title="Int" id="scala.tools.nsc.backend.jvm;BTypes.internalNameString.lenght">lenght</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a><span class="delimiter">)</span>: <span title="String">String</span>
+
+  <span class="comment">/**
+   * Obtain a previously constructed ClassBType for a given internal name.
+   */</span>
+  def <a title="(internalName: String)BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes.classBTypeFromInternalName">classBTypeFromInternalName</a><span class="delimiter">(</span><a title="String" id="scala.tools.nsc.backend.jvm;BTypes.classBTypeFromInternalName.internalName">internalName</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="../../../../collection/MapLike.scala.html#scala.collection;MapLike.apply" title="(key: String)BTypes.this.ClassBType">classBTypeFromInternalNameMap</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes.classBTypeFromInternalName.internalName" title="String">internalName</a><span class="delimiter">)</span>
+
+  <span class="comment">// Some core BTypes are required here, in class BType, where no Global instance is available.</span>
+  <span class="comment">// The Global is only available in the subclass BTypesFromSymbols. We cannot depend on the actual</span>
+  <span class="comment">// implementation (CoreBTypesProxy) here because it has members that refer to global.Symbol.</span>
+  val <a title="=&gt; scala.tools.nsc.backend.jvm.CoreBTypesProxyGlobalIndependent[BTypes.this.type]" id="scala.tools.nsc.backend.jvm;BTypes.coreBTypes">coreBTypes</a>: <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent" title="scala.tools.nsc.backend.jvm.CoreBTypesProxyGlobalIndependent[BTypes.this.type]">CoreBTypesProxyGlobalIndependent</a><span class="delimiter">[</span>this.type<span class="delimiter">]</span>
+  import <a href="#scala.tools.nsc.backend.jvm;BTypes.coreBTypes" title="=&gt; scala.tools.nsc.backend.jvm.CoreBTypesProxyGlobalIndependent[BTypes.this.type]">coreBTypes</a>._
+
+  <span class="comment">/**
+   * A BType is either a primitve type, a ClassBType, an ArrayBType of one of these, or a MethodType
+   * referring to BTypes.
+   */</span>
+  <span class="comment">/*sealed*/</span> trait <a title="trait BType extends AnyRef" id="scala.tools.nsc.backend.jvm;BTypes;BType">BType</a> <a href="../../../../Unit.scala.html#scala;Unit" title="Unit" class="delimiter">{</a> <span class="comment">// Not sealed for now due to SI-8546</span>
+    final override def <a title="()String" id="scala.tools.nsc.backend.jvm;BTypes;BType.toString">toString</a>: <span title="String">String</span> = this match <span class="delimiter">{</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a>   =&gt; <span title="String(&quot;V&quot;)" class="string">&quot;V&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve" title="BTypes.this.BOOL.type">BOOL</a>   =&gt; <span title="String(&quot;Z&quot;)" class="string">&quot;Z&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a>   =&gt; <span title="String(&quot;C&quot;)" class="string">&quot;C&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a>   =&gt; <span title="String(&quot;B&quot;)" class="string">&quot;B&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a>  =&gt; <span title="String(&quot;S&quot;)" class="string">&quot;S&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>    =&gt; <span title="String(&quot;I&quot;)" class="string">&quot;I&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a>  =&gt; <span title="String(&quot;F&quot;)" class="string">&quot;F&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a>   =&gt; <span title="String(&quot;J&quot;)" class="string">&quot;J&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a> =&gt; <span title="String(&quot;D&quot;)" class="string">&quot;D&quot;</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType.unapply" title="(c: BTypes.this.ClassBType)Option[String]">ClassBType</a><span class="delimiter">(</span><a title="String" id="scala.tools.nsc.backend.jvm;BTypes;BType.toString.internalName">internalName</a><span class="delimiter">)</span> =&gt; <span title="String(&quot;L&quot;)" class="string">&quot;L&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toString.internalName" title="String">internalName</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;;&quot;)" class="string">&quot;;&quot;</span>
+      case ArrayBType<span class="delimiter">(</span><a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;BType.toString.component">component</a><span class="delimiter">)</span>    =&gt; <span title="String(&quot;[&quot;)" class="string">&quot;[&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toString.component" title="BTypes.this.BType">component</a>
+      case MethodBType<span class="delimiter">(</span><a title="List[BTypes.this.BType]" id="scala.tools.nsc.backend.jvm;BTypes;BType.toString.args">args</a>, <a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;BType.toString.res">res</a><span class="delimiter">)</span>   =&gt; <span title="String(&quot;(&quot;)" class="string">&quot;(&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toString.args" title="List[BTypes.this.BType]">args</a>.<a href="../../../../collection/TraversableOnce.scala.html#scala.collection;TraversableOnce.mkString(3bf7c90be7)" title="=&gt; String">mkString</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toString.res" title="BTypes.this.BType">res</a>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * @return The Java descriptor of this type. Examples:
+     *  - int: I
+     *  - java.lang.String: Ljava/lang/String;
+     *  - int[]: [I
+     *  - Object m(String s, double d): (Ljava/lang/String;D)Ljava/lang/Object;
+     */</span>
+    final def <a title="=&gt; String" id="scala.tools.nsc.backend.jvm;BTypes;BType.descriptor">descriptor</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toString" title="()String">toString</a>
+
+    <span class="comment">/**
+     * @return 0 for void, 2 for long and double, 1 otherwise
+     */</span>
+    final def <a title="=&gt; Int" id="scala.tools.nsc.backend.jvm;BTypes;BType.size">size</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = this match <span class="delimiter">{</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a> =&gt; <span title="Int(0)" class="int">0</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a> =&gt; <span title="Int(2)" class="int">2</span>
+      case _ =&gt; <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive">isPrimitive</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = this.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a><span class="delimiter">]</span>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isRef">isRef</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a>       = this.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes;RefBType" title="BTypes.this.RefBType">RefBType</a><span class="delimiter">]</span>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isArray">isArray</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a>     = this.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a><span class="delimiter">]</span>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isClass">isClass</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a>     = this.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">]</span>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isMethod">isMethod</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a>    = this.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes.MethodBType.readResolve" title="BTypes.this.MethodBType">MethodBType</a><span class="delimiter">]</span>
+
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isNonVoidPrimitiveType">isNonVoidPrimitiveType</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive" title="=&gt; Boolean">isPrimitive</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> this <span title="(x$1: Any)Boolean">!=</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a>
+
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isNullType">isNullType</a>             = this <span title="(x$1: Any)Boolean">==</span> <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.RT_NULL" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">RT_NULL</a>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType">isNothingType</a>          = this <span title="(x$1: Any)Boolean">==</span> <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.RT_NOTHING" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">RT_NOTHING</a>
+
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isBoxed">isBoxed</a> = this.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isClass" title="=&gt; Boolean">isClass</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../../../collection/GenSetLike.scala.html#scala.collection;GenSetLike.apply" title="(elem: BTypes.this.coreBTypes.bTypes.ClassBType)Boolean">boxedClasses</a><span class="delimiter">(</span>this.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.asClassBType" title="=&gt; BTypes.this.ClassBType">asClassBType</a><span class="delimiter">)</span>
+
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isIntSizedType">isIntSizedType</a> = this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve" title="BTypes.this.BOOL.type">BOOL</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a>
+                               this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isIntegralType">isIntegralType</a> = this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a>
+                               this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isRealType">isRealType</a>     = this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isNumericType">isNumericType</a>  = <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isIntegralType" title="=&gt; Boolean">isIntegralType</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isRealType" title="=&gt; Boolean">isRealType</a>
+    final def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.isWideType">isWideType</a>     = <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.size" title="=&gt; Int">size</a> <a href="../../../../Int.scala.html#scala;Int.==(5f58a84eb3)" title="(x: Int)Boolean">==</a> <span title="Int(2)" class="int">2</span>
+
+    <span class="comment">/*
+     * Subtype check `this &lt;:&lt; other` on BTypes that takes into account the JVM built-in numeric
+     * promotions (e.g. BYTE to INT). Its operation can be visualized more easily in terms of the
+     * Java bytecode type hierarchy.
+     */</span>
+    final def <a title="(other: BTypes.this.BType)Boolean" id="scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo">conformsTo</a><span class="delimiter">(</span><a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other">other</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a><span class="delimiter">)</span>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = <span class="delimiter">{</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isRef" title="=&gt; Boolean">isRef</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive" title="=&gt; Boolean">isPrimitive</a>, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;conformsTo cannot handle &quot;)">conformsTo cannot handle $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="String(&quot;&quot;)" class="string">&quot;</a><span class="delimiter">)</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isRef" title="=&gt; Boolean">isRef</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive" title="=&gt; Boolean">isPrimitive</a>, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;conformsTo cannot handle &quot;)">conformsTo cannot handle $</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span>
+
+      this match <span class="delimiter">{</span>
+        case ArrayBType<span class="delimiter">(</span><a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.component">component</a><span class="delimiter">)</span> =&gt;
+          if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.ObjectReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">ObjectReference</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.jlCloneableReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">jlCloneableReference</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.jioSerializableReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">jioSerializableReference</a><span class="delimiter">)</span> true
+          else <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> match <span class="delimiter">{</span>
+            case ArrayBType<span class="delimiter">(</span><a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.otherComponoent">otherComponoent</a><span class="delimiter">)</span> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.component" title="BTypes.this.BType">component</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo" title="(other: BTypes.this.BType)Boolean">conformsTo</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.otherComponoent" title="BTypes.this.BType">otherComponoent</a><span class="delimiter">)</span>
+            case _ =&gt; false
+          <span class="delimiter">}</span>
+
+        case <a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.classType">classType</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> =&gt;
+          if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isBoxed" title="=&gt; Boolean">isBoxed</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isBoxed" title="=&gt; Boolean">isBoxed</a><span class="delimiter">)</span> this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>
+            else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.ObjectReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">ObjectReference</a><span class="delimiter">)</span> true
+            else <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> match <span class="delimiter">{</span>
+              case <span title="BTypes.this.ClassBType">otherClassType</span>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.classType" title="BTypes.this.ClassBType">classType</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span><span title="BTypes.this.ClassBType">otherClassType</span><span class="delimiter">)</span> <span class="comment">// e.g., java/lang/Double conforms to java/lang/Number</span>
+              case _ =&gt; false
+            <span class="delimiter">}</span>
+          <span class="delimiter">}</span> else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNullType" title="=&gt; Boolean">isNullType</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType" title="=&gt; Boolean">isNothingType</a><span class="delimiter">)</span> false
+            else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive" title="=&gt; Boolean">isPrimitive</a><span class="delimiter">)</span> false
+            else true <span class="comment">// Null conforms to all classes (except Nothing) and arrays.</span>
+          <span class="delimiter">}</span> else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType" title="=&gt; Boolean">isNothingType</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            true
+          <span class="delimiter">}</span> else <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> match <span class="delimiter">{</span>
+            case <span title="BTypes.this.ClassBType">otherClassType</span>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.classType" title="BTypes.this.ClassBType">classType</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span><span title="BTypes.this.ClassBType">otherClassType</span><span class="delimiter">)</span>
+            <span class="comment">// case ArrayBType(_) =&gt; this.isNullType   // documentation only, because `if (isNullType)` above covers this case</span>
+            case _ =&gt;
+              <span class="comment">// isNothingType ||                      // documentation only, because `if (isNothingType)` above covers this case</span>
+              false
+          <span class="delimiter">}</span>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a> =&gt;
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a>
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve" title="BTypes.this.BOOL.type">BOOL</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a> =&gt;
+          this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a> <span class="comment">// TODO Actually, BOOL does NOT conform to LONG. Even with adapt().</span>
+        case _ =&gt;
+          <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive" title="=&gt; Boolean">isPrimitive</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive" title="=&gt; Boolean">isPrimitive</a>, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;Expected primitive types &quot;)">Expected primitive types $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="String(&quot; - &quot;)"> - $</a><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span>
+          this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.conformsTo.other" title="BTypes.this.BType">other</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Compute the upper bound of two types.
+     * Takes promotions of numeric primitives into account.
+     */</span>
+    final def <a title="(other: BTypes.this.BType)BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;BType.maxType">maxType</a><span class="delimiter">(</span><a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;BType.maxType.other">other</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a><span class="delimiter">)</span>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a> = this match <span class="delimiter">{</span>
+      case <a title="BTypes.this.PrimitiveBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.maxType.pt">pt</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.maxType.pt" title="BTypes.this.PrimitiveBType">pt</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType" title="(other: BTypes.this.BType)BTypes.this.BType">maxValueType</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.maxType.other" title="BTypes.this.BType">other</a><span class="delimiter">)</span>
+
+      case _: <a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a> | _: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> =&gt;
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType" title="=&gt; Boolean">isNothingType</a><span class="delimiter">)</span>       return <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.maxType.other" title="BTypes.this.BType">other</a>
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.maxType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType" title="=&gt; Boolean">isNothingType</a><span class="delimiter">)</span> return this
+        if <span class="delimiter">(</span>this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.maxType.other" title="BTypes.this.BType">other</a><span class="delimiter">)</span>       return this
+
+        <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.maxType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isRef" title="=&gt; Boolean">isRef</a>, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;Cannot compute maxType: &quot;)">Cannot compute maxType: $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="String(&quot;, &quot;)">, $</a><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.maxType.other" title="BTypes.this.BType">other</a><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span>
+        <span class="comment">// Approximate `lub`. The common type of two references is always ObjectReference.</span>
+        <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.ObjectReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">ObjectReference</a>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * See documentation of [[typedOpcode]].
+     * The numbers are taken from asm.Type.VOID_TYPE ff., the values are those shifted by &lt;&lt; 8.
+     */</span>
+    private def <a title="=&gt; Int" id="scala.tools.nsc.backend.jvm;BTypes;BType.loadStoreOpcodeOffset">loadStoreOpcodeOffset</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = this match <span class="delimiter">{</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>  =&gt; <span title="Int(0)" class="int">0</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve" title="BTypes.this.BOOL.type">BOOL</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> =&gt; <span title="Int(5)" class="int">5</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a>        =&gt; <span title="Int(6)" class="int">6</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a>       =&gt; <span title="Int(7)" class="int">7</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a>       =&gt; <span title="Int(2)" class="int">2</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a>        =&gt; <span title="Int(1)" class="int">1</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a>      =&gt; <span title="Int(3)" class="int">3</span>
+      case _           =&gt; <span title="Int(4)" class="int">4</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * See documentation of [[typedOpcode]].
+     * The numbers are taken from asm.Type.VOID_TYPE ff., the values are those shifted by &lt;&lt; 16.
+     */</span>
+    private def <a title="=&gt; Int" id="scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcodeOffset">typedOpcodeOffset</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = this match <span class="delimiter">{</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a>                               =&gt; <span title="Int(5)" class="int">5</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve" title="BTypes.this.BOOL.type">BOOL</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>   =&gt; <span title="Int(0)" class="int">0</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a>                              =&gt; <span title="Int(2)" class="int">2</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a>                               =&gt; <span title="Int(1)" class="int">1</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a>                             =&gt; <span title="Int(3)" class="int">3</span>
+      case _                                  =&gt; <span title="Int(4)" class="int">4</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Some JVM opcodes have typed variants. This method returns the correct opcode according to
+     * the type.
+     *
+     * @param opcode A JVM instruction opcode. This opcode must be one of ILOAD, ISTORE, IALOAD,
+     *               IASTORE, IADD, ISUB, IMUL, IDIV, IREM, INEG, ISHL, ISHR, IUSHR, IAND, IOR
+     *               IXOR and IRETURN.
+     * @return The opcode adapted to this java type. For example, if this type is `float` and
+     *         `opcode` is `IRETURN`, this method returns `FRETURN`.
+     */</span>
+    final def <a title="(opcode: Int)Int" id="scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcode">typedOpcode</a><span class="delimiter">(</span><a title="Int" id="scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcode.opcode">opcode</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a><span class="delimiter">)</span>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcode.opcode" title="Int">opcode</a> <a href="../../../../Int.scala.html#scala;Int.==(5f58a84eb3)" title="(x: Int)Boolean">==</a> Opcodes.<span title="Int(46)">IALOAD</span> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcode.opcode" title="Int">opcode</a> <a href="../../../../Int.scala.html#scala;Int.==(5f58a84eb3)" title="(x: Int)Boolean">==</a> Opcodes.<span title="Int(79)">IASTORE</span><span class="delimiter">)</span>
+        <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcode.opcode" title="Int">opcode</a> <a href="../../../../Int.scala.html#scala;Int.+(1409840560)" title="(x: Int)Int">+</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.loadStoreOpcodeOffset" title="=&gt; Int">loadStoreOpcodeOffset</a>
+      else
+        <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcode.opcode" title="Int">opcode</a> <a href="../../../../Int.scala.html#scala;Int.+(1409840560)" title="(x: Int)Int">+</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;BType.typedOpcodeOffset" title="=&gt; Int">typedOpcodeOffset</a>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * The asm.Type corresponding to this BType.
+     *
+     * Note about asm.Type.getObjectType (*): For class types, the method expects the internal
+     * name, i.e. without the surrounding 'L' and ';'. For array types on the other hand, the
+     * method expects a full descriptor, for example &quot;[Ljava/lang/String;&quot;.
+     *
+     * See method asm.Type.getType that creates a asm.Type from a type descriptor
+     *  - for an OBJECT type, the 'L' and ';' are not part of the range of the created Type
+     *  - for an ARRAY type, the full descriptor is part of the range
+     */</span>
+    def <a title="=&gt; scala.tools.asm.Type" id="scala.tools.nsc.backend.jvm;BTypes;BType.toASMType">toASMType</a>: asm.<span title="scala.tools.asm.Type">Type</span> = this match <span class="delimiter">{</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a>   =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">VOID_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve" title="BTypes.this.BOOL.type">BOOL</a>   =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">BOOLEAN_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a>   =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">CHAR_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a>   =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">BYTE_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a>  =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">SHORT_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>    =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">INT_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a>  =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">FLOAT_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a>   =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">LONG_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a> =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="scala.tools.asm.Type">DOUBLE_TYPE</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType.unapply" title="(c: BTypes.this.ClassBType)Option[String]">ClassBType</a><span class="delimiter">(</span><a title="String" id="scala.tools.nsc.backend.jvm;BTypes;BType.toASMType.internalName">internalName</a><span class="delimiter">)</span> =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="(x$1: String)scala.tools.asm.Type">getObjectType</span><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toASMType.internalName" title="String">internalName</a><span class="delimiter">)</span> <span class="comment">// see (*) above</span>
+      case <a title="BTypes.this.ArrayBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.toASMType.a">a</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a>            =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="(x$1: String)scala.tools.asm.Type">getObjectType</span><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toASMType.a" title="BTypes.this.ArrayBType">a</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.descriptor" title="=&gt; String">descriptor</a><span class="delimiter">)</span>
+      case <a title="BTypes.this.MethodBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.toASMType.m">m</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.MethodBType.readResolve" title="BTypes.this.MethodBType">MethodBType</a>           =&gt; asm.<span title="scala.tools.asm.Type.type">Type</span>.<span title="(x$1: String)scala.tools.asm.Type">getMethodType</span><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;BType.toASMType.m" title="BTypes.this.MethodBType">m</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.descriptor" title="=&gt; String">descriptor</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    def <a title="=&gt; BTypes.this.RefBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.asRefBType">asRefBType</a>       : <a href="#scala.tools.nsc.backend.jvm;BTypes;RefBType" title="BTypes.this.RefBType">RefBType</a>       = this.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="BTypes.this.RefBType" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes;RefBType" title="BTypes.this.RefBType">RefBType</a><span class="delimiter">]</span>
+    def <a title="=&gt; BTypes.this.ArrayBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.asArrayBType">asArrayBType</a>     : <a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a>     = this.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="BTypes.this.ArrayBType" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a><span class="delimiter">]</span>
+    def <a title="=&gt; BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.asClassBType">asClassBType</a>     : <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a>     = this.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="BTypes.this.ClassBType" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">]</span>
+    def <a title="=&gt; BTypes.this.PrimitiveBType" id="scala.tools.nsc.backend.jvm;BTypes;BType.asPrimitiveBType">asPrimitiveBType</a> : <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a> = this.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="BTypes.this.PrimitiveBType" class="delimiter">[</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a><span class="delimiter">]</span>
+  <span class="delimiter">}</span>
+
+  sealed trait <a title="trait PrimitiveBType extends AnyRef with BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType">PrimitiveBType</a> extends <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a> <span class="delimiter">{</span>
+
+    <span class="comment">/**
+     * The upper bound of two primitive types. The `other` type has to be either a primitive
+     * type or Nothing.
+     *
+     * The maxValueType of (Char, Byte) and of (Char, Short) is Int, to encompass the negative
+     * values of Byte and Short. See ticket #2087.
+     */</span>
+    final def <a title="(other: BTypes.this.BType)BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType">maxValueType</a><span class="delimiter">(</span><a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other">other</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a><span class="delimiter">)</span>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a> = <span class="delimiter">{</span>
+
+      def <a title="=&gt; Nothing" id="scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable">uncomparable</a>: <span title="Nothing">Nothing</span> = throw new <span title="AssertionError">AssertionError</span><span class="delimiter">(</span><a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;Cannot compute maxValueType: &quot;)">Cannot compute maxValueType: $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="String(&quot;, &quot;)">, $</a><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span>
+
+      if <span class="delimiter">(</span><a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isPrimitive" title="=&gt; Boolean">isPrimitive</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType" title="=&gt; Boolean">isNothingType</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+
+      if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType" title="=&gt; Boolean">isNothingType</a><span class="delimiter">)</span> return this
+      if <span class="delimiter">(</span>this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a><span class="delimiter">)</span>       return this
+
+      this match <span class="delimiter">{</span>
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> =&gt;
+          if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a><span class="delimiter">)</span>            <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>
+          else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNumericType" title="=&gt; Boolean">isNumericType</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>
+          else                          <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a> =&gt;
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a> match <span class="delimiter">{</span>
+            case <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a>                          =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a>
+            case <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a>                          =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>
+            case <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>  | <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a>  | <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>
+            case _                             =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+          <span class="delimiter">}</span>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a> =&gt;
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a> match <span class="delimiter">{</span>
+            case <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a>                 =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>
+            case <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>  | <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>
+            case _                            =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+          <span class="delimiter">}</span>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a> =&gt;
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a> match <span class="delimiter">{</span>
+            case <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve" title="BTypes.this.BYTE.type">BYTE</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve" title="BTypes.this.SHORT.type">SHORT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve" title="BTypes.this.CHAR.type">CHAR</a>   =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.readResolve" title="BTypes.this.INT.type">INT</a>
+            case <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>
+            case _                     =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+          <span class="delimiter">}</span>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a> =&gt;
+          if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isIntegralType" title="=&gt; Boolean">isIntegralType</a><span class="delimiter">)</span>  <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve" title="BTypes.this.LONG.type">LONG</a>
+          else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isRealType" title="=&gt; Boolean">isRealType</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a>
+          else                       <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a> =&gt;
+          if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a><span class="delimiter">)</span>          <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a>
+          else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNumericType" title="=&gt; Boolean">isNumericType</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve" title="BTypes.this.FLOAT.type">FLOAT</a>
+          else                          <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a> =&gt;
+          if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.other" title="BTypes.this.BType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNumericType" title="=&gt; Boolean">isNumericType</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve" title="BTypes.this.DOUBLE.type">DOUBLE</a>
+          else                     <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+
+        case <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve" title="BTypes.this.UNIT.type">UNIT</a> | <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve" title="BTypes.this.BOOL.type">BOOL</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType.maxValueType.uncomparable" title="=&gt; Nothing">uncomparable</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.UNIT.productElement.x$1" title="BTypes.this.UNIT.type" id="scala.tools.nsc.backend.jvm;BTypes.UNIT.readResolve">UNIT</a>   extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.BOOL.productElement.x$1" title="BTypes.this.BOOL.type" id="scala.tools.nsc.backend.jvm;BTypes.BOOL.readResolve">BOOL</a>   extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.CHAR.productElement.x$1" title="BTypes.this.CHAR.type" id="scala.tools.nsc.backend.jvm;BTypes.CHAR.readResolve">CHAR</a>   extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.BYTE.productElement.x$1" title="BTypes.this.BYTE.type" id="scala.tools.nsc.backend.jvm;BTypes.BYTE.readResolve">BYTE</a>   extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.SHORT.productElement.x$1" title="BTypes.this.SHORT.type" id="scala.tools.nsc.backend.jvm;BTypes.SHORT.readResolve">SHORT</a>  extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.INT.productElement.x$1" title="BTypes.this.INT.type" id="scala.tools.nsc.backend.jvm;BTypes.INT.readResolve">INT</a>    extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.FLOAT.productElement.x$1" title="BTypes.this.FLOAT.type" id="scala.tools.nsc.backend.jvm;BTypes.FLOAT.readResolve">FLOAT</a>  extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.LONG.productElement.x$1" title="BTypes.this.LONG.type" id="scala.tools.nsc.backend.jvm;BTypes.LONG.readResolve">LONG</a>   extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+  case object <a href="#scala.tools.nsc.backend.jvm;BTypes.DOUBLE.productElement.x$1" title="BTypes.this.DOUBLE.type" id="scala.tools.nsc.backend.jvm;BTypes.DOUBLE.readResolve">DOUBLE</a> extends <a href="#scala.tools.nsc.backend.jvm;BTypes;PrimitiveBType" title="BTypes.this.PrimitiveBType">PrimitiveBType</a>
+
+  sealed trait <a title="trait RefBType extends AnyRef with BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;RefBType">RefBType</a> extends <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a> <span class="delimiter">{</span>
+    <span class="comment">/**
+     * The class or array type of this reference type. Used for ANEWARRAY, MULTIANEWARRAY,
+     * INSTANCEOF and CHECKCAST instructions. Also used for emitting invokevirtual calls to
+     * (a: Array[T]).clone() for any T, see genApply.
+     *
+     * In contrast to the descriptor, this string does not contain the surrounding 'L' and ';' for
+     * class types, for example &quot;java/lang/String&quot;.
+     * However, for array types, the full descriptor is used, for example &quot;[Ljava/lang/String;&quot;.
+     *
+     * This can be verified for example using javap or ASMifier.
+     */</span>
+    def <a title="=&gt; String" id="scala.tools.nsc.backend.jvm;BTypes;RefBType.classOrArrayType">classOrArrayType</a>: <span title="String">String</span> = this match <span class="delimiter">{</span>
+      case <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType.unapply" title="(c: BTypes.this.ClassBType)Option[String]">ClassBType</a><span class="delimiter">(</span><a title="String" id="scala.tools.nsc.backend.jvm;BTypes;RefBType.classOrArrayType.internalName">internalName</a><span class="delimiter">)</span> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;RefBType.classOrArrayType.internalName" title="String">internalName</a>
+      case <a title="BTypes.this.ArrayBType" id="scala.tools.nsc.backend.jvm;BTypes;RefBType.classOrArrayType.a">a</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a>            =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;RefBType.classOrArrayType.a" title="BTypes.this.ArrayBType">a</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.descriptor" title="=&gt; String">descriptor</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * InnerClass and EnclosingMethod attributes (EnclosingMethod is displayed as OUTERCLASS in asm).
+   *
+   * In this summary, &quot;class&quot; means &quot;class or interface&quot;.
+   *
+   * JLS: http://docs.oracle.com/javase/specs/jls/se8/html/index.html
+   * JVMS: http://docs.oracle.com/javase/specs/jvms/se8/html/index.html
+   *
+   * Terminology
+   * -----------
+   *
+   *  - Nested class (JLS 8): class whose declaration occurs within the body of another class
+   *
+   *  - Top-level class (JLS 8): non-nested class
+   *
+   *  - Inner class (JLS 8.1.3): nested class that is not (explicitly or implicitly) static
+   *
+   *  - Member class (JLS 8.5): class directly enclosed in the body of a class (and not, for
+   *    example, defined in a method). Member classes cannot be anonymous. May be static.
+   *
+   *  - Local class (JLS 14.3): nested, non-anonymous class that is not a member of a class
+   *    - cannot be static (therefore they are &quot;inner&quot; classes)
+   *    - can be defined in a method, a constructor or in an initializer block
+   *
+   *  - Initializer block (JLS 8.6 / 8.7): block of statements in a java class
+   *    - static initializer: executed before constructor body
+   *    - instance initializer: exectued when class is initialized (instance creation, static
+   *      field access, ...)
+   *
+   *  - A static nested class can be defined as
+   *    - a static member class (explicitly static), or
+   *    - a member class of an interface (implicitly static)
+   *    - local classes are never static, even if they are defined in a static method.
+   *
+   *   Note: it is NOT the case that all inner classes (non-static) have an outer pointer. Example:
+   *     class C { static void foo { class D {} } }
+   *   The class D is an inner class (non-static), but javac does not add an outer pointer to it.
+   *
+   * InnerClass
+   * ----------
+   *
+   * The JVMS 4.7.6 requires an entry for every class mentioned in a CONSTANT_Class_info in the
+   * constant pool (CP) that is not a member of a package (JLS 7.1).
+   *
+   * The JLS 13.1, points 9. / 10. requires: a class must reference (in the CP)
+   *  - its immediately enclosing class
+   *  - all of its member classes
+   *  - all local and anonymous classes that are referenced (or declared) elsewhere (method,
+   *    constructor, initializer block, field initializer)
+   *
+   * In a comment, the 4.7.6 spec says: this implies an entry in the InnerClass attribute for
+   *  - All enclosing classes (except the outermost, which is top-level)
+   *    - My comment: not sure how this is implied, below (*) a Java counter-example.
+   *      In any case, the Java compiler seems to add all enclosing classes, even if they are not
+   *      otherwise mentioned in the CP. So we should do the same.
+   *  - All nested classes (including anonymous and local, but not transitively)
+   *
+   * Fields in the InnerClass entries:
+   *  - inner class: the (nested) class C we are talking about
+   *  - outer class: the class of which C is a member. Has to be null for non-members, i.e. for
+   *                 local and anonymous classes. NOTE: this co-incides with the presence of an
+   *                 EnclosingMethod attribute (see below)
+   *  - inner name:  A string with the simple name of the inner class. Null for anonymous classes.
+   *  - flags:       access property flags, details in JVMS, table in 4.7.6. Static flag: see
+   *                 discussion below.
+   *
+   *
+   * Note 1: when a nested class is present in the InnerClass attribute, all of its enclosing
+   * classes have to be present as well (by the rules above). Example:
+   *
+   *   class Outer { class I1 { class I2 { } } }
+   *   class User { Outer.I1.I2 foo() { } }
+   *
+   * The return type &quot;Outer.I1.I2&quot; puts &quot;Outer$I1$I2&quot; in the CP, therefore the class is added to the
+   * InnerClass attribute. For this entry, the &quot;outer class&quot; field will be &quot;Outer$I1&quot;. This in turn
+   * adds &quot;Outer$I1&quot; to the CP, which requires adding that class to the InnerClass attribute.
+   * (For local / anonymous classes this would not be the case, since the &quot;outer class&quot; attribute
+   *  would be empty. However, no class (other than the enclosing class) can refer to them, as they
+   *  have no name.)
+   *
+   * In the current implementation of the Scala compiler, when adding a class to the InnerClass
+   * attribute, all of its enclosing classes will be added as well. Javac seems to do the same,
+   * see (*).
+   *
+   *
+   * Note 2: If a class name is mentioned only in a CONSTANT_Utf8_info, but not in a
+   * CONSTANT_Class_info, the JVMS does not require an entry in the InnerClass attribute. However,
+   * the Java compiler seems to add such classes anyway. For example, when using an annotation, the
+   * annotation class is stored as a CONSTANT_Utf8_info in the CP:
+   *
+   *   @O.Ann void foo() { }
+   *
+   * adds &quot;const #13 = Asciz LO$Ann;;&quot; in the constant pool. The &quot;RuntimeInvisibleAnnotations&quot;
+   * attribute refers to that constant pool entry. Even though there is no other reference to
+   * `O.Ann`, the java compiler adds an entry for that class to the InnerClass attribute (which
+   * entails adding a CONSTANT_Class_info for the class).
+   *
+   *
+   *
+   * EnclosingMethod
+   * ---------------
+   *
+   * JVMS 4.7.7: the attribute must be present &quot;if and only if it represents a local class
+   * or an anonymous class&quot; (i.e. not for member classes).
+   *
+   * The attribute is mis-named, it should be called &quot;EnclosingClass&quot;. It has to be defined for all
+   * local and anonymous classes, no matter if there is an enclosing method or not. Accordingly, the
+   * &quot;class&quot; field (see below) must be always defined, while the &quot;method&quot; field may be null.
+   *
+   * NOTE: When a EnclosingMethod attribute is requried (local and anonymous classes), the &quot;outer&quot;
+   * field in the InnerClass table must be null.
+   *
+   * Fields:
+   *  - class:  the enclosing class
+   *  - method: the enclosing method (or constructor). Null if the class is not enclosed by a
+   *            method, i.e. for
+   *             - local or anonymous classes defined in (static or non-static) initializer blocks
+   *             - anonymous classes defined in initializer blocks or field initializers
+   *
+   *            Note: the field is required for anonymous classes defined within local variable
+   *            initializers (within a method), Java example below (**).
+   *
+   *            For local and anonymous classes in initializer blocks or field initializers, and
+   *            class-level anonymous classes, the scala compiler sets the &quot;method&quot; field to null.
+   *
+   *
+   * (*)
+   *   public class Test {
+   *     void foo() {
+   *       class Foo1 {
+   *         // constructor statement block
+   *         {
+   *           class Foo2 {
+   *             class Foo3 { }
+   *           }
+   *         }
+   *       }
+   *     }
+   *   }
+   *
+   * The class file Test$1Foo1$1Foo2$Foo3 has no reference to the class Test$1Foo1, however it
+   * still contains an InnerClass attribute for Test$1Foo1.
+   * Maybe this is just because the Java compiler follows the JVMS comment (&quot;InnerClasses
+   * information for each enclosing class&quot;).
+   *
+   *
+   * (**)
+   *   void foo() {
+   *     // anonymous class defined in local variable initializer expression.
+   *     Runnable x = true ? (new Runnable() {
+   *       public void run() { return; }
+   *     }) : null;
+   *   }
+   *
+   * The EnclosingMethod attribute of the anonymous class mentions &quot;foo&quot; in the &quot;method&quot; field.
+   *
+   *
+   * Java Compatibility
+   * ------------------
+   *
+   * In the InnerClass entry for classes in top-level modules, the &quot;outer class&quot; is emitted as the
+   * mirror class (or the existing companion class), i.e. C1 is nested in T (not T$).
+   * For classes nested in a nested object, the &quot;outer class&quot; is the module class: C2 is nested in T$N$
+   * object T {
+   *   class C1
+   *   object N { class C2 }
+   * }
+   *
+   * Reason: java compat. It's a &quot;best effort&quot; &quot;solution&quot;. If you want to use &quot;C1&quot; from Java, you
+   * can write &quot;T.C1&quot;, and the Java compiler will translate that to the classfile T$C1.
+   *
+   * If we would emit the &quot;outer class&quot; of C1 as &quot;T$&quot;, then in Java you'd need to write &quot;T$.C1&quot;
+   * because the java compiler looks at the InnerClass attribute to find if an inner class exists.
+   * However, the Java compiler would then translate the '.' to '$' and you'd get the class name
+   * &quot;T$$C1&quot;. This class file obviously does not exist.
+   *
+   * Directly using the encoded class name &quot;T$C1&quot; in Java does not work: since the classfile
+   * describes a nested class, the Java compiler hides it from the classpath and will report
+   * &quot;cannot find symbol T$C1&quot;. This means that the class T.N.C2 cannot be referenced from a
+   * Java source file in any way.
+   *
+   *
+   * STATIC flag
+   * -----------
+   *
+   * Java: static member classes have the static flag in the InnerClass attribute, for example B in
+   *   class A { static class B { } }
+   *
+   * The spec is not very clear about when the static flag should be emitted. It says: &quot;Marked or
+   * implicitly static in source.&quot;
+   *
+   * The presence of the static flag does NOT coincide with the absence of an &quot;outer&quot; field in the
+   * class. The java compiler never puts the static flag for local classes, even if they don't have
+   * an outer pointer:
+   *
+   *   class A {
+   *     void f()        { class B {} }
+   *     static void g() { calss C {} }
+   *   }
+   *
+   * B has an outer pointer, C doesn't. Both B and C are NOT marked static in the InnerClass table.
+   *
+   * It seems sane to follow the same principle in the Scala compiler. So:
+   *
+   *   package p
+   *   object O1 {
+   *     class C1 // static inner class
+   *     object O2 { // static inner module
+   *       def f = {
+   *         class C2 { // non-static inner class, even though there's no outer pointer
+   *           class C3 // non-static, has an outer pointer
+   *         }
+   *       }
+   *     }
+   *   }
+   *
+   * Mirror Classes
+   * --------------
+   *
+   * TODO: innerclass attributes on mirror class, bean info class
+   */</span>
+
+  <span class="comment">/**
+   * A ClassBType represents a class or interface type. The necessary information to build a
+   * ClassBType is extracted from compiler symbols and types, see BTypesFromSymbols.
+   *
+   * The `offset` and `length` fields are used to represent the internal name of the class. They
+   * are indices into some character array. The internal name can be obtained through the method
+   * `internalNameString`, which is abstract in this component. Name creation is assumed to be
+   * hash-consed, so if two ClassBTypes have the same internal name, they NEED to have the same
+   * `offset` and `length`.
+   *
+   * The actual implementation in subclass BTypesFromSymbols uses the global `chrs` array from the
+   * name table. This representation is efficient because the JVM class name is obtained through
+   * `classSymbol.javaBinaryName`. This already adds the necessary string to the `chrs` array,
+   * so it makes sense to reuse the same name table in the backend.
+   *
+   * ClassBType is not a case class because we want a custom equals method, and because the
+   * extractor extracts the internalName, which is what you typically need.
+   */</span>
+  final class <a title="class ClassBType extends AnyRef with BTypes.this.RefBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType">ClassBType</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType" class="delimiter">(</a>val <a title="Int" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.offset">offset</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a>, val <a title="Int" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.length">length</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.jvm;BTypes;RefBType" title="BTypes.this.RefBType">RefBType</a> <span class="delimiter">{</span>
+    <span class="comment">/**
+     * Write-once variable allows initializing a cyclic graph of infos. This is required for
+     * nested classes. Example: for the definition `class A { class B }` we have
+     *
+     *   B.info.nestedInfo.outerClass == A
+     *   A.info.memberClasses contains B
+     */</span>
+    private var <a title="BTypes.this.ClassInfo" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType._info_=">_info</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassInfo.readResolve" title="BTypes.this.ClassInfo">ClassInfo</a> = null
+
+    def <a title="=&gt; BTypes.this.ClassInfo" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.info">info</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassInfo.readResolve" title="BTypes.this.ClassInfo">ClassInfo</a> = <span class="delimiter">{</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType._info_=" title="=&gt; BTypes.this.ClassInfo">_info</a> <span title="(x$1: Any)Boolean">!=</span> null, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;ClassBType.info not yet assigned: &quot;)">ClassBType.info not yet assigned: $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="String(&quot;&quot;)" class="string">&quot;</a><span class="delimiter">)</span>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType._info_=" title="=&gt; BTypes.this.ClassInfo">_info</a>
+    <span class="delimiter">}</span>
+
+    def <a title="(i: BTypes.this.ClassInfo)Unit" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.info_=">info_=</a><span class="delimiter">(</span><a title="BTypes.this.ClassInfo" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.info_=.i">i</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassInfo.readResolve" title="BTypes.this.ClassInfo">ClassInfo</a><span class="delimiter">)</span>: <a href="../../../../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <span class="delimiter">{</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType._info_=" title="=&gt; BTypes.this.ClassInfo">_info</a> <span title="(x$1: Any)Boolean">==</span> null, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;Cannot set ClassBType.info multiple times: &quot;)">Cannot set ClassBType.info multiple times: $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="String(&quot;&quot;)" class="string">&quot;</a><span class="delimiter">)</span>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType._info_=" title="(x$1: BTypes.this.ClassInfo)Unit">_info</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info_=.i" title="BTypes.this.ClassInfo">i</a>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency" title="()Unit">checkInfoConsistency</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="../../../../collection/mutable/MapLike.scala.html#scala.collection.mutable;MapLike.update" title="(key: String, value: BTypes.this.ClassBType)Unit">classBTypeFromInternalNameMap</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName" title="=&gt; String">internalName</a><span class="delimiter">)</span> = this
+
+    private def <a title="()Unit" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency">checkInfoConsistency</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../../../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <span class="delimiter">{</span>
+      <span class="comment">// we assert some properties. however, some of the linked ClassBType (members, superClass,</span>
+      <span class="comment">// interfaces) may not yet have an `_info` (initialization of cyclic structures). so we do a</span>
+      <span class="comment">// best-effort verification.</span>
+      def <a title="(c: BTypes.this.ClassBType)(p: BTypes.this.ClassBType =&gt; Boolean)Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit">ifInit</a><span class="delimiter">(</span><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit.c">c</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="BTypes.this.ClassBType =&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit.p">p</a>: ClassBType =&gt; Boolean<span class="delimiter">)</span>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit.c" title="BTypes.this.ClassBType">c</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType._info_=" title="=&gt; BTypes.this.ClassInfo">_info</a> <span title="(x$1: Any)Boolean">==</span> null <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <a href="../../../../Function1.scala.html#scala;Function1.apply" title="(v1: BTypes.this.ClassBType)Boolean">p</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit.c" title="BTypes.this.ClassBType">c</a><span class="delimiter">)</span>
+
+      def <a title="(t: BTypes.this.ClassBType)Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.isJLO">isJLO</a><span class="delimiter">(</span><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.isJLO.t">t</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">)</span> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.isJLO.t" title="BTypes.this.ClassBType">t</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName" title="=&gt; String">internalName</a> <span title="(x$1: Any)Boolean">==</span> <span title="String(&quot;java/lang/Object&quot;)" class="string">&quot;java/lang/Object&quot;</span>
+
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType" title="BTypes.this.ClassBType.type">ClassBType</a>.<a href="../../../../collection/GenSetLike.scala.html#scala.collection;GenSetLike.apply" title="(elem: String)Boolean">isInternalPhantomType</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName" title="=&gt; String">internalName</a><span class="delimiter">)</span>, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;Cannot create ClassBType for phantom type &quot;)">Cannot create ClassBType for phantom type $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="String(&quot;&quot;)" class="string">&quot;</a><span class="delimiter">)</span>
+
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span>
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.superClass" title="=&gt; Option[BTypes.this.ClassBType]">superClass</a>.<a href="../../../../Option.scala.html#scala;Option.isEmpty" title="=&gt; Boolean">isEmpty</a><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.isJLO" title="(t: BTypes.this.ClassBType)Boolean">isJLO</a><span class="delimiter">(</span>this<span class="delimiter">)</span> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes.isCompilingPrimitive" title="=&gt; Boolean">isCompilingPrimitive</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType" title="BTypes.this.ClassBType.type">ClassBType</a>.<a href="../../../../collection/GenSetLike.scala.html#scala.collection;GenSetLike.apply" title="(elem: String)Boolean">hasNoSuper</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName" title="=&gt; String">internalName</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+        else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.isJLO" title="(t: BTypes.this.ClassBType)Boolean">isJLO</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.superClass" title="=&gt; Option[BTypes.this.ClassBType]">superClass</a>.<a href="../../../../Option.scala.html#scala;Option.get" title="=&gt; BTypes.this.ClassBType">get</a><span class="delimiter">)</span>
+        else <a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.isJLO" title="(t: BTypes.this.ClassBType)Boolean">isJLO</a><span class="delimiter">(</span>this<span class="delimiter">)</span> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit" title="(c: BTypes.this.ClassBType)(p: BTypes.this.ClassBType =&gt; Boolean)Boolean">ifInit</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.superClass" title="=&gt; Option[BTypes.this.ClassBType]">superClass</a>.<a href="../../../../Option.scala.html#scala;Option.get" title="=&gt; BTypes.this.ClassBType">get</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.$anonfun.x$1" title="BTypes.this.ClassBType">_</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a><span class="delimiter">)</span>,
+        <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;Invalid superClass in &quot;)">Invalid superClass in $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="String(&quot;: &quot;)">: $</a><span class="delimiter">{</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.superClass" title="=&gt; Option[BTypes.this.ClassBType]">superClass</a><span class="delimiter">}</span><span title="String(&quot;&quot;)" class="string">&quot;</span>
+      <span class="delimiter">)</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span>
+        <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.interfaces" title="=&gt; List[BTypes.this.ClassBType]">interfaces</a>.<a href="../../../../collection/LinearSeqOptimized.scala.html#scala.collection;LinearSeqOptimized.forall" title="(p: BTypes.this.ClassBType =&gt; Boolean)Boolean">forall</a><span class="delimiter">(</span><span title="BTypes.this.ClassBType">c</span> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit" title="(c: BTypes.this.ClassBType)(p: BTypes.this.ClassBType =&gt; Boolean)Boolean">ifInit</a><span class="delimiter">(</span><span title="BTypes.this.ClassBType">c</span><span class="delimiter">)</span><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.$anonfun.$anonfun.x$2" title="BTypes.this.ClassBType">_</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a><span class="delimiter">)</span><span class="delimiter">)</span>,
+        <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;Invalid interfaces in &quot;)">Invalid interfaces in $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="String(&quot;: &quot;)">: $</a><span class="delimiter">{</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.interfaces" title="=&gt; List[BTypes.this.ClassBType]">interfaces</a><span class="delimiter">}</span><span title="String(&quot;&quot;)" class="string">&quot;</span>
+      <span class="delimiter">)</span>
+
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.memberClasses" title="=&gt; List[BTypes.this.ClassBType]">memberClasses</a>.<a href="../../../../collection/LinearSeqOptimized.scala.html#scala.collection;LinearSeqOptimized.forall" title="(p: BTypes.this.ClassBType =&gt; Boolean)Boolean">forall</a><span class="delimiter">(</span><span title="BTypes.this.ClassBType">c</span> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.ifInit" title="(c: BTypes.this.ClassBType)(p: BTypes.this.ClassBType =&gt; Boolean)Boolean">ifInit</a><span class="delimiter">(</span><span title="BTypes.this.ClassBType">c</span><span class="delimiter">)</span><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.checkInfoConsistency.$anonfun.$anonfun.x$3" title="BTypes.this.ClassBType">_</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isNestedClass" title="=&gt; Boolean">isNestedClass</a><span class="delimiter">)</span><span class="delimiter">)</span>, <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.memberClasses" title="=&gt; List[BTypes.this.ClassBType]">memberClasses</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * The internal name of a class is the string returned by java.lang.Class.getName, with all '.'
+     * replaced by '/'. For example &quot;java/lang/String&quot;.
+     */</span>
+    def <a title="=&gt; String" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName">internalName</a>: <span title="String">String</span> = <a href="#scala.tools.nsc.backend.jvm;BTypes.internalNameString" title="(offset: Int, lenght: Int)String">internalNameString</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.offset" title="=&gt; Int">offset</a>, <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.length" title="=&gt; Int">length</a><span class="delimiter">)</span>
+
+    <span class="comment">/**
+     * @return The class name without the package prefix
+     */</span>
+    def <a title="=&gt; String" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.simpleName">simpleName</a>: <span title="String">String</span> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName" title="=&gt; String">internalName</a>.<span title="(x$1: String)Array[String]">split</span><a href="../../../../Predef.scala.html#scala.Predef.refArrayOps" title="(xs: Array[String])scala.collection.mutable.ArrayOps[String]" class="delimiter">(</a><span title="String(&quot;/&quot;)" class="string">&quot;/&quot;</span><span class="delimiter">)</span>.<a href="../../../../collection/IndexedSeqOptimized.scala.html#scala.collection;IndexedSeqOptimized.last" title="=&gt; String">last</a>
+
+    def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface">isInterface</a> = <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.flags" title="=&gt; Int">flags</a> <a href="../../../../Int.scala.html#scala;Int.&(1409840560)" title="(x: Int)Int">&amp;</a> asm.Opcodes.<span title="Int(512)">ACC_INTERFACE</span><span class="delimiter">)</span> <a href="../../../../Int.scala.html#scala;Int.!=(5f58a84eb3)" title="(x: Int)Boolean">!=</a> <span title="Int(0)" class="int">0</span>
+
+    def <a title="=&gt; List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.superClassesTransitive">superClassesTransitive</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[BTypes.this.ClassBType]">List</a><span class="delimiter">[</span>ClassBType<span class="delimiter">]</span> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.superClass" title="=&gt; Option[BTypes.this.ClassBType]">superClass</a> match <span class="delimiter">{</span>
+      case <a href="../../../../Option.scala.html#scala.None" title="None.type">None</a> =&gt; <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      case Some<span class="delimiter">(</span><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.superClassesTransitive.sc">sc</a><span class="delimiter">)</span> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.superClassesTransitive.sc" title="BTypes.this.ClassBType">sc</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: BTypes.this.ClassBType)List[BTypes.this.ClassBType]">::</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.superClassesTransitive.sc" title="BTypes.this.ClassBType">sc</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.superClassesTransitive" title="=&gt; List[BTypes.this.ClassBType]">superClassesTransitive</a>
+    <span class="delimiter">}</span>
+
+    def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.isNestedClass">isNestedClass</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.nestedInfo" title="=&gt; Option[BTypes.this.NestedInfo]">nestedInfo</a>.<a href="../../../../Option.scala.html#scala;Option.isDefined" title="=&gt; Boolean">isDefined</a>
+
+    def <a title="=&gt; List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.enclosingNestedClassesChain">enclosingNestedClassesChain</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[BTypes.this.ClassBType]">List</a><span class="delimiter">[</span>ClassBType<span class="delimiter">]</span> =
+      if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isNestedClass" title="=&gt; Boolean">isNestedClass</a><span class="delimiter">)</span> this <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: BTypes.this.ClassBType)List[BTypes.this.ClassBType]">::</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.nestedInfo" title="=&gt; Option[BTypes.this.NestedInfo]">nestedInfo</a>.<a href="../../../../Option.scala.html#scala;Option.get" title="=&gt; BTypes.this.NestedInfo">get</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;NestedInfo.enclosingClass" title="=&gt; BTypes.this.ClassBType">enclosingClass</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.enclosingNestedClassesChain" title="=&gt; List[BTypes.this.ClassBType]">enclosingNestedClassesChain</a>
+      else <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+    def <a title="=&gt; Option[BTypes.this.InnerClassEntry]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry">innerClassAttributeEntry</a>: <a href="../../../../Option.scala.html#scala;Option" title="Option[BTypes.this.InnerClassEntry]">Option</a><span class="delimiter">[</span>InnerClassEntry<span class="delimiter">]</span> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.nestedInfo" title="=&gt; Option[BTypes.this.NestedInfo]">nestedInfo</a> <a href="../../../../Option.scala.html#scala;Option.map" title="(f: BTypes.this.NestedInfo =&gt; BTypes.this.InnerClassEntry)Option[BTypes.this.InnerClassEntry]">map</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry.$anonfun.x0$1" title="BTypes.this.InnerClassEntry" class="delimiter">{</a>
+      case NestedInfo<span class="delimiter">(</span>_, <a title="Option[String]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry.$anonfun.outerName">outerName</a>, <a title="Option[String]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry.$anonfun.innerName">innerName</a>, <a title="Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry.$anonfun.isStaticNestedClass">isStaticNestedClass</a><span class="delimiter">)</span> =&gt;
+        <a href="#scala.tools.nsc.backend.jvm;BTypes.InnerClassEntry.readResolve" title="(name: String, outerName: String, innerName: String, flags: Int)BTypes.this.InnerClassEntry">InnerClassEntry</a><span class="delimiter">(</span>
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName" title="=&gt; String">internalName</a>,
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry.$anonfun.outerName" title="Option[String]">outerName</a>.<a href="../../../../Option.scala.html#scala;Option.orNull" title="(implicit ev: &lt;:&lt;[Null,String])String">orNull</a>,
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry.$anonfun.innerName" title="Option[String]">innerName</a>.<a href="../../../../Option.scala.html#scala;Option.orNull" title="(implicit ev: &lt;:&lt;[Null,String])String">orNull</a>,
+          <a href="GenBCode.scala.html#scala.tools.nsc.backend.jvm.GenBCode" title="scala.tools.nsc.backend.jvm.GenBCode.type">GenBCode</a>.<a href="GenBCode.scala.html#scala.tools.nsc.backend.jvm.GenBCode.mkFlags" title="(args: Int*)Int">mkFlags</a><span class="delimiter">(</span>
+            <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.flags" title="=&gt; Int">flags</a>,
+            if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.innerClassAttributeEntry.$anonfun.isStaticNestedClass" title="Boolean">isStaticNestedClass</a><span class="delimiter">)</span> asm.Opcodes.<span title="Int(8)">ACC_STATIC</span> else <span title="Int(0)" class="int">0</span>
+          <span class="delimiter">)</span> <a href="../../../../Int.scala.html#scala;Int.&(1409840560)" title="(x: Int)Int">&amp;</a> <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType" title="BTypes.this.ClassBType.type">ClassBType</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType.INNER_CLASSES_FLAGS" title="=&gt; Int">INNER_CLASSES_FLAGS</a>
+        <span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    def <a title="(other: BTypes.this.ClassBType)Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf">isSubtypeOf</a><span class="delimiter">(</span><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.other">other</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">)</span>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span>this <span title="(x$1: Any)Boolean">==</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.other" title="BTypes.this.ClassBType">other</a><span class="delimiter">)</span> return true
+
+      if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.other" title="BTypes.this.ClassBType">other</a> <span title="(x$1: Any)Boolean">==</span> <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.ObjectReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">ObjectReference</a><span class="delimiter">)</span> return true <span class="comment">// interfaces conform to Object</span>
+        if <span class="delimiter">(</span><a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.other" title="BTypes.this.ClassBType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a><span class="delimiter">)</span> return false <span class="comment">// this is an interface, the other is some class other than object. interfaces cannot extend classes, so the result is false.</span>
+        <span class="comment">// else: this and other are both interfaces. continue to (*)</span>
+      <span class="delimiter">}</span> else <span class="delimiter">{</span>
+        val <a title="Option[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.sc">sc</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.superClass" title="=&gt; Option[BTypes.this.ClassBType]">superClass</a>
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.sc" title="Option[BTypes.this.ClassBType]">sc</a>.<a href="../../../../Option.scala.html#scala;Option.isDefined" title="=&gt; Boolean">isDefined</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.sc" title="Option[BTypes.this.ClassBType]">sc</a>.<a href="../../../../Option.scala.html#scala;Option.get" title="=&gt; BTypes.this.ClassBType">get</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.other" title="BTypes.this.ClassBType">other</a><span class="delimiter">)</span><span class="delimiter">)</span> return true <span class="comment">// the superclass of this class conforms to other</span>
+        if <span class="delimiter">(</span><a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.other" title="BTypes.this.ClassBType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a><span class="delimiter">)</span> return false <span class="comment">// this and other are both classes, and the superclass of this does not conform</span>
+        <span class="comment">// else: this is a class, the other is an interface. continue to (*)</span>
+      <span class="delimiter">}</span>
+
+      <span class="comment">// (*) check if some interface of this class conforms to other.</span>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.info" title="=&gt; BTypes.this.ClassInfo">info</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassInfo.interfaces" title="=&gt; List[BTypes.this.ClassBType]">interfaces</a>.<a href="../../../../collection/LinearSeqOptimized.scala.html#scala.collection;LinearSeqOptimized.exists" title="(p: BTypes.this.ClassBType =&gt; Boolean)Boolean">exists</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.$anonfun.x$6" title="BTypes.this.ClassBType">_</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf.other" title="BTypes.this.ClassBType">other</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Finding the least upper bound in agreement with the bytecode verifier
+     * Background:
+     *   http://gallium.inria.fr/~xleroy/publi/bytecode-verification-JAR.pdf
+     *   http://comments.gmane.org/gmane.comp.java.vm.languages/2293
+     *   https://issues.scala-lang.org/browse/SI-3872
+     */</span>
+    def <a title="(other: BTypes.this.ClassBType)BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB">jvmWiseLUB</a><span class="delimiter">(</span><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other">other</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">)</span>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> = <span class="delimiter">{</span>
+      def <a title="(c: BTypes.this.ClassBType)Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.isNotNullOrNothing">isNotNullOrNothing</a><span class="delimiter">(</span><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.isNotNullOrNothing.c">c</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">)</span> = <a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.isNotNullOrNothing.c" title="BTypes.this.ClassBType">c</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNullType" title="=&gt; Boolean">isNullType</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.isNotNullOrNothing.c" title="BTypes.this.ClassBType">c</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;BType.isNothingType" title="=&gt; Boolean">isNothingType</a>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.isNotNullOrNothing" title="(c: BTypes.this.ClassBType)Boolean">isNotNullOrNothing</a><span class="delimiter">(</span>this<span class="delimiter">)</span> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.isNotNullOrNothing" title="(c: BTypes.this.ClassBType)Boolean">isNotNullOrNothing</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a><span class="delimiter">)</span>, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;jvmWiseLub for null or nothing: &quot;)">jvmWiseLub for null or nothing: $</span>this<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="String(&quot; - &quot;)"> - $</a><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span>
+
+      val <a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.res">res</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> = <a href="../../../../Tuple2.scala.html#scala;Tuple2" title="(_1: Boolean, _2: Boolean)(Boolean, Boolean)" class="delimiter">(</a>this.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a>, <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isInterface" title="=&gt; Boolean">isInterface</a><span class="delimiter">)</span> match <span class="delimiter">{</span>
+        case <span class="delimiter">(</span>true, true<span class="delimiter">)</span> =&gt;
+          <span class="comment">// exercised by test/files/run/t4761.scala</span>
+          if      <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span>this<span class="delimiter">)</span><span class="delimiter">)</span> this
+          else if <span class="delimiter">(</span>this.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a>
+          else <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.ObjectReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">ObjectReference</a>
+
+        case <span class="delimiter">(</span>true, false<span class="delimiter">)</span> =&gt;
+          if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span>this<span class="delimiter">)</span><span class="delimiter">)</span> this else <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.ObjectReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">ObjectReference</a>
+
+        case <span class="delimiter">(</span>false, true<span class="delimiter">)</span> =&gt;
+          if <span class="delimiter">(</span>this.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.isSubtypeOf" title="(other: BTypes.this.ClassBType)Boolean">isSubtypeOf</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a> else <a href="CoreBTypes.scala.html#scala.tools.nsc.backend.jvm;CoreBTypesProxyGlobalIndependent.ObjectReference" title="=&gt; BTypes.this.coreBTypes.bTypes.ClassBType">ObjectReference</a>
+
+        case _ =&gt;
+          <span class="comment">// TODO @lry I don't really understand the reasoning here.</span>
+          <span class="comment">// Both this and other are classes. The code takes (transitively) all superclasses and</span>
+          <span class="comment">// finds the first common one.</span>
+          <span class="comment">// MOST LIKELY the answer can be found here, see the comments and links by Miguel:</span>
+          <span class="comment">//  - https://issues.scala-lang.org/browse/SI-3872</span>
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix" title="(as: List[BTypes.this.ClassBType], bs: List[BTypes.this.ClassBType])BTypes.this.ClassBType">firstCommonSuffix</a><span class="delimiter">(</span>this <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: BTypes.this.ClassBType)List[BTypes.this.ClassBType]">::</a> this.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.superClassesTransitive" title="=&gt; List[BTypes.this.ClassBType]">superClassesTransitive</a>, <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: BTypes.this.ClassBType)List[BTypes.this.ClassBType]">::</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.other" title="BTypes.this.ClassBType">other</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.superClassesTransitive" title="=&gt; List[BTypes.this.ClassBType]">superClassesTransitive</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.isNotNullOrNothing" title="(c: BTypes.this.ClassBType)Boolean">isNotNullOrNothing</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.res" title="BTypes.this.ClassBType">res</a><span class="delimiter">)</span>, <a href="../../../../StringContext.scala.html#scala;StringContext.s" title="(args: Any*)String">s</a>&quot;<span title="String(&quot;jvmWiseLub computed: &quot;)">jvmWiseLub computed: $</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.res" title="BTypes.this.ClassBType">res</a><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.jvmWiseLUB.res" title="BTypes.this.ClassBType">res</a>
+    <span class="delimiter">}</span>
+
+    private def <a title="(as: List[BTypes.this.ClassBType], bs: List[BTypes.this.ClassBType])BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix">firstCommonSuffix</a><span class="delimiter">(</span><a title="List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.as">as</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[BTypes.this.ClassBType]">List</a><span class="delimiter">[</span>ClassBType<span class="delimiter">]</span>, <a title="List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.bs">bs</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[BTypes.this.ClassBType]">List</a><span class="delimiter">[</span>ClassBType<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> = <span class="delimiter">{</span>
+      var <a title="List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainA">chainA</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.as" title="List[BTypes.this.ClassBType]">as</a>
+      var <a title="List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainB">chainB</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.bs" title="List[BTypes.this.ClassBType]">bs</a>
+      var <a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.fcs">fcs</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> = null
+      do <span class="delimiter">{</span>
+        if      <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainB" title="List[BTypes.this.ClassBType]">chainB</a> <a href="../../../../collection/LinearSeqOptimized.scala.html#scala.collection;LinearSeqOptimized.contains" title="(elem: BTypes.this.ClassBType)Boolean">contains</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainA" title="List[BTypes.this.ClassBType]">chainA</a>.<a href="../../../../collection/IterableLike.scala.html#scala.collection;IterableLike.head" title="=&gt; BTypes.this.ClassBType">head</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.fcs" title="BTypes.this.ClassBType">fcs</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainA" title="List[BTypes.this.ClassBType]">chainA</a>.<a href="../../../../collection/IterableLike.scala.html#scala.collection;IterableLike.head" title="=&gt; BTypes.this.ClassBType">head</a>
+        else if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainA" title="List[BTypes.this.ClassBType]">chainA</a> <a href="../../../../collection/LinearSeqOptimized.scala.html#scala.collection;LinearSeqOptimized.contains" title="(elem: BTypes.this.ClassBType)Boolean">contains</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainB" title="List[BTypes.this.ClassBType]">chainB</a>.<a href="../../../../collection/IterableLike.scala.html#scala.collection;IterableLike.head" title="=&gt; BTypes.this.ClassBType">head</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.fcs" title="BTypes.this.ClassBType">fcs</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainB" title="List[BTypes.this.ClassBType]">chainB</a>.<a href="../../../../collection/IterableLike.scala.html#scala.collection;IterableLike.head" title="=&gt; BTypes.this.ClassBType">head</a>
+        else <span class="delimiter">{</span>
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainA" title="List[BTypes.this.ClassBType]">chainA</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainA" title="List[BTypes.this.ClassBType]">chainA</a>.<a href="../../../../collection/TraversableLike.scala.html#scala.collection;TraversableLike.tail" title="=&gt; List[BTypes.this.ClassBType]">tail</a>
+          <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainB" title="List[BTypes.this.ClassBType]">chainB</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.chainB" title="List[BTypes.this.ClassBType]">chainB</a>.<a href="../../../../collection/TraversableLike.scala.html#scala.collection;TraversableLike.tail" title="=&gt; List[BTypes.this.ClassBType]">tail</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span> while <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.fcs" title="BTypes.this.ClassBType">fcs</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.firstCommonSuffix.fcs" title="BTypes.this.ClassBType">fcs</a>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Custom equals / hashCode: we only compare the name (offset / length)
+     */</span>
+    override def <a title="(o: Any)Boolean" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.equals">equals</a><span class="delimiter">(</span><a title="Any" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.equals.o">o</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = <span class="delimiter">(</span>this <span title="(x$1: AnyRef)Boolean">eq</span> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.equals.o" title="Any">o</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Object" class="delimiter">[</span><span title="Object">Object</span><span class="delimiter">]</span><span class="delimiter">)</span> <a href="../../../../Boolean.scala.html#scala;Boolean.||" title="(x: Boolean)Boolean">||</a> <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.equals.o" title="Any">o</a> match <span class="delimiter">{</span>
+      case <a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.equals.c">c</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.equals.c" title="BTypes.this.ClassBType">c</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.offset" title="=&gt; Int">offset</a> <a href="../../../../Int.scala.html#scala;Int.==(5f58a84eb3)" title="(x: Int)Boolean">==</a> this.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.offset" title="=&gt; Int">offset</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.equals.c" title="BTypes.this.ClassBType">c</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.length" title="=&gt; Int">length</a> <a href="../../../../Int.scala.html#scala;Int.==(5f58a84eb3)" title="(x: Int)Boolean">==</a> this.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.length" title="=&gt; Int">length</a>
+      case _ =&gt; false
+    <span class="delimiter">}</span><span class="delimiter">)</span>
+
+    override def <a title="()Int" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.hashCode">hashCode</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = <span class="delimiter">{</span>
+      import scala.runtime.Statics
+      var <a title="Int" id="scala.tools.nsc.backend.jvm;BTypes;ClassBType.hashCode.acc">acc</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = -<span title="Int(-889275714)" class="int">889275714</span>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.hashCode.acc" title="Int">acc</a> = <a href="../../../../runtime/Statics.java.html#scala.runtime.Statics" title="scala.runtime.Statics.type">Statics</a>.<a href="../../../../runtime/Statics.java.html#scala.runtime.Statics.mix" title="(hash: Int, data: Int)Int">mix</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.hashCode.acc" title="Int">acc</a>, <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.offset" title="=&gt; Int">offset</a><span class="delimiter">)</span>
+      <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.hashCode.acc" title="Int">acc</a> = <a href="../../../../runtime/Statics.java.html#scala.runtime.Statics" title="scala.runtime.Statics.type">Statics</a>.<a href="../../../../runtime/Statics.java.html#scala.runtime.Statics.mix" title="(hash: Int, data: Int)Int">mix</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.hashCode.acc" title="Int">acc</a>, <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.length" title="=&gt; Int">length</a><span class="delimiter">)</span>
+      <a href="../../../../runtime/Statics.java.html#scala.runtime.Statics" title="scala.runtime.Statics.type">Statics</a>.<a href="../../../../runtime/Statics.java.html#scala.runtime.Statics.finalizeHash" title="(hash: Int, length: Int)Int">finalizeHash</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.hashCode.acc" title="Int">acc</a>, <span title="Int(2)" class="int">2</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  object <a title="BTypes.this.ClassBType.type" id="scala.tools.nsc.backend.jvm;BTypes.ClassBType">ClassBType</a> <a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType" title="BTypes.this.ClassBType.type" class="delimiter">{</a>
+    <span class="comment">/**
+     * Pattern matching on a ClassBType extracts the `internalName` of the class.
+     */</span>
+    def <a title="(c: BTypes.this.ClassBType)Option[String]" id="scala.tools.nsc.backend.jvm;BTypes.ClassBType.unapply">unapply</a><span class="delimiter">(</span><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes.ClassBType.unapply.c">c</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a><span class="delimiter">)</span>: <a href="../../../../Option.scala.html#scala;Option" title="Option[String]">Option</a><span class="delimiter">[</span>String<span class="delimiter">]</span> =
+      if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType.unapply.c" title="BTypes.this.ClassBType">c</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span> <a href="../../../../Option.scala.html#scala.None" title="None.type">None</a>
+      else <a href="../../../../Option.scala.html#scala;Some" title="(x: String)Some[String]">Some</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.jvm;BTypes.ClassBType.unapply.c" title="BTypes.this.ClassBType">c</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType.internalName" title="=&gt; String">internalName</a><span class="delimiter">)</span>
+
+    <span class="comment">/**
+     * Valid flags for InnerClass attribute entry.
+     * See http://docs.oracle.com/javase/specs/jvms/se8/html/jvms-4.html#jvms-4.7.6
+     */</span>
+    private val INNER_CLASSES_FLAGS = <span class="delimiter">{</span>
+      asm.Opcodes.ACC_PUBLIC   | asm.Opcodes.ACC_PRIVATE   | asm.Opcodes.ACC_PROTECTED  |
+      asm.Opcodes.ACC_STATIC   | asm.Opcodes.ACC_FINAL     | asm.Opcodes.ACC_INTERFACE  |
+      asm.Opcodes.ACC_ABSTRACT | asm.Opcodes.ACC_SYNTHETIC | asm.Opcodes.ACC_ANNOTATION <a title="Int" id="scala.tools.nsc.backend.jvm;BTypes.ClassBType.INNER_CLASSES_FLAGS">|</a>
+      asm.Opcodes.ACC_ENUM
+    <span class="delimiter">}</span>
+
+    <span class="comment">// Primitive classes have no super class. A ClassBType for those is only created when</span>
+    <span class="comment">// they are actually being compiled (e.g., when compiling scala/Boolean.scala).</span>
+    private val <a title="scala.collection.immutable.Set[String]" id="scala.tools.nsc.backend.jvm;BTypes.ClassBType.hasNoSuper">hasNoSuper</a> = <a href="../../../../collection/generic/GenericCompanion.scala.html#scala.collection.generic;GenericCompanion.apply" title="(elems: String*)scala.collection.immutable.Set[String]">Set</a><span class="delimiter">(</span>
+      <span title="String(&quot;scala/Unit&quot;)" class="string">&quot;scala/Unit&quot;</span>,
+      <span title="String(&quot;scala/Boolean&quot;)" class="string">&quot;scala/Boolean&quot;</span>,
+      <span title="String(&quot;scala/Char&quot;)" class="string">&quot;scala/Char&quot;</span>,
+      <span title="String(&quot;scala/Byte&quot;)" class="string">&quot;scala/Byte&quot;</span>,
+      <span title="String(&quot;scala/Short&quot;)" class="string">&quot;scala/Short&quot;</span>,
+      <span title="String(&quot;scala/Int&quot;)" class="string">&quot;scala/Int&quot;</span>,
+      <span title="String(&quot;scala/Float&quot;)" class="string">&quot;scala/Float&quot;</span>,
+      <span title="String(&quot;scala/Long&quot;)" class="string">&quot;scala/Long&quot;</span>,
+      <span title="String(&quot;scala/Double&quot;)" class="string">&quot;scala/Double&quot;</span>
+    <span class="delimiter">)</span>
+
+    private val <a title="scala.collection.immutable.Set[String]" id="scala.tools.nsc.backend.jvm;BTypes.ClassBType.isInternalPhantomType">isInternalPhantomType</a> = <a href="../../../../collection/generic/GenericCompanion.scala.html#scala.collection.generic;GenericCompanion.apply" title="(elems: String*)scala.collection.immutable.Set[String]">Set</a><span class="delimiter">(</span>
+      <span title="String(&quot;scala/Null&quot;)" class="string">&quot;scala/Null&quot;</span>,
+      <span title="String(&quot;scala/Nothing&quot;)" class="string">&quot;scala/Nothing&quot;</span>
+    <span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * The type info for a class. Used for symboltable-independent subtype checks in the backend.
+   *
+   * @param superClass    The super class, not defined for class java/lang/Object.
+   * @param interfaces    All transitively implemented interfaces, except for those inherited
+   *                      through the superclass.
+   * @param flags         The java flags, obtained through `javaFlags`. Used also to derive
+   *                      the flags for InnerClass entries.
+   * @param memberClasses Classes nested in this class. Those need to be added to the
+   *                      InnerClass table, see the InnerClass spec summary above.
+   * @param nestedInfo    If this describes a nested class, information for the InnerClass table.
+   */</span>
+  case class <a title="class ClassInfo extends AnyRef with Product with Serializable" id="scala.tools.nsc.backend.jvm;BTypes.ClassInfo.readResolve">ClassInfo</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Option[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassInfo.superClass">superClass</a>: <a href="../../../../Option.scala.html#scala;Option" title="Option[BTypes.this.ClassBType]">Option</a><span class="delimiter">[</span>ClassBType<span class="delimiter">]</span>, <a title="List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassInfo.interfaces">interfaces</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[BTypes.this.ClassBType]">List</a><span class="delimiter">[</span>ClassBType<span class="delimiter">]</span>, <a title="Int" id="scala.tools.nsc.backend.jvm;BTypes;ClassInfo.flags">flags</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a>,
+                       <a title="List[BTypes.this.ClassBType]" id="scala.tools.nsc.backend.jvm;BTypes;ClassInfo.memberClasses">memberClasses</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[BTypes.this.ClassBType]">List</a><span class="delimiter">[</span>ClassBType<span class="delimiter">]</span>, <a title="Option[BTypes.this.NestedInfo]" id="scala.tools.nsc.backend.jvm;BTypes;ClassInfo.nestedInfo">nestedInfo</a>: <a href="../../../../Option.scala.html#scala;Option" title="Option[BTypes.this.NestedInfo]">Option</a><span class="delimiter">[</span>NestedInfo<span class="delimiter">]</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Information required to add a class to an InnerClass table.
+   * The spec summary above explains what information is required for the InnerClass entry.
+   *
+   * @param enclosingClass      The enclosing class, if it is also nested. When adding a class
+   *                            to the InnerClass table, enclosing nested classes are also added.
+   * @param outerName           The outerName field in the InnerClass entry, may be None.
+   * @param innerName           The innerName field, may be None.
+   * @param isStaticNestedClass True if this is a static nested class (not inner class) (*)
+   *
+   * (*) Note that the STATIC flag in ClassInfo.flags, obtained through javaFlags(classSym), is not
+   * correct for the InnerClass entry, see javaFlags. The static flag in the InnerClass describes
+   * a source-level propety: if the class is in a static context (does not have an outer pointer).
+   * This is checked when building the NestedInfo.
+   */</span>
+  case class <a title="class NestedInfo extends AnyRef with Product with Serializable" id="scala.tools.nsc.backend.jvm;BTypes.NestedInfo.readResolve">NestedInfo</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="BTypes.this.ClassBType" id="scala.tools.nsc.backend.jvm;BTypes;NestedInfo.enclosingClass">enclosingClass</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;ClassBType" title="BTypes.this.ClassBType">ClassBType</a>,
+                        <a title="Option[String]" id="scala.tools.nsc.backend.jvm;BTypes;NestedInfo.outerName">outerName</a>: <a href="../../../../Option.scala.html#scala;Option" title="Option[String]">Option</a><span class="delimiter">[</span>String<span class="delimiter">]</span>,
+                        <a title="Option[String]" id="scala.tools.nsc.backend.jvm;BTypes;NestedInfo.innerName">innerName</a>: <a href="../../../../Option.scala.html#scala;Option" title="Option[String]">Option</a><span class="delimiter">[</span>String<span class="delimiter">]</span>,
+                        <a title="Boolean" id="scala.tools.nsc.backend.jvm;BTypes;NestedInfo.isStaticNestedClass">isStaticNestedClass</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * This class holds the data for an entry in the InnerClass table. See the InnerClass summary
+   * above in this file.
+   *
+   * There's some overlap with the class NestedInfo, but it's not exactly the same and cleaner to
+   * keep separate.
+   * @param name      The internal name of the class.
+   * @param outerName The internal name of the outer class, may be null.
+   * @param innerName The simple name of the inner class, may be null.
+   * @param flags     The flags for this class in the InnerClass entry.
+   */</span>
+  case class <a title="class InnerClassEntry extends AnyRef with Product with Serializable" id="scala.tools.nsc.backend.jvm;BTypes.InnerClassEntry.readResolve">InnerClassEntry</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="String" id="scala.tools.nsc.backend.jvm;BTypes;InnerClassEntry.name">name</a>: <span title="String">String</span>, <a title="String" id="scala.tools.nsc.backend.jvm;BTypes;InnerClassEntry.outerName">outerName</a>: <span title="String">String</span>, <a title="String" id="scala.tools.nsc.backend.jvm;BTypes;InnerClassEntry.innerName">innerName</a>: <span title="String">String</span>, <a title="Int" id="scala.tools.nsc.backend.jvm;BTypes;InnerClassEntry.flags">flags</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a><span class="delimiter">)</span>
+
+  case class <a title="class ArrayBType extends AnyRef with BTypes.this.RefBType with Product with Serializable" id="scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve">ArrayBType</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;ArrayBType.componentType">componentType</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.jvm;BTypes;RefBType" title="BTypes.this.RefBType">RefBType</a> <span class="delimiter">{</span>
+    def <a title="=&gt; Int" id="scala.tools.nsc.backend.jvm;BTypes;ArrayBType.dimension">dimension</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ArrayBType.componentType" title="=&gt; BTypes.this.BType">componentType</a> match <span class="delimiter">{</span>
+      case <a title="BTypes.this.ArrayBType" id="scala.tools.nsc.backend.jvm;BTypes;ArrayBType.dimension.a">a</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a> =&gt; <span title="Int(1)" class="int">1</span> <a href="../../../../Int.scala.html#scala;Int.+(1409840560)" title="(x: Int)Int">+</a> <a href="#scala.tools.nsc.backend.jvm;BTypes;ArrayBType.dimension.a" title="BTypes.this.ArrayBType">a</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ArrayBType.dimension" title="=&gt; Int">dimension</a>
+      case _ =&gt; <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+
+    def <a title="=&gt; BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;ArrayBType.elementType">elementType</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a> = <a href="#scala.tools.nsc.backend.jvm;BTypes;ArrayBType.componentType" title="=&gt; BTypes.this.BType">componentType</a> match <span class="delimiter">{</span>
+      case <a title="BTypes.this.ArrayBType" id="scala.tools.nsc.backend.jvm;BTypes;ArrayBType.elementType.a">a</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.ArrayBType.readResolve" title="BTypes.this.ArrayBType">ArrayBType</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;ArrayBType.elementType.a" title="BTypes.this.ArrayBType">a</a>.<a href="#scala.tools.nsc.backend.jvm;BTypes;ArrayBType.elementType" title="=&gt; BTypes.this.BType">elementType</a>
+      case <a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;ArrayBType.elementType.t">t</a> =&gt; <a href="#scala.tools.nsc.backend.jvm;BTypes;ArrayBType.elementType.t" title="BTypes.this.BType">t</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  case class <a title="class MethodBType extends AnyRef with BTypes.this.BType with Product with Serializable" id="scala.tools.nsc.backend.jvm;BTypes.MethodBType.readResolve">MethodBType</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="List[BTypes.this.BType]" id="scala.tools.nsc.backend.jvm;BTypes;MethodBType.argumentTypes">argumentTypes</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[BTypes.this.BType]">List</a><span class="delimiter">[</span>BType<span class="delimiter">]</span>, <a title="BTypes.this.BType" id="scala.tools.nsc.backend.jvm;BTypes;MethodBType.returnType">returnType</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.jvm;BTypes;BType" title="BTypes.this.BType">BType</a>
+
+  <span class="comment">/* Some definitions that are required for the implementation of BTypes. They are abstract because
+   * initializing them requires information from types / symbols, which is not accessible here in
+   * BTypes.
+   *
+   * They are defs (not vals) because they are implemented using vars (see comment on CoreBTypes).
+   */</span>
+
+  <span class="comment">/**
+   * Just a named pair, used in CoreBTypes.asmBoxTo/asmUnboxTo.
+   */</span>
+  final case class <a title="class MethodNameAndType extends AnyRef with Product with Serializable" id="scala.tools.nsc.backend.jvm;BTypes.MethodNameAndType.readResolve">MethodNameAndType</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="String" id="scala.tools.nsc.backend.jvm;BTypes;MethodNameAndType.name">name</a>: <span title="String">String</span>, <a title="BTypes.this.MethodBType" id="scala.tools.nsc.backend.jvm;BTypes;MethodNameAndType.methodType">methodType</a>: <a href="#scala.tools.nsc.backend.jvm;BTypes.MethodBType.readResolve" title="BTypes.this.MethodBType">MethodBType</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * True if the current compilation unit is of a primitive class (scala.Boolean et al).
+   * Used only in assertions. Abstract here because its implementation depends on global.
+   */</span>
+  def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.jvm;BTypes.isCompilingPrimitive">isCompilingPrimitive</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

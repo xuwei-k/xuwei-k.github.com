@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>scala/sys/process/package.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */</span>
+
+<span class="comment">// Developer note:</span>
+<span class="comment">//   scala -J-Dscala.process.debug</span>
+<span class="comment">// for process debugging output.</span>
+<span class="comment">//</span>
+package scala.sys <span class="delimiter">{</span>
+  <span class="comment">/** This package handles the execution of external processes.  The contents of
+    * this package can be divided in three groups, according to their
+    * responsibilities:
+    *
+    *   - Indicating what to run and how to run it.
+    *   - Handling a process input and output.
+    *   - Running the process.
+    *
+    * For simple uses, the only group that matters is the first one. Running an
+    * external command can be as simple as `&quot;ls&quot;.!`, or as complex as building a
+    * pipeline of commands such as this:
+    *
+    * {{{
+    * import scala.sys.process._
+    * &quot;ls&quot; #| &quot;grep .scala&quot; #&amp;&amp; Seq(&quot;sh&quot;, &quot;-c&quot;, &quot;scalac *.scala&quot;) #|| &quot;echo nothing found&quot; lines
+    * }}}
+    *
+    * We describe below the general concepts and architecture of the package,
+    * and then take a closer look at each of the categories mentioned above.
+    *
+    * ==Concepts and Architecture==
+    *
+    * The underlying basis for the whole package is Java's `Process` and
+    * `ProcessBuilder` classes. While there's no need to use these Java classes,
+    * they impose boundaries on what is possible. One cannot, for instance,
+    * retrieve a ''process id'' for whatever is executing.
+    *
+    * When executing an external process, one can provide a command's name,
+    * arguments to it, the directory in which it will be executed and what
+    * environment variables will be set. For each executing process, one can
+    * feed its standard input through a `java.io.OutputStream`, and read from
+    * its standard output and standard error through a pair of
+    * `java.io.InputStream`. One can wait until a process finishes execution and
+    * then retrieve its return value, or one can kill an executing process.
+    * Everything else must be built on those features.
+    *
+    * This package provides a DSL for running and chaining such processes,
+    * mimicking Unix shells ability to pipe output from one process to the input
+    * of another, or control the execution of further processes based on the
+    * return status of the previous one.
+    *
+    * In addition to this DSL, this package also provides a few ways of
+    * controlling input and output of these processes, going from simple and
+    * easy to use to complex and flexible.
+    *
+    * When processes are composed, a new `ProcessBuilder` is created which, when
+    * run, will execute the `ProcessBuilder` instances it is composed of
+    * according to the manner of the composition. If piping one process to
+    * another, they'll be executed simultaneously, and each will be passed a
+    * `ProcessIO` that will copy the output of one to the input of the other.
+    *
+    * ==What to Run and How==
+    *
+    * The central component of the process execution DSL is the
+    * [[scala.sys.process.ProcessBuilder]] trait. It is `ProcessBuilder` that
+    * implements the process execution DSL, that creates the
+    * [[scala.sys.process.Process]] that will handle the execution, and return
+    * the results of such execution to the caller. We can see that DSL in the
+    * introductory example: `#|`, `#&amp;&amp;` and `#!!` are methods on
+    * `ProcessBuilder` used to create a new `ProcessBuilder` through
+    * composition.
+    *
+    * One creates a `ProcessBuilder` either through factories on the
+    * [[scala.sys.process.Process]]'s companion object, or through implicit
+    * conversions available in this package object itself.  Implicitly, each
+    * process is created either out of a `String`, with arguments separated by
+    * spaces -- no escaping of spaces is possible -- or out of a
+    * [[scala.collection.Seq]], where the first element represents the command
+    * name, and the remaining elements are arguments to it. In this latter case,
+    * arguments may contain spaces.
+    *
+    * To further control what how the process will be run, such as specifying
+    * the directory in which it will be run, see the factories on
+    * [[scala.sys.process.Process]]'s object companion.
+    *
+    * Once the desired `ProcessBuilder` is available, it can be executed in
+    * different ways, depending on how one desires to control its I/O, and what
+    * kind of result one wishes for:
+    *
+    *   - Return status of the process (`!` methods)
+    *   - Output of the process as a `String` (`!!` methods)
+    *   - Continuous output of the process as a `Stream[String]` (`lines` methods)
+    *   - The `Process` representing it (`run` methods)
+    *
+    * Some simple examples of these methods:
+    * {{{
+    * import scala.sys.process._
+    *
+    * // This uses ! to get the exit code
+    * def fileExists(name: String) = Seq(&quot;test&quot;, &quot;-f&quot;, name).! == 0
+    *
+    * // This uses !! to get the whole result as a string
+    * val dirContents = &quot;ls&quot;.!!
+    *
+    * // This &quot;fire-and-forgets&quot; the method, which can be lazily read through
+    * // a Stream[String]
+    * def sourceFilesAt(baseDir: String): Stream[String] = {
+    *   val cmd = Seq(&quot;find&quot;, baseDir, &quot;-name&quot;, &quot;*.scala&quot;, &quot;-type&quot;, &quot;f&quot;)
+    *   cmd.lines
+    * }
+    * }}}
+    *
+    * We'll see more details about controlling I/O of the process in the next
+    * section.
+    *
+    * ==Handling Input and Output==
+    *
+    * In the underlying Java model, once a `Process` has been started, one can
+    * get `java.io.InputStream` and `java.io.OutpuStream` representing its
+    * output and input respectively. That is, what one writes to an
+    * `OutputStream` is turned into input to the process, and the output of a
+    * process can be read from an `InputStream` -- of which there are two, one
+    * representing normal output, and the other representing error output.
+    *
+    * This model creates a difficulty, which is that the code responsible for
+    * actually running the external processes is the one that has to take
+    * decisions about how to handle its I/O.
+    *
+    * This package presents an alternative model: the I/O of a running process
+    * is controlled by a [[scala.sys.process.ProcessIO]] object, which can be
+    * passed _to_ the code that runs the external process. A `ProcessIO` will
+    * have direct access to the java streams associated with the process I/O. It
+    * must, however, close these streams afterwards.
+    *
+    * Simpler abstractions are available, however. The components of this
+    * package that handle I/O are:
+    *
+    *   - [[scala.sys.process.ProcessIO]]: provides the low level abstraction.
+    *   - [[scala.sys.process.ProcessLogger]]: provides a higher level abstraction
+    *   for output, and can be created through its object companion
+    *   - [[scala.sys.process.BasicIO]]: a library of helper methods for the
+    *   creation of `ProcessIO`.
+    *   - This package object itself, with a few implicit conversions.
+    *
+    * Some examples of I/O handling:
+    * {{{
+    * import scala.sys.process._
+    *
+    * // An overly complex way of computing size of a compressed file
+    * def gzFileSize(name: String) = {
+    *   val cat = Seq(&quot;zcat&quot;, name)
+    *   var count = 0
+    *   def byteCounter(input: java.io.InputStream) = {
+    *     while(input.read() != -1) count += 1
+    *     input.close()
+    *   }
+    *   cat ! new ProcessIO(_.close(), byteCounter, _.close())
+    *   count
+    * }
+    *
+    * // This &quot;fire-and-forgets&quot; the method, which can be lazily read through
+    * // a Stream[String], and accumulates all errors on a StringBuffer
+    * def sourceFilesAt(baseDir: String): (Stream[String], StringBuffer) = {
+    *   val buffer = new StringBuffer()
+    *   val cmd = Seq(&quot;find&quot;, baseDir, &quot;-name&quot;, &quot;*.scala&quot;, &quot;-type&quot;, &quot;f&quot;)
+    *   val lines = cmd lines_! ProcessLogger(buffer append _)
+    *   (lines, buffer)
+    * }
+    * }}}
+    *
+    * Instances of the java classes `java.io.File` and `java.net.URL` can both
+    * be used directly as input to other processes, and `java.io.File` can be
+    * used as output as well. One can even pipe one to the other directly
+    * without any intervening process, though that's not a design goal or
+    * recommended usage. For example, the following code will copy a web page to
+    * a file:
+    * {{{
+    * import java.io.File
+    * import java.net.URL
+    * import scala.sys.process._
+    * new URL(&quot;http://www.scala-lang.org/&quot;) #&gt; new File(&quot;scala-lang.html&quot;) !
+    * }}}
+    *
+    * More information about the other ways of controlling I/O can be looked at
+    * in the scaladoc for the associated objects, traits and classes.
+    *
+    * ==Running the Process==
+    *
+    * Paradoxically, this is the simplest component of all, and the one least
+    * likely to be interacted with. It consists solely of
+    * [[scala.sys.process.Process]], and it provides only two methods:
+    *
+    *   - `exitValue()`: blocks until the process exit, and then returns the exit
+    *   value. This is what happens when one uses the `!` method of
+    *   `ProcessBuilder`.
+    *   - `destroy()`: this will kill the external process and close the streams
+    *   associated with it.
+    */</span>
+  package object <a title="scala.sys.process.package.type" id="scala.sys.process.package">process</a> extends <a href="Process.scala.html#scala.sys.process;ProcessImplicits" title="scala.sys.process.ProcessImplicits">ProcessImplicits</a> <span class="delimiter">{</span>
+    <span class="comment">/** The arguments passed to `java` when creating this process */</span>
+    def <a title="=&gt; List[String]" id="scala.sys.process.package.javaVmArguments">javaVmArguments</a>: <a href="../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[String]">List</a><span class="delimiter">[</span>String<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      import scala.collection.<a href="../../collection/JavaConversions.scala.html#scala.collection.JavaConversions" title="scala.collection.JavaConversions.type">JavaConversions</a>._
+
+      java.lang.management.<span title="java.lang.management.ManagementFactory.type">ManagementFactory</span>.<span title="()java.lang.management.RuntimeMXBean">getRuntimeMXBean</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="()java.util.List[String]">getInputArguments</span><a href="../../collection/convert/WrapAsScala.scala.html#scala.collection.convert;WrapAsScala.asScalaBuffer" title="(l: java.util.List[String])scala.collection.mutable.Buffer[String]" class="delimiter">(</a><span class="delimiter">)</span>.<a href="../../collection/TraversableOnce.scala.html#scala.collection;TraversableOnce.toList" title="=&gt; List[String]">toList</a>
+    <span class="delimiter">}</span>
+    <span class="comment">/** The input stream of this process */</span>
+    def <a title="=&gt; java.io.InputStream" id="scala.sys.process.package.stdin">stdin</a>  = java.lang.<span title="System.type">System</span>.<span title="java.io.InputStream">in</span>
+    <span class="comment">/** The output stream of this process */</span>
+    def <a title="=&gt; java.io.PrintStream" id="scala.sys.process.package.stdout">stdout</a> = java.lang.<span title="System.type">System</span>.<span title="java.io.PrintStream">out</span>
+    <span class="comment">/** The error stream of this process */</span>
+    def <a title="=&gt; java.io.PrintStream" id="scala.sys.process.package.stderr">stderr</a> = java.lang.<span title="System.type">System</span>.<span title="java.io.PrintStream">err</span>
+  <span class="delimiter">}</span>
+  <span class="comment">// private val shell: String =&gt; Array[String] =</span>
+  <span class="comment">//   if (isWin) Array(&quot;cmd.exe&quot;, &quot;/C&quot;, _)</span>
+  <span class="comment">//   else Array(&quot;sh&quot;, &quot;-c&quot;, _)</span>
+
+  package process <span class="delimiter">{</span>
+    <span class="comment">// These are in a nested object instead of at the package level</span>
+    <span class="comment">// due to the issues described in tickets #3160 and #3836.</span>
+    private<span class="delimiter">[</span>process<span class="delimiter">]</span> object <a title="scala.sys.process.processInternal.type" id="scala.sys.process.processInternal">processInternal</a> <a href="#scala.sys.process.processInternal" title="scala.sys.process.processInternal.type" class="delimiter">{</a>
+      final val processDebug = <a href="../package.scala.html#scala.sys.package.props" title="=&gt; scala.sys.SystemProperties">props</a> <a href="../SystemProperties.scala.html#scala.sys;SystemProperties.contains" title="Boolean" id="scala.sys.process.processInternal.processDebug">contains</a> <span title="String(&quot;scala.process.debug&quot;)" class="string">&quot;scala.process.debug&quot;</span>
+      <a href="#scala.sys.process.processInternal.dbg" title="(msgs: Any*)Unit">dbg</a><span class="delimiter">(</span><span title="String(&quot;Initializing process package.&quot;)" class="string">&quot;Initializing process package.&quot;</span><span class="delimiter">)</span>
+
+      type <a title="[-A, +B]PartialFunction[A,B]" id="scala.sys.process.processInternal;=?>">=?&gt;</a><span class="delimiter">[</span>-<a title="" id="scala.sys.process.processInternal;=?>;A">A</a>, +<a title="" id="scala.sys.process.processInternal;=?>;B">B</a><span class="delimiter">]</span>     = <a href="../../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[A,B]">PartialFunction</a><span class="delimiter">[</span>A, B<span class="delimiter">]</span>
+      type <a title="java.io.Closeable" id="scala.sys.process.processInternal;Closeable">Closeable</a>       = java.io.<span title="java.io.Closeable">Closeable</span>
+      type <a title="java.io.File" id="scala.sys.process.processInternal;File">File</a>            = java.io.<span title="java.io.File">File</span>
+      type <a title="java.io.IOException" id="scala.sys.process.processInternal;IOException">IOException</a>     = java.io.<span title="java.io.IOException">IOException</span>
+      type <a title="java.io.InputStream" id="scala.sys.process.processInternal;InputStream">InputStream</a>     = java.io.<span title="java.io.InputStream">InputStream</span>
+      type <a title="Process" id="scala.sys.process.processInternal;JProcess">JProcess</a>        = java.lang.<span title="Process">Process</span>
+      type <a title="ProcessBuilder" id="scala.sys.process.processInternal;JProcessBuilder">JProcessBuilder</a> = java.lang.<span title="ProcessBuilder">ProcessBuilder</span>
+      type <a title="java.io.OutputStream" id="scala.sys.process.processInternal;OutputStream">OutputStream</a>    = java.io.<span title="java.io.OutputStream">OutputStream</span>
+      type <a title="[T]scala.concurrent.SyncVar[T]" id="scala.sys.process.processInternal;SyncVar">SyncVar</a><span class="delimiter">[</span><a title="" id="scala.sys.process.processInternal;SyncVar;T">T</a><span class="delimiter">]</span>      = scala.concurrent.<a href="../../concurrent/SyncVar.scala.html#scala.concurrent;SyncVar" title="scala.concurrent.SyncVar[T]">SyncVar</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+      type <a title="java.net.URL" id="scala.sys.process.processInternal;URL">URL</a>             = java.net.<span title="java.net.URL">URL</span>
+
+      def <a title="[T](handler: =&gt; T)scala.sys.process.processInternal.=?&gt;[Throwable,T]" id="scala.sys.process.processInternal.onInterrupt">onInterrupt</a><span class="delimiter">[</span><a title="" id="scala.sys.process.processInternal.onInterrupt;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="scala.sys.process.processInternal.onInterrupt.handler">handler</a>: =&gt; T<span class="delimiter">)</span>: Throwable <a href="../../PartialFunction.scala.html#scala;PartialFunction" title="scala.sys.process.processInternal.=?&gt;[Throwable,T]">=?&gt;</a> T = <a title="&lt;$anon: Throwable =&gt; T&gt; extends scala.runtime.AbstractPartialFunction[Throwable,T] with Serializable" id="scala.sys.process.processInternal.onInterrupt;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+        case _: <span title="InterruptedException">InterruptedException</span> =&gt; <a href="#scala.sys.process.processInternal.onInterrupt.handler" title="=&gt; T">handler</a>
+      <span class="delimiter">}</span>
+
+      def <a title="[T](handler: scala.sys.process.processInternal.IOException =&gt; T)scala.sys.process.processInternal.=?&gt;[Throwable,T]" id="scala.sys.process.processInternal.ioFailure">ioFailure</a><span class="delimiter">[</span><a title="" id="scala.sys.process.processInternal.ioFailure;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="scala.sys.process.processInternal.IOException =&gt; T" id="scala.sys.process.processInternal.ioFailure.handler">handler</a>: IOException =&gt; T<span class="delimiter">)</span>: Throwable <a href="../../PartialFunction.scala.html#scala;PartialFunction" title="scala.sys.process.processInternal.=?&gt;[Throwable,T]">=?&gt;</a> T = <a title="&lt;$anon: Throwable =&gt; T&gt; extends scala.runtime.AbstractPartialFunction[Throwable,T] with Serializable" id="scala.sys.process.processInternal.ioFailure;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+        case <a title="scala.sys.process.processInternal.IOException" id="scala.sys.process.processInternal.ioFailure;$anonfun.isDefinedAt.e">e</a>: <span title="scala.sys.process.processInternal.IOException">IOException</span> =&gt; <a href="../../Function1.scala.html#scala;Function1.apply" title="(v1: scala.sys.process.processInternal.IOException)T">handler</a><span title="Boolean(true)" class="delimiter">(</span><a href="#scala.sys.process.processInternal.ioFailure;$anonfun.isDefinedAt.e" title="scala.sys.process.processInternal.IOException">e</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      def <a title="(msgs: Any*)Unit" id="scala.sys.process.processInternal.dbg">dbg</a><span class="delimiter">(</span><a title="Any*" id="scala.sys.process.processInternal.dbg.msgs">msgs</a>: <span title="Any*">Any</span>*<span class="delimiter">)</span> = if <span class="delimiter">(</span><a href="#scala.sys.process.processInternal.processDebug" title="=&gt; Boolean">processDebug</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="../../Console.scala.html#scala.Console" title="Console.type">Console</a>.<a href="../../Console.scala.html#scala.Console.println(b0c81b2e65)" title="(x: Any)Unit">println</a><span class="delimiter">(</span><span title="String(&quot;[process] &quot;)" class="string">&quot;[process] &quot;</span> <span title="(x$1: Any)String">+</span> <span class="delimiter">(</span><a href="#scala.sys.process.processInternal.dbg.msgs" title="Any*">msgs</a> <a href="../../collection/TraversableOnce.scala.html#scala.collection;TraversableOnce.mkString(f5d728d244)" title="(sep: String)String">mkString</a> <span title="String(&quot; &quot;)" class="string">&quot; &quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span title="AnyRef" class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>scala/concurrent/BatchingExecutor.scala</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */</span>
+
+package scala.concurrent
+
+import java.util.concurrent.Executor
+import scala.annotation.tailrec
+
+<span class="comment">/**
+ * Mixin trait for an Executor
+ * which groups multiple nested `Runnable.run()` calls
+ * into a single Runnable passed to the original
+ * Executor. This can be a useful optimization
+ * because it bypasses the original context's task
+ * queue and keeps related (nested) code on a single
+ * thread which may improve CPU affinity. However,
+ * if tasks passed to the Executor are blocking
+ * or expensive, this optimization can prevent work-stealing
+ * and make performance worse. Also, some ExecutionContext
+ * may be fast enough natively that this optimization just
+ * adds overhead.
+ * The default ExecutionContext.global is already batching
+ * or fast enough not to benefit from it; while
+ * `fromExecutor` and `fromExecutorService` do NOT add
+ * this optimization since they don't know whether the underlying
+ * executor will benefit from it.
+ * A batching executor can create deadlocks if code does
+ * not use `scala.concurrent.blocking` when it should,
+ * because tasks created within other tasks will block
+ * on the outer task completing.
+ * This executor may run tasks in any order, including LIFO order.
+ * There are no ordering guarantees.
+ *
+ * WARNING: The underlying Executor's execute-method must not execute the submitted Runnable
+ * in the calling thread synchronously. It must enqueue/handoff the Runnable.
+ */</span>
+private<span class="delimiter">[</span>concurrent<span class="delimiter">]</span> trait <a title="trait BatchingExecutor extends Object with java.util.concurrent.Executor" id="scala.concurrent;BatchingExecutor">BatchingExecutor</a> extends <span title="java.util.concurrent.Executor">Executor</span> <span class="delimiter">{</span>
+
+  <span class="comment">// invariant: if &quot;_tasksLocal.get ne null&quot; then we are inside BatchingRunnable.run; if it is null, we are outside</span>
+  private val <a title="ThreadLocal[List[Runnable]]" id="scala.concurrent;BatchingExecutor._tasksLocal">_tasksLocal</a> = new <span title="ThreadLocal[List[Runnable]]">ThreadLocal</span><span class="delimiter">[</span>List<span class="delimiter">[</span>Runnable<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  private class <a title="class Batch extends Object with Runnable with scala.concurrent.BlockContext" id="scala.concurrent;BatchingExecutor;Batch">Batch</a><a href="#scala.concurrent;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch" class="delimiter">(</a>val <a title="List[Runnable]" id="scala.concurrent;BatchingExecutor;Batch.initial">initial</a>: <a href="../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[Runnable]">List</a><span class="delimiter">[</span>Runnable<span class="delimiter">]</span><span class="delimiter">)</span> extends <a href="#scala.concurrent;BatchingExecutor;Batch" title="Runnable">Runnable</a> with <a href="BlockContext.scala.html#scala.concurrent;BlockContext" title="scala.concurrent.BlockContext">BlockContext</a> <span class="delimiter">{</span>
+    private var <a title="scala.concurrent.BlockContext" id="scala.concurrent;BatchingExecutor;Batch.parentBlockContext_=">parentBlockContext</a>: <a href="BlockContext.scala.html#scala.concurrent;BlockContext" title="scala.concurrent.BlockContext">BlockContext</a> = _
+    <span class="comment">// this method runs in the delegate ExecutionContext's thread</span>
+    override def <a title="()Unit" id="scala.concurrent;BatchingExecutor;Batch.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <span class="delimiter">{</span>
+      <a href="../Predef.scala.html#scala.Predef.require(58bb2a7169)" title="(requirement: Boolean)Unit">require</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span> <span title="(x$1: AnyRef)Boolean">eq</span> null<span class="delimiter">)</span>
+
+      val <a title="scala.concurrent.BlockContext" id="scala.concurrent;BatchingExecutor;Batch.run.prevBlockContext">prevBlockContext</a> = <a href="BlockContext.scala.html#scala.concurrent.BlockContext" title="scala.concurrent.BlockContext.type">BlockContext</a>.<a href="BlockContext.scala.html#scala.concurrent.BlockContext.current" title="=&gt; scala.concurrent.BlockContext">current</a>
+      <a href="BlockContext.scala.html#scala.concurrent.BlockContext" title="scala.concurrent.BlockContext.type">BlockContext</a>.<a href="BlockContext.scala.html#scala.concurrent.BlockContext.withBlockContext" title="(blockContext: scala.concurrent.BlockContext)(body: =&gt; Unit)Unit">withBlockContext</a><span class="delimiter">(</span>this<span class="delimiter">)</span> <span class="delimiter">{</span>
+        try <span class="delimiter">{</span>
+          <a href="#scala.concurrent;BatchingExecutor;Batch.parentBlockContext_=" title="(x$1: scala.concurrent.BlockContext)Unit">parentBlockContext</a> = <a href="#scala.concurrent;BatchingExecutor;Batch.run.prevBlockContext" title="scala.concurrent.BlockContext">prevBlockContext</a>
+
+          @tailrec def <a title="(batch: List[Runnable])Unit" id="scala.concurrent;BatchingExecutor;Batch.run.processBatch">processBatch</a><span class="delimiter">(</span><a title="List[Runnable]" id="scala.concurrent;BatchingExecutor;Batch.run.processBatch.batch">batch</a>: <a href="../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[Runnable]">List</a><span class="delimiter">[</span>Runnable<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <a href="#scala.concurrent;BatchingExecutor;Batch.run.processBatch.batch" title="List[Runnable]">batch</a> match <span class="delimiter">{</span>
+            case <a href="../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a> =&gt; <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+            case <a title="Runnable" id="scala.concurrent;BatchingExecutor;Batch.run.processBatch.head">head</a> :: <a title="List[Runnable]" id="scala.concurrent;BatchingExecutor;Batch.run.processBatch.tail">tail</a> =&gt;
+              <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a> <span title="(x$1: List[Runnable])Unit">set</span> <a href="#scala.concurrent;BatchingExecutor;Batch.run.processBatch.tail" title="List[Runnable]">tail</a>
+              try <span class="delimiter">{</span>
+                <a href="#scala.concurrent;BatchingExecutor;Batch.run.processBatch.head" title="Runnable">head</a>.<span title="()Unit">run</span><span class="delimiter">(</span><span class="delimiter">)</span>
+              <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+                case <a title="Throwable" id="scala.concurrent;BatchingExecutor;Batch.run.processBatch.t">t</a>: <span title="Throwable">Throwable</span> =&gt;
+                  <span class="comment">// if one task throws, move the</span>
+                  <span class="comment">// remaining tasks to another thread</span>
+                  <span class="comment">// so we can throw the exception</span>
+                  <span class="comment">// up to the invoking executor</span>
+                  val <a title="List[Runnable]" id="scala.concurrent;BatchingExecutor;Batch.run.processBatch.remaining">remaining</a> = <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span>
+                  <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a> <span title="(x$1: List[Runnable])Unit">set</span> <a href="../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+                  <a href="#scala.concurrent;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span>new <a href="#scala.concurrent;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch">Batch</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor;Batch.run.processBatch.remaining" title="List[Runnable]">remaining</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="comment">//TODO what if this submission fails?</span>
+                  throw <a href="#scala.concurrent;BatchingExecutor;Batch.run.processBatch.t" title="Throwable">t</a> <span class="comment">// rethrow</span>
+              <span class="delimiter">}</span>
+              <a href="#scala.concurrent;BatchingExecutor;Batch.run.processBatch" title="(batch: List[Runnable])Unit">processBatch</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span><span class="delimiter">)</span> <span class="comment">// since head.run() can add entries, always do _tasksLocal.get here</span>
+          <span class="delimiter">}</span>
+
+          <a href="#scala.concurrent;BatchingExecutor;Batch.run.processBatch" title="(batch: List[Runnable])Unit">processBatch</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor;Batch.initial" title="=&gt; List[Runnable]">initial</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> finally <span class="delimiter">{</span>
+          <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()Unit">remove</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <a href="#scala.concurrent;BatchingExecutor;Batch.parentBlockContext_=" title="(x$1: scala.concurrent.BlockContext)Unit">parentBlockContext</a> = null
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="[T](thunk: =&gt; T)(implicit permission: scala.concurrent.CanAwait)T" id="scala.concurrent;BatchingExecutor;Batch.blockOn">blockOn</a><span class="delimiter">[</span><a title="" id="scala.concurrent;BatchingExecutor;Batch.blockOn;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; T" id="scala.concurrent;BatchingExecutor;Batch.blockOn.thunk">thunk</a>: =&gt; T<span class="delimiter">)</span><span class="delimiter">(</span>implicit <a title="scala.concurrent.CanAwait" id="scala.concurrent;BatchingExecutor;Batch.blockOn.permission">permission</a>: <a href="package.scala.html#scala.concurrent;CanAwait" title="scala.concurrent.CanAwait">CanAwait</a><span class="delimiter">)</span>: <a href="#scala.concurrent;BatchingExecutor;Batch.blockOn;T" title="T">T</a> = <span class="delimiter">{</span>
+      <span class="comment">// if we know there will be blocking, we don't want to keep tasks queued up because it could deadlock.</span>
+      <span class="delimiter">{</span>
+        val <a title="List[Runnable]" id="scala.concurrent;BatchingExecutor;Batch.blockOn.tasks">tasks</a> = <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span>
+        <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a> <span title="(x$1: List[Runnable])Unit">set</span> <a href="../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        if <span class="delimiter">(</span><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor;Batch.blockOn.tasks" title="List[Runnable]">tasks</a> <span title="(x$1: AnyRef)Boolean">ne</span> null<span class="delimiter">)</span> <a href="../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.concurrent;BatchingExecutor;Batch.blockOn.tasks" title="List[Runnable]">tasks</a>.<a href="../collection/TraversableOnce.scala.html#scala.collection;TraversableOnce.nonEmpty" title="=&gt; Boolean">nonEmpty</a><span class="delimiter">)</span>
+          <a href="#scala.concurrent;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span>new <a href="#scala.concurrent;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch">Batch</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor;Batch.blockOn.tasks" title="List[Runnable]">tasks</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      <span class="comment">// now delegate the blocking to the previous BC</span>
+      <a href="../Predef.scala.html#scala.Predef.require(58bb2a7169)" title="(requirement: Boolean)Unit">require</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor;Batch.parentBlockContext_=" title="=&gt; scala.concurrent.BlockContext">parentBlockContext</a> <span title="(x$1: AnyRef)Boolean">ne</span> null<span class="delimiter">)</span>
+      <a href="#scala.concurrent;BatchingExecutor;Batch.parentBlockContext_=" title="=&gt; scala.concurrent.BlockContext">parentBlockContext</a>.<a href="BlockContext.scala.html#scala.concurrent;BlockContext.blockOn" title="(thunk: =&gt; T)(implicit permission: scala.concurrent.CanAwait)T">blockOn</a><a href="#scala.concurrent;BatchingExecutor;Batch.blockOn.permission" title="scala.concurrent.CanAwait" class="delimiter">(</a><a href="#scala.concurrent;BatchingExecutor;Batch.blockOn.thunk" title="=&gt; T">thunk</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  protected def <a title="(r: Runnable)Unit" id="scala.concurrent;BatchingExecutor.unbatchedExecute">unbatchedExecute</a><span class="delimiter">(</span><a title="Runnable" id="scala.concurrent;BatchingExecutor.unbatchedExecute.r">r</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a>
+
+  override def <a title="(runnable: Runnable)Unit" id="scala.concurrent;BatchingExecutor.execute">execute</a><span class="delimiter">(</span><a title="Runnable" id="scala.concurrent;BatchingExecutor.execute.runnable">runnable</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor.batchable" title="(runnable: Runnable)Boolean">batchable</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor.execute.runnable" title="Runnable">runnable</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span> <span class="comment">// If we can batch the runnable</span>
+      <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="()List[Runnable]">get</span> match <span class="delimiter">{</span>
+        case null =&gt; <a href="#scala.concurrent;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span>new <a href="#scala.concurrent;BatchingExecutor;Batch" title="BatchingExecutor.this.Batch">Batch</a><span class="delimiter">(</span><a href="../collection/immutable/List.scala.html#scala.collection.immutable.List.apply" title="(xs: Runnable*)List[Runnable]">List</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor.execute.runnable" title="Runnable">runnable</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="comment">// If we aren't in batching mode yet, enqueue batch</span>
+        case <a title="List[Runnable]" id="scala.concurrent;BatchingExecutor.execute.some">some</a> =&gt; <a href="#scala.concurrent;BatchingExecutor._tasksLocal" title="=&gt; ThreadLocal[List[Runnable]]">_tasksLocal</a>.<span title="(x$1: List[Runnable])Unit">set</span><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor.execute.runnable" title="Runnable">runnable</a> <a href="../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Runnable)List[Runnable]">::</a> <a href="#scala.concurrent;BatchingExecutor.execute.some" title="List[Runnable]">some</a><span class="delimiter">)</span> <span class="comment">// If we are already in batching mode, add to batch</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span> else <a href="#scala.concurrent;BatchingExecutor.unbatchedExecute" title="(r: Runnable)Unit">unbatchedExecute</a><span class="delimiter">(</span><a href="#scala.concurrent;BatchingExecutor.execute.runnable" title="Runnable">runnable</a><span class="delimiter">)</span> <span class="comment">// If not batchable, just delegate to underlying</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Override this to define which runnables will be batched. */</span>
+  def <a title="(runnable: Runnable)Boolean" id="scala.concurrent;BatchingExecutor.batchable">batchable</a><span class="delimiter">(</span><a title="Runnable" id="scala.concurrent;BatchingExecutor.batchable.runnable">runnable</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <a href="../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = <a href="#scala.concurrent;BatchingExecutor.batchable.runnable" title="Runnable">runnable</a> match <span class="delimiter">{</span>
+    case _: <a href="Future.scala.html#scala.concurrent;OnCompleteRunnable" title="scala.concurrent.OnCompleteRunnable">OnCompleteRunnable</a> =&gt; true
+    case _                     =&gt; false
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

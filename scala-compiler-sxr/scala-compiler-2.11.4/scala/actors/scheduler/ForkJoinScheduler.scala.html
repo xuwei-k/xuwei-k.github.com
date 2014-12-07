@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>scala/actors/scheduler/ForkJoinScheduler.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+package scala.actors
+package scheduler
+
+import java.util.<span class="delimiter">{</span>Collection, ArrayList<span class="delimiter">}</span>
+import scala.concurrent.forkjoin._
+
+<span class="comment">/** The &lt;code&gt;ForkJoinScheduler&lt;/code&gt; is backed by a lightweight
+ *  fork-join task execution framework.
+ *
+ * @author Philipp Haller
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;Use the akka.actor package instead. For migration from the scala.actors package refer to the Actors Migration Guide.&quot;</span>, <span class="string">&quot;2.11.0&quot;</span><span class="delimiter">)</span>
+class <a title="class ForkJoinScheduler extends Object with Runnable with scala.actors.IScheduler with scala.actors.scheduler.TerminationMonitor" id="scala.actors.scheduler;ForkJoinScheduler">ForkJoinScheduler</a><a href="#scala.actors.scheduler;ForkJoinScheduler" title="scala.actors.scheduler.ForkJoinScheduler" class="delimiter">(</a>val <a title="Int" id="scala.actors.scheduler;ForkJoinScheduler.initCoreSize">initCoreSize</a>: <a href="../../Int.scala.html#scala;Int" title="Int">Int</a>, val <a title="Int" id="scala.actors.scheduler;ForkJoinScheduler.maxSize">maxSize</a>: <a href="../../Int.scala.html#scala;Int" title="Int">Int</a>, <a title="Boolean" id="scala.actors.scheduler;ForkJoinScheduler.daemon">daemon</a>: <a href="../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a>, <a title="Boolean" id="scala.actors.scheduler;ForkJoinScheduler.fair">fair</a>: <a href="../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a><span class="delimiter">)</span>
+      extends <a href="#scala.actors.scheduler;ForkJoinScheduler" title="Runnable">Runnable</a> with <a href="../IScheduler.scala.html#scala.actors;IScheduler" title="scala.actors.IScheduler">IScheduler</a> with <a href="TerminationMonitor.scala.html#scala.actors.scheduler;TerminationMonitor" title="scala.actors.scheduler.TerminationMonitor">TerminationMonitor</a> <span class="delimiter">{</span>
+
+  private var <a title="scala.actors.scheduler.DrainableForkJoinPool" id="scala.actors.scheduler;ForkJoinScheduler.pool_=">pool</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler.makeNewPool" title="()scala.actors.scheduler.DrainableForkJoinPool">makeNewPool</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="comment">// guarded by this</span>
+  private var <a title="Boolean" id="scala.actors.scheduler;ForkJoinScheduler.terminating_=">terminating</a> = false  <span class="comment">// guarded by this</span>
+  private var <a title="Boolean" id="scala.actors.scheduler;ForkJoinScheduler.snapshoting_=">snapshoting</a> = false  <span class="comment">// guarded by this</span>
+
+  <span class="comment">// this has to be a java.util.Collection, since this is what</span>
+  <span class="comment">// the ForkJoinPool returns.</span>
+  private var <a title="java.util.Collection[scala.concurrent.forkjoin.ForkJoinTask[_]]" id="scala.actors.scheduler;ForkJoinScheduler.drainedTasks_=">drainedTasks</a>: <span title="java.util.Collection[scala.concurrent.forkjoin.ForkJoinTask[_]]">Collection</span><span class="delimiter">[</span>ForkJoinTask<span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">]</span> = null
+
+  protected val <a title="Int" id="scala.actors.scheduler;ForkJoinScheduler.CHECK_FREQ">CHECK_FREQ</a> = <span title="Int(10)" class="int">10</span>
+
+  <span class="comment">// this random number generator is only used in fair mode</span>
+  private lazy val <a title="java.util.Random" id="scala.actors.scheduler;ForkJoinScheduler.random">random</a> = new java.util.<span title="java.util.Random">Random</span> <span class="comment">// guarded by random</span>
+
+  def this<span class="delimiter">(</span><a title="Boolean" id="scala.actors.scheduler;ForkJoinScheduler.<init>(cf92da1bcd).d">d</a>: <a href="../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a>, <a title="Boolean" id="scala.actors.scheduler;ForkJoinScheduler.<init>(cf92da1bcd).f">f</a>: <a href="../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+    this<span class="delimiter">(</span><a href="ThreadPoolConfig.scala.html#scala.actors.scheduler.ThreadPoolConfig" title="scala.actors.scheduler.ThreadPoolConfig.type">ThreadPoolConfig</a>.<a href="ThreadPoolConfig.scala.html#scala.actors.scheduler.ThreadPoolConfig.corePoolSize" title="=&gt; Int">corePoolSize</a>, <a href="ThreadPoolConfig.scala.html#scala.actors.scheduler.ThreadPoolConfig" title="scala.actors.scheduler.ThreadPoolConfig.type">ThreadPoolConfig</a>.<a href="ThreadPoolConfig.scala.html#scala.actors.scheduler.ThreadPoolConfig.maxPoolSize" title="=&gt; Int">maxPoolSize</a>, <a href="#scala.actors.scheduler;ForkJoinScheduler.<init>(cf92da1bcd).d" title="Boolean">d</a>, <a href="#scala.actors.scheduler;ForkJoinScheduler.<init>(cf92da1bcd).f" title="Boolean">f</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  def this<span class="delimiter">(</span><a title="Boolean" id="scala.actors.scheduler;ForkJoinScheduler.<init>(c9e853faf6).d">d</a>: <a href="../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+    this<span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.<init>(c9e853faf6).d" title="Boolean">d</a>, true<span class="delimiter">)</span> <span class="comment">// default is fair</span>
+  <span class="delimiter">}</span>
+
+  def this<span class="delimiter">(</span><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+    this<span class="delimiter">(</span>false<span class="delimiter">)</span> <span class="comment">// default is non-daemon</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="()scala.actors.scheduler.DrainableForkJoinPool" id="scala.actors.scheduler;ForkJoinScheduler.makeNewPool">makeNewPool</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="DrainableForkJoinPool.scala.html#scala.actors.scheduler;DrainableForkJoinPool" title="scala.actors.scheduler.DrainableForkJoinPool">DrainableForkJoinPool</a> = <span class="delimiter">{</span>
+    val <a title="scala.actors.scheduler.DrainableForkJoinPool" id="scala.actors.scheduler;ForkJoinScheduler.makeNewPool.p">p</a> = new <a href="DrainableForkJoinPool.scala.html#scala.actors.scheduler;DrainableForkJoinPool" title="scala.actors.scheduler.DrainableForkJoinPool">DrainableForkJoinPool</a><span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.initCoreSize" title="=&gt; Int">initCoreSize</a>, <a href="#scala.actors.scheduler;ForkJoinScheduler.maxSize" title="=&gt; Int">maxSize</a><span class="delimiter">)</span>
+    <a href="../Debug.scala.html#scala.actors.Debug" title="scala.actors.Debug.type">Debug</a>.<a href="../Debug.scala.html#scala.actors;Logger.info" title="(s: String)Unit">info</a><span class="delimiter">(</span>this<a href="../../Predef.scala.html#scala.Predef;any2stringadd.+" title="(other: String)String">+</a><span title="String(&quot;: parallelism &quot;)" class="string">&quot;: parallelism &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.actors.scheduler;ForkJoinScheduler.makeNewPool.p" title="scala.actors.scheduler.DrainableForkJoinPool">p</a>.<span title="()Int">getParallelism</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#scala.actors.scheduler;ForkJoinScheduler.makeNewPool.p" title="scala.actors.scheduler.DrainableForkJoinPool">p</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Starts this scheduler.
+   */</span>
+  def <a title="()Unit" id="scala.actors.scheduler;ForkJoinScheduler.start">start</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    try <span class="delimiter">{</span>
+      val <a title="Thread" id="scala.actors.scheduler;ForkJoinScheduler.start.t">t</a> = new <span title="Thread">Thread</span><span class="delimiter">(</span>this<span class="delimiter">)</span>
+      <a href="#scala.actors.scheduler;ForkJoinScheduler.start.t" title="Thread">t</a>.<span title="(x$1: Boolean)Unit">setDaemon</span><span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.daemon" title="Boolean">daemon</a><span class="delimiter">)</span>
+      <a href="#scala.actors.scheduler;ForkJoinScheduler.start.t" title="Thread">t</a>.<span title="(x$1: String)Unit">setName</span><span class="delimiter">(</span><span title="String(&quot;ForkJoinScheduler&quot;)" class="string">&quot;ForkJoinScheduler&quot;</span><span class="delimiter">)</span>
+      <a href="#scala.actors.scheduler;ForkJoinScheduler.start.t" title="Thread">t</a>.<span title="()Unit">start</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+      case <a title="Exception" id="scala.actors.scheduler;ForkJoinScheduler.start.e">e</a>: <span title="Exception">Exception</span> =&gt;
+        <a href="../Debug.scala.html#scala.actors.Debug" title="scala.actors.Debug.type">Debug</a>.<a href="../Debug.scala.html#scala.actors;Logger.info" title="(s: String)Unit">info</a><span class="delimiter">(</span>this<a href="../../Predef.scala.html#scala.Predef;any2stringadd.+" title="(other: String)String">+</a><span title="String(&quot;: could not create scheduler thread: &quot;)" class="string">&quot;: could not create scheduler thread: &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.actors.scheduler;ForkJoinScheduler.start.e" title="Exception">e</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  override def <a title="()Unit" id="scala.actors.scheduler;ForkJoinScheduler.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    try <span class="delimiter">{</span>
+      while <span class="delimiter">(</span>true<span class="delimiter">)</span> <span class="delimiter">{</span>
+        this.<span title="(x$1: Unit)Unit">synchronized</span> <a href="#scala.actors.scheduler;ForkJoinScheduler.run.while$1" title="()Unit" class="delimiter">{</a>
+          try <span class="delimiter">{</span>
+            <a href="#scala.actors.scheduler;ForkJoinScheduler" title="(x$1: Long)Unit">wait</a><span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.CHECK_FREQ" title="=&gt; Int">CHECK_FREQ</a>.<a href="../../Int.scala.html#scala;Int.toLong" title="=&gt; Long">toLong</a><span class="delimiter">)</span>
+          <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+            case _: <span title="InterruptedException">InterruptedException</span> =&gt;
+          <span class="delimiter">}</span>
+
+          if <span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.terminating_=" title="=&gt; Boolean">terminating</a><span class="delimiter">)</span>
+            throw new <a href="QuitControl.scala.html#scala.actors.scheduler;QuitControl" title="scala.actors.scheduler.QuitControl">QuitControl</a>
+
+          if <span class="delimiter">(</span><a href="TerminationMonitor.scala.html#scala.actors.scheduler;TerminationMonitor.allActorsTerminated" title="=&gt; Boolean">allActorsTerminated</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <a href="../Debug.scala.html#scala.actors.Debug" title="scala.actors.Debug.type">Debug</a>.<a href="../Debug.scala.html#scala.actors;Logger.info" title="(s: String)Unit">info</a><span class="delimiter">(</span>this<a href="../../Predef.scala.html#scala.Predef;any2stringadd.+" title="(other: String)String">+</a><span title="String(&quot;: all actors terminated&quot;)" class="string">&quot;: all actors terminated&quot;</span><span class="delimiter">)</span>
+            <a href="#scala.actors.scheduler;ForkJoinScheduler.terminating_=" title="(x$1: Boolean)Unit">terminating</a> = true
+            throw new <a href="QuitControl.scala.html#scala.actors.scheduler;QuitControl" title="scala.actors.scheduler.QuitControl">QuitControl</a>
+          <span class="delimiter">}</span>
+
+          if <span class="delimiter">(</span><a href="../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.actors.scheduler;ForkJoinScheduler.snapshoting_=" title="=&gt; Boolean">snapshoting</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <a href="TerminationMonitor.scala.html#scala.actors.scheduler;TerminationMonitor.gc" title="()Unit">gc</a><span class="delimiter">(</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span> else if <span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<span title="()Boolean">isQuiescent</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            val <a title="java.util.ArrayList[scala.concurrent.forkjoin.ForkJoinTask[_]]" id="scala.actors.scheduler;ForkJoinScheduler.run.list">list</a> = new <span title="java.util.ArrayList[scala.concurrent.forkjoin.ForkJoinTask[_]]">ArrayList</span><span class="delimiter">[</span>ForkJoinTask<span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">]</span>
+            val <a title="Int" id="scala.actors.scheduler;ForkJoinScheduler.run.num">num</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<a href="DrainableForkJoinPool.scala.html#scala.actors.scheduler;DrainableForkJoinPool.drainTasksTo" title="(c: java.util.Collection[_ &gt;: scala.concurrent.forkjoin.ForkJoinTask[_]])Int">drainTasksTo</a><span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.run.list" title="java.util.ArrayList[scala.concurrent.forkjoin.ForkJoinTask[_]]">list</a><span class="delimiter">)</span>
+            <a href="../Debug.scala.html#scala.actors.Debug" title="scala.actors.Debug.type">Debug</a>.<a href="../Debug.scala.html#scala.actors;Logger.info" title="(s: String)Unit">info</a><span class="delimiter">(</span>this<a href="../../Predef.scala.html#scala.Predef;any2stringadd.+" title="(other: String)String">+</a><span title="String(&quot;: drained &quot;)" class="string">&quot;: drained &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.actors.scheduler;ForkJoinScheduler.run.num" title="Int">num</a><span title="(x$1: Any)String">+</span><span title="String(&quot; tasks&quot;)" class="string">&quot; tasks&quot;</span><span class="delimiter">)</span>
+            <a href="#scala.actors.scheduler;ForkJoinScheduler.drainedTasks_=" title="(x$1: java.util.Collection[scala.concurrent.forkjoin.ForkJoinTask[_]])Unit">drainedTasks</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler.run.list" title="java.util.ArrayList[scala.concurrent.forkjoin.ForkJoinTask[_]]">list</a>
+            <a href="#scala.actors.scheduler;ForkJoinScheduler.terminating_=" title="(x$1: Boolean)Unit">terminating</a> = true
+            throw new <a href="QuitControl.scala.html#scala.actors.scheduler;QuitControl" title="scala.actors.scheduler.QuitControl">QuitControl</a>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+      case _: <a href="QuitControl.scala.html#scala.actors.scheduler;QuitControl" title="scala.actors.scheduler.QuitControl">QuitControl</a> =&gt;
+        <a href="../Debug.scala.html#scala.actors.Debug" title="scala.actors.Debug.type">Debug</a>.<a href="../Debug.scala.html#scala.actors;Logger.info" title="(s: String)Unit">info</a><span class="delimiter">(</span>this<a href="../../Predef.scala.html#scala.Predef;any2stringadd.+" title="(other: String)String">+</a><span title="String(&quot;: initiating shutdown...&quot;)" class="string">&quot;: initiating shutdown...&quot;</span><span class="delimiter">)</span>
+        while <span class="delimiter">(</span><a href="../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<span title="()Boolean">isQuiescent</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          try <span class="delimiter">{</span>
+            <span title="Thread.type">Thread</span>.<span title="(x$1: Long)Unit">sleep</span><span class="delimiter">(</span><span title="Long(10L)" class="int">10</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+            case <a title="InterruptedException" id="scala.actors.scheduler;ForkJoinScheduler.run.ignore">ignore</a>: <span title="InterruptedException">InterruptedException</span> =&gt;
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<span title="()Unit">shutdown</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        <span class="comment">// allow thread to exit</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">// TODO: when do we pass a task that is not a RecursiveAction?</span>
+  def <a title="(task: Runnable)Unit" id="scala.actors.scheduler;ForkJoinScheduler.execute(28a7a8d3d4)">execute</a><span class="delimiter">(</span><a title="Runnable" id="scala.actors.scheduler;ForkJoinScheduler.execute(28a7a8d3d4).task">task</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<span title="(x$1: Runnable)Unit">execute</span><span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.execute(28a7a8d3d4).task" title="Runnable">task</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  override def <a title="(task: Runnable)Unit" id="scala.actors.scheduler;ForkJoinScheduler.executeFromActor">executeFromActor</a><span class="delimiter">(</span><a title="Runnable" id="scala.actors.scheduler;ForkJoinScheduler.executeFromActor.task">task</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span class="comment">// in fair mode: 2% chance of submitting to global task queue</span>
+    if <span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.fair" title="Boolean">fair</a> <a href="../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.actors.scheduler;ForkJoinScheduler.random" title="=&gt; java.util.Random">random</a>.<span title="(x$1: Boolean)Boolean">synchronized</span> <span class="delimiter">{</span> <a href="#scala.actors.scheduler;ForkJoinScheduler.random" title="=&gt; java.util.Random">random</a>.<span title="(x$1: Int)Int">nextInt</span><span class="delimiter">(</span><span title="Int(50)" class="int">50</span><span class="delimiter">)</span> <a href="../../Int.scala.html#scala;Int.==(5f58a84eb3)" title="(x: Int)Boolean">==</a> <span title="Int(1)" class="int">1</span> <span class="delimiter">}</span><span class="delimiter">)</span>
+      <a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<span title="(x$1: Runnable)Unit">execute</span><span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.executeFromActor.task" title="Runnable">task</a><span class="delimiter">)</span>
+    else
+      <a href="#scala.actors.scheduler;ForkJoinScheduler.executeFromActor.task" title="Runnable">task</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.concurrent.forkjoin.RecursiveAction" class="delimiter">[</span><span title="scala.concurrent.forkjoin.RecursiveAction">RecursiveAction</span><span class="delimiter">]</span>.<span title="()scala.concurrent.forkjoin.ForkJoinTask[Void]">fork</span><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Submits a closure for execution.
+   *
+   *  @param  fun  the closure to be executed
+   */</span>
+  def <a title="(fun: =&gt; Unit)Unit" id="scala.actors.scheduler;ForkJoinScheduler.execute(f96e1c0f85)">execute</a><span class="delimiter">(</span><a title="=&gt; Unit" id="scala.actors.scheduler;ForkJoinScheduler.execute(f96e1c0f85).fun">fun</a>: =&gt; Unit<span class="delimiter">)</span>: <a href="../../Unit.scala.html#scala;Unit" title="Unit">Unit</a> =
+    <a href="#scala.actors.scheduler;ForkJoinScheduler.execute(28a7a8d3d4)" title="(task: Runnable)Unit">execute</a><span class="delimiter">(</span>new <a title="&lt;$anon: Runnable&gt; extends Object with Runnable" id="scala.actors.scheduler;ForkJoinScheduler.execute(f96e1c0f85);$anon">Runnable</a> <span class="delimiter">{</span>
+      def <a title="()Unit" id="scala.actors.scheduler;ForkJoinScheduler.execute(f96e1c0f85);$anon.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#scala.actors.scheduler;ForkJoinScheduler.execute(f96e1c0f85).fun" title="=&gt; Unit">fun</a> <span class="delimiter">}</span>
+    <span class="delimiter">}</span><span class="delimiter">)</span>
+
+  <span class="comment">/** Shuts down the scheduler.
+   */</span>
+  def <a title="()Unit" id="scala.actors.scheduler;ForkJoinScheduler.shutdown">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <a href="#scala.actors.scheduler;ForkJoinScheduler.terminating_=" title="(x$1: Boolean)Unit">terminating</a> = true
+  <span class="delimiter">}</span>
+
+  def <a title="=&gt; Boolean" id="scala.actors.scheduler;ForkJoinScheduler.isActive">isActive</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler" title="(x$1: Boolean)Boolean">synchronized</a> <span class="delimiter">{</span>
+    <a href="../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.actors.scheduler;ForkJoinScheduler.terminating_=" title="=&gt; Boolean">terminating</a> <a href="../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a> <span title="(x$1: AnyRef)Boolean">ne</span> null<span class="delimiter">)</span> <a href="../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<span title="()Boolean">isShutdown</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  override def <a title="(blocker: scala.concurrent.ManagedBlocker)Unit" id="scala.actors.scheduler;ForkJoinScheduler.managedBlock">managedBlock</a><span class="delimiter">(</span><a title="scala.concurrent.ManagedBlocker" id="scala.actors.scheduler;ForkJoinScheduler.managedBlock.blocker">blocker</a>: scala.concurrent.<a href="../../concurrent/ManagedBlocker.scala.html#scala.concurrent;ManagedBlocker" title="scala.concurrent.ManagedBlocker">ManagedBlocker</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="scala.concurrent.forkjoin.ForkJoinPool.type">ForkJoinPool</span>.<span title="(x$1: scala.concurrent.forkjoin.ForkJoinPool.ManagedBlocker)Unit">managedBlock</span><span class="delimiter">(</span>new <a title="&lt;$anon: scala.concurrent.forkjoin.ForkJoinPool.ManagedBlocker&gt; extends Object with scala.concurrent.forkjoin.ForkJoinPool.ManagedBlocker" id="scala.actors.scheduler;ForkJoinScheduler.managedBlock;$anon">ForkJoinPool</a>.<a href="#scala.actors.scheduler;ForkJoinScheduler.managedBlock;$anon" title="scala.concurrent.forkjoin.ForkJoinPool.ManagedBlocker">ManagedBlocker</a> <span class="delimiter">{</span>
+      def <a title="()Boolean" id="scala.actors.scheduler;ForkJoinScheduler.managedBlock;$anon.block">block</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler.managedBlock.blocker" title="scala.concurrent.ManagedBlocker">blocker</a>.<a href="../../concurrent/ManagedBlocker.scala.html#scala.concurrent;ManagedBlocker.block" title="()Boolean">block</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      def <a title="()Boolean" id="scala.actors.scheduler;ForkJoinScheduler.managedBlock;$anon.isReleasable">isReleasable</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#scala.actors.scheduler;ForkJoinScheduler.managedBlock.blocker" title="scala.concurrent.ManagedBlocker">blocker</a>.<a href="../../concurrent/ManagedBlocker.scala.html#scala.concurrent;ManagedBlocker.isReleasable" title="=&gt; Boolean">isReleasable</a>
+    <span class="delimiter">}</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Suspends the scheduler. All threads that were in use by the
+   *  scheduler and its internal thread pool are terminated.
+   */</span>
+  def <a title="()Unit" id="scala.actors.scheduler;ForkJoinScheduler.snapshot">snapshot</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#scala.actors.scheduler;ForkJoinScheduler" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+    <a href="#scala.actors.scheduler;ForkJoinScheduler.snapshoting_=" title="(x$1: Boolean)Unit">snapshoting</a> = true
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** Resumes the execution of the scheduler if it was previously
+   *  suspended using &lt;code&gt;ForkJoinScheduler.snapshot&lt;/code&gt;.
+   */</span>
+  def <a title="()Unit" id="scala.actors.scheduler;ForkJoinScheduler.restart">restart</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#scala.actors.scheduler;ForkJoinScheduler" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.actors.scheduler;ForkJoinScheduler.snapshoting_=" title="=&gt; Boolean">snapshoting</a><span class="delimiter">)</span>
+        sys.<a href="../../sys/package.scala.html#scala.sys.package.error" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="String(&quot;snapshot has not been invoked&quot;)" class="string">&quot;snapshot has not been invoked&quot;</span><span class="delimiter">)</span>
+      else if <span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.isActive" title="=&gt; Boolean">isActive</a><span class="delimiter">)</span>
+        sys.<a href="../../sys/package.scala.html#scala.sys.package.error" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="String(&quot;scheduler is still active&quot;)" class="string">&quot;scheduler is still active&quot;</span><span class="delimiter">)</span>
+      else
+        <a href="#scala.actors.scheduler;ForkJoinScheduler.snapshoting_=" title="(x$1: Boolean)Unit">snapshoting</a> = false
+
+      <a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="(x$1: scala.actors.scheduler.DrainableForkJoinPool)Unit">pool</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler.makeNewPool" title="()scala.actors.scheduler.DrainableForkJoinPool">makeNewPool</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    val <a title="java.util.Iterator[scala.concurrent.forkjoin.ForkJoinTask[_]]" id="scala.actors.scheduler;ForkJoinScheduler.restart.iter">iter</a> = <a href="#scala.actors.scheduler;ForkJoinScheduler.drainedTasks_=" title="=&gt; java.util.Collection[scala.concurrent.forkjoin.ForkJoinTask[_]]">drainedTasks</a>.<span title="()java.util.Iterator[scala.concurrent.forkjoin.ForkJoinTask[_]]">iterator</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    while <span class="delimiter">(</span><a href="#scala.actors.scheduler;ForkJoinScheduler.restart.iter" title="java.util.Iterator[scala.concurrent.forkjoin.ForkJoinTask[_]]">iter</a>.<span title="()Boolean">hasNext</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#scala.actors.scheduler;ForkJoinScheduler.pool_=" title="=&gt; scala.actors.scheduler.DrainableForkJoinPool">pool</a>.<span title="(x$1: scala.concurrent.forkjoin.ForkJoinTask[_])Unit">execute</span><a href="#scala.actors.scheduler;ForkJoinScheduler.restart.while$3" title="()Unit" class="delimiter">(</a><a href="#scala.actors.scheduler;ForkJoinScheduler.restart.iter" title="java.util.Iterator[scala.concurrent.forkjoin.ForkJoinTask[_]]">iter</a>.<span title="()scala.concurrent.forkjoin.ForkJoinTask[_]">next</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <a href="#scala.actors.scheduler;ForkJoinScheduler.start" title="()Unit">start</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

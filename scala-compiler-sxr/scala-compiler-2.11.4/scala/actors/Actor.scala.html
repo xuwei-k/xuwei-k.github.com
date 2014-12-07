@@ -1,0 +1,427 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>scala/actors/Actor.scala</title>
+        <script type="text/javascript" src="../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*                     __                                               *\
+**     ________ ___   / /  ___     Scala API                            **
+**    / __/ __// _ | / /  / _ |    (c) 2005-2013, LAMP/EPFL             **
+**  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
+** /____/\___/_/ |_/____/_/ | |                                         **
+**                          |/                                          **
+\*                                                                      */</span>
+
+package scala.actors
+
+import scala.util.control.ControlThrowable
+import java.util.<span class="delimiter">{</span>Timer, TimerTask<span class="delimiter">}</span>
+import scala.<a href="../language.scala.html#scala.language" title="language.type">language</a>.implicitConversions
+
+<span class="comment">/**
+ * Provides functions for the definition of actors, as well as actor
+ * operations, such as `receive`, `react`, `reply`, etc.
+ *
+ * @author Philipp Haller
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;Use the akka.actor package instead. For migration from the scala.actors package refer to the Actors Migration Guide.&quot;</span>, <span class="string">&quot;2.11.0&quot;</span><span class="delimiter">)</span>
+object <a title="scala.actors.Actor.type" id="scala.actors.Actor.readResolve">Actor</a> extends <a href="Combinators.scala.html#scala.actors;Combinators" title="scala.actors.Combinators">Combinators</a> <span class="delimiter">{</span>
+
+  <span class="comment">/** State of an actor.
+   *
+   *  - '''New''' -
+   *      Not yet started
+   *  - '''Runnable''' -
+   *      Executing
+   *  - '''Suspended''' -
+   *      Suspended, waiting in a `react`
+   *  - '''TimedSuspended''' -
+   *      Suspended, waiting in a `reactWithin`
+   *  - '''Blocked''' -
+   *      Blocked waiting in a `receive`
+   *  - '''TimedBlocked''' -
+   *      Blocked waiting in a `receiveWithin`
+   *  - '''Terminated''' -
+   *      Actor has terminated
+   */</span>
+  object <a title="scala.actors.Actor.State.type" id="scala.actors.Actor.State">State</a> extends <a href="../Enumeration.scala.html#scala;Enumeration" title="Enumeration">Enumeration</a> <span class="delimiter">{</span>
+    val <a title="scala.actors.Actor.State.Value" id="scala.actors.Actor.State.New">New</a>,
+        <a title="scala.actors.Actor.State.Value" id="scala.actors.Actor.State.Runnable">Runnable</a>,
+        <a title="scala.actors.Actor.State.Value" id="scala.actors.Actor.State.Suspended">Suspended</a>,
+        <a title="scala.actors.Actor.State.Value" id="scala.actors.Actor.State.TimedSuspended">TimedSuspended</a>,
+        <a title="scala.actors.Actor.State.Value" id="scala.actors.Actor.State.Blocked">Blocked</a>,
+        <a title="scala.actors.Actor.State.Value" id="scala.actors.Actor.State.TimedBlocked">TimedBlocked</a>,
+        <a title="scala.actors.Actor.State.Value" id="scala.actors.Actor.State.Terminated">Terminated</a> = <a href="../Enumeration.scala.html#scala;Enumeration.Value(5f22b09463)" title="=&gt; scala.actors.Actor.State.Value">Value</a>
+  <span class="delimiter">}</span>
+
+  private<span class="delimiter">[</span>actors<span class="delimiter">]</span> val <a title="ThreadLocal[scala.actors.InternalReplyReactor]" id="scala.actors.Actor.tl">tl</a> = new <span title="ThreadLocal[scala.actors.InternalReplyReactor]">ThreadLocal</span><span class="delimiter">[</span>InternalReplyReactor<span class="delimiter">]</span>
+
+  <span class="comment">// timer thread runs as daemon</span>
+  private<span class="delimiter">[</span>actors<span class="delimiter">]</span> val <a title="java.util.Timer" id="scala.actors.Actor.timer">timer</a> = new <span title="java.util.Timer">Timer</span><span class="delimiter">(</span>true<span class="delimiter">)</span>
+
+  private<span class="delimiter">[</span>actors<span class="delimiter">]</span> val <a title="scala.actors.SuspendActorControl" id="scala.actors.Actor.suspendException">suspendException</a> = new <a href="InternalActor.scala.html#scala.actors;SuspendActorControl" title="scala.actors.SuspendActorControl">SuspendActorControl</a>
+
+  <span class="comment">/**
+   * Returns the currently executing actor. Should be used instead
+   * of `'''this'''` in all blocks of code executed by actors.
+   *
+   * @return returns the currently executing actor.
+   */</span>
+  def <a title="=&gt; scala.actors.Actor" id="scala.actors.Actor.self(821061aedf)">self</a>: <a href="#scala.actors;Actor" title="scala.actors.Actor">Actor</a> = <a href="#scala.actors.Actor.self(014c9d39f6)" title="(sched: scala.actors.IScheduler)scala.actors.InternalActor">self</a><span class="delimiter">(</span><a href="Scheduler.scala.html#scala.actors.Scheduler" title="scala.actors.Scheduler.type">Scheduler</a><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.actors.Actor" class="delimiter">[</span><a href="#scala.actors;Actor" title="scala.actors.Actor">Actor</a><span class="delimiter">]</span>
+
+  private<span class="delimiter">[</span>actors<span class="delimiter">]</span> def <a title="(sched: scala.actors.IScheduler)scala.actors.InternalActor" id="scala.actors.Actor.self(014c9d39f6)">self</a><span class="delimiter">(</span><a title="scala.actors.IScheduler" id="scala.actors.Actor.self(014c9d39f6).sched">sched</a>: <a href="IScheduler.scala.html#scala.actors;IScheduler" title="scala.actors.IScheduler">IScheduler</a><span class="delimiter">)</span>: <a href="InternalActor.scala.html#scala.actors;InternalActor" title="scala.actors.InternalActor">InternalActor</a> =
+    <a href="#scala.actors.Actor.rawSelf(3e2f7be990)" title="(sched: scala.actors.IScheduler)scala.actors.InternalReplyReactor">rawSelf</a><span class="delimiter">(</span><a href="#scala.actors.Actor.self(014c9d39f6).sched" title="scala.actors.IScheduler">sched</a><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="scala.actors.InternalActor" class="delimiter">[</span><a href="InternalActor.scala.html#scala.actors;InternalActor" title="scala.actors.InternalActor">InternalActor</a><span class="delimiter">]</span>
+
+  private<span class="delimiter">[</span>actors<span class="delimiter">]</span> def <a title="=&gt; scala.actors.InternalReplyReactor" id="scala.actors.Actor.rawSelf(f1fae37cd4)">rawSelf</a>: <a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor" title="scala.actors.InternalReplyReactor">InternalReplyReactor</a> =
+    <a href="#scala.actors.Actor.rawSelf(3e2f7be990)" title="(sched: scala.actors.IScheduler)scala.actors.InternalReplyReactor">rawSelf</a><span class="delimiter">(</span><a href="Scheduler.scala.html#scala.actors.Scheduler" title="scala.actors.Scheduler.type">Scheduler</a><span class="delimiter">)</span>
+
+  private<span class="delimiter">[</span>actors<span class="delimiter">]</span> def <a title="(sched: scala.actors.IScheduler)scala.actors.InternalReplyReactor" id="scala.actors.Actor.rawSelf(3e2f7be990)">rawSelf</a><span class="delimiter">(</span><a title="scala.actors.IScheduler" id="scala.actors.Actor.rawSelf(3e2f7be990).sched">sched</a>: <a href="IScheduler.scala.html#scala.actors;IScheduler" title="scala.actors.IScheduler">IScheduler</a><span class="delimiter">)</span>: <a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor" title="scala.actors.InternalReplyReactor">InternalReplyReactor</a> = <span class="delimiter">{</span>
+    val <a title="scala.actors.InternalReplyReactor" id="scala.actors.Actor.rawSelf(3e2f7be990).s">s</a> = <a href="#scala.actors.Actor.tl" title="=&gt; ThreadLocal[scala.actors.InternalReplyReactor]">tl</a>.<span title="()scala.actors.InternalReplyReactor">get</span>
+    if <span class="delimiter">(</span><a href="#scala.actors.Actor.rawSelf(3e2f7be990).s" title="scala.actors.InternalReplyReactor">s</a> <span title="(x$1: AnyRef)Boolean">eq</span> null<span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a title="scala.actors.ActorProxy" id="scala.actors.Actor.rawSelf(3e2f7be990).r">r</a> = new <a href="ActorProxy.scala.html#scala.actors;ActorProxy" title="scala.actors.ActorProxy">ActorProxy</a><span class="delimiter">(</span><span title="Thread.type">Thread</span>.<span title="()Thread">currentThread</span>, <a href="#scala.actors.Actor.rawSelf(3e2f7be990).sched" title="scala.actors.IScheduler">sched</a><span class="delimiter">)</span>
+      <a href="#scala.actors.Actor.tl" title="=&gt; ThreadLocal[scala.actors.InternalReplyReactor]">tl</a>.<span title="(x$1: scala.actors.InternalReplyReactor)Unit">set</span><span class="delimiter">(</span><a href="#scala.actors.Actor.rawSelf(3e2f7be990).r" title="scala.actors.ActorProxy">r</a><span class="delimiter">)</span>
+      <a href="#scala.actors.Actor.rawSelf(3e2f7be990).r" title="scala.actors.ActorProxy">r</a>
+    <span class="delimiter">}</span> else
+      <a href="#scala.actors.Actor.rawSelf(3e2f7be990).s" title="scala.actors.InternalReplyReactor">s</a>
+  <span class="delimiter">}</span>
+
+  private def <a title="=&gt; scala.actors.IScheduler" id="scala.actors.Actor.parentScheduler">parentScheduler</a>: <a href="IScheduler.scala.html#scala.actors;IScheduler" title="scala.actors.IScheduler">IScheduler</a> = <span class="delimiter">{</span>
+    val <a title="scala.actors.InternalReplyReactor" id="scala.actors.Actor.parentScheduler.s">s</a> = <a href="#scala.actors.Actor.tl" title="=&gt; ThreadLocal[scala.actors.InternalReplyReactor]">tl</a>.<span title="()scala.actors.InternalReplyReactor">get</span>
+    if <span class="delimiter">(</span><a href="#scala.actors.Actor.parentScheduler.s" title="scala.actors.InternalReplyReactor">s</a> <span title="(x$1: AnyRef)Boolean">eq</span> null<span class="delimiter">)</span> <a href="Scheduler.scala.html#scala.actors.Scheduler" title="scala.actors.Scheduler.type">Scheduler</a> else <a href="#scala.actors.Actor.parentScheduler.s" title="scala.actors.InternalReplyReactor">s</a>.<a href="Reactor.scala.html#scala.actors;Reactor.scheduler" title="=&gt; scala.actors.IScheduler">scheduler</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Resets an actor proxy associated with the current thread.
+   * It replaces the implicit `ActorProxy` instance
+   * of the current thread (if any) with a new instance.
+   *
+   * This permits to re-use the current thread as an actor
+   * even if its `ActorProxy` has died for some reason.
+   */</span>
+  def <a title="()Unit" id="scala.actors.Actor.resetProxy">resetProxy</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val <a title="scala.actors.InternalReplyReactor" id="scala.actors.Actor.resetProxy.a">a</a> = <a href="#scala.actors.Actor.tl" title="=&gt; ThreadLocal[scala.actors.InternalReplyReactor]">tl</a>.<span title="()scala.actors.InternalReplyReactor">get</span>
+    if <span class="delimiter">(</span><span class="delimiter">(</span>null <span title="(x$1: AnyRef)Boolean">ne</span> <a href="#scala.actors.Actor.resetProxy.a" title="scala.actors.InternalReplyReactor">a</a><span class="delimiter">)</span> <a href="../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="#scala.actors.Actor.resetProxy.a" title="scala.actors.InternalReplyReactor">a</a>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="ActorProxy.scala.html#scala.actors;ActorProxy" title="scala.actors.ActorProxy">ActorProxy</a><span class="delimiter">]</span><span class="delimiter">)</span>
+      <a href="#scala.actors.Actor.tl" title="=&gt; ThreadLocal[scala.actors.InternalReplyReactor]">tl</a>.<span title="(x$1: scala.actors.InternalReplyReactor)Unit">set</span><span class="delimiter">(</span>new <a href="ActorProxy.scala.html#scala.actors;ActorProxy" title="scala.actors.ActorProxy">ActorProxy</a><span class="delimiter">(</span><span title="Thread.type">Thread</span>.<span title="()Thread">currentThread</span>, <a href="#scala.actors.Actor.parentScheduler" title="=&gt; scala.actors.IScheduler">parentScheduler</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Removes any reference to an `Actor` instance
+   * currently stored in thread-local storage.
+   *
+   * This allows to release references from threads that are potentially
+   * long-running or being re-used (e.g. inside a thread pool). Permanent
+   * references in thread-local storage are a potential memory leak.
+   */</span>
+  def <a title="()Unit" id="scala.actors.Actor.clearSelf">clearSelf</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#scala.actors.Actor.tl" title="=&gt; ThreadLocal[scala.actors.InternalReplyReactor]">tl</a> <span title="(x$1: scala.actors.InternalReplyReactor)Unit">set</span> null
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Factory method for creating and starting an actor.
+   *
+   * @example {{{
+   * import scala.actors.Actor._
+   * ...
+   * val a = actor {
+   *   ...
+   * }
+   * }}}
+   *
+   * @param  body  the code block to be executed by the newly created actor
+   * @return       the newly created actor. Note that it is automatically started.
+   */</span>
+  def <a title="(body: =&gt; Unit)scala.actors.Actor" id="scala.actors.Actor.actor">actor</a><span class="delimiter">(</span><a title="=&gt; Unit" id="scala.actors.Actor.actor.body">body</a>: =&gt; Unit<span class="delimiter">)</span>: <a href="#scala.actors;Actor" title="scala.actors.Actor">Actor</a> = <span class="delimiter">{</span>
+    val <a title="&lt;refinement of scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor" id="scala.actors.Actor.actor.a">a</a> = new <a title="&lt;$anon: scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor" id="scala.actors.Actor.actor.a;$anon">Actor</a> <span class="delimiter">{</span>
+      def <a title="()Unit" id="scala.actors.Actor.actor.a;$anon.act">act</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#scala.actors.Actor.actor.body" title="=&gt; Unit">body</a>
+      override final val <a title="scala.actors.IScheduler" id="scala.actors.Actor.actor.a;$anon.scheduler">scheduler</a>: <a href="IScheduler.scala.html#scala.actors;IScheduler" title="scala.actors.IScheduler">IScheduler</a> = <a href="#scala.actors.Actor.parentScheduler" title="=&gt; scala.actors.IScheduler">parentScheduler</a>
+    <span class="delimiter">}</span>
+    <a href="#scala.actors.Actor.actor.a" title="&lt;refinement of scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor">a</a>.<a href="#scala.actors;Actor.start" title="()scala.actors.Actor">start</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#scala.actors.Actor.actor.a" title="&lt;refinement of scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor">a</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Factory method for creating actors whose
+   * body is defined using a `Responder`.
+   *
+   * @example {{{
+   * import scala.actors.Actor._
+   * import Responder.exec
+   * ...
+   * val a = reactor {
+   *   for {
+   *     res &lt;- b !! MyRequest;
+   *     if exec(println(&quot;result: &quot;+res))
+   *   } yield {}
+   * }
+   * }}}
+   *
+   * @param  body  the `Responder` to be executed by the newly created actor
+   * @return       the newly created actor. Note that it is automatically started.
+   */</span>
+  def <a title="(body: =&gt; Responder[Unit])scala.actors.Actor" id="scala.actors.Actor.reactor">reactor</a><span class="delimiter">(</span><a title="=&gt; Responder[Unit]" id="scala.actors.Actor.reactor.body">body</a>: =&gt; Responder<span class="delimiter">[</span>Unit<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#scala.actors;Actor" title="scala.actors.Actor">Actor</a> = <span class="delimiter">{</span>
+    val <a title="&lt;refinement of scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor" id="scala.actors.Actor.reactor.a">a</a> = new <a title="&lt;$anon: scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor" id="scala.actors.Actor.reactor.a;$anon">Actor</a> <span class="delimiter">{</span>
+      def <a title="()Unit" id="scala.actors.Actor.reactor.a;$anon.act">act</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="../Responder.scala.html#scala.Responder" title="Responder.type">Responder</a>.<a href="../Responder.scala.html#scala.Responder.run" title="(r: Responder[Unit])Option[Unit]">run</a><span title="Unit" class="delimiter">(</span><a href="#scala.actors.Actor.reactor.body" title="=&gt; Responder[Unit]">body</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      override final val <a title="scala.actors.IScheduler" id="scala.actors.Actor.reactor.a;$anon.scheduler">scheduler</a>: <a href="IScheduler.scala.html#scala.actors;IScheduler" title="scala.actors.IScheduler">IScheduler</a> = <a href="#scala.actors.Actor.parentScheduler" title="=&gt; scala.actors.IScheduler">parentScheduler</a>
+    <span class="delimiter">}</span>
+    <a href="#scala.actors.Actor.reactor.a" title="&lt;refinement of scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor">a</a>.<a href="#scala.actors;Actor.start" title="()scala.actors.Actor">start</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#scala.actors.Actor.reactor.a" title="&lt;refinement of scala.actors.Actor&gt; extends AnyRef with scala.actors.Actor">a</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Receives the next message from the mailbox of the current actor `self`.
+   */</span>
+  def <a title="=&gt; Any" id="scala.actors.Actor.?">?</a> : <span title="Any">Any</span> = <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.?" title="=&gt; Any">?</a>
+
+  <span class="comment">/**
+   * Receives a message from the mailbox of `self`. Blocks if no message
+   * matching any of the cases of `f` can be received.
+   *
+   * @example {{{
+   * receive {
+   *   case &quot;exit&quot; =&gt; println(&quot;exiting&quot;)
+   *   case 42 =&gt; println(&quot;got the answer&quot;)
+   *   case x:Int =&gt; println(&quot;got an answer&quot;)
+   * }
+   * }}}
+   *
+   * @param  f a partial function specifying patterns and actions
+   * @return   the result of processing the received message
+   */</span>
+  def <a title="[A](f: PartialFunction[Any,A])A" id="scala.actors.Actor.receive">receive</a><span class="delimiter">[</span><a title="" id="scala.actors.Actor.receive;A">A</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[Any,A]" id="scala.actors.Actor.receive.f">f</a>: <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[Any,A]">PartialFunction</a><span class="delimiter">[</span>Any, A<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#scala.actors.Actor.receive;A" title="A">A</a> =
+    <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.receive" title="(f: PartialFunction[Any,A])A">receive</a><span class="delimiter">(</span><a href="#scala.actors.Actor.receive.f" title="PartialFunction[Any,A]">f</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Receives a message from the mailbox of `self`. Blocks at most `msec`
+   * milliseconds if no message matching any of the cases of `f` can be
+   * received. If no message could be received the `TIMEOUT` action is
+   * executed if specified.
+   *
+   * @param  msec the time span before timeout
+   * @param  f    a partial function specifying patterns and actions
+   * @return      the result of processing the received message
+   */</span>
+  def <a title="[R](msec: Long)(f: PartialFunction[Any,R])R" id="scala.actors.Actor.receiveWithin">receiveWithin</a><span class="delimiter">[</span><a title="" id="scala.actors.Actor.receiveWithin;R">R</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="Long" id="scala.actors.Actor.receiveWithin.msec">msec</a>: <a href="../Long.scala.html#scala;Long" title="Long">Long</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="PartialFunction[Any,R]" id="scala.actors.Actor.receiveWithin.f">f</a>: <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[Any,R]">PartialFunction</a><span class="delimiter">[</span>Any, R<span class="delimiter">]</span><span class="delimiter">)</span>: <a href="#scala.actors.Actor.receiveWithin;R" title="R">R</a> =
+    <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.receiveWithin" title="(msec: Long)(f: PartialFunction[Any,R])R">receiveWithin</a><span class="delimiter">(</span><a href="#scala.actors.Actor.receiveWithin.msec" title="Long">msec</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#scala.actors.Actor.receiveWithin.f" title="PartialFunction[Any,R]">f</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Lightweight variant of `receive`.
+   *
+   * Actions in `f` have to contain the rest of the computation of `self`,
+   * as this method will never return.
+   *
+   * A common method of continuting the computation is to send a message
+   * to another actor:
+   * {{{
+   * react {
+   *   case Get(from) =&gt;
+   *     react {
+   *       case Put(x) =&gt; from ! x
+   *     }
+   * }
+   * }}}
+   *
+   * Another common method is to use `loop` to continuously `react` to messages:
+   * {{{
+   * loop {
+   *   react {
+   *     case Msg(data) =&gt; // process data
+   *   }
+   * }
+   * }}}
+   *
+   * @param  f a partial function specifying patterns and actions
+   * @return   this function never returns
+   */</span>
+  def <a title="(f: PartialFunction[Any,Unit])Nothing" id="scala.actors.Actor.react">react</a><span class="delimiter">(</span><a title="PartialFunction[Any,Unit]" id="scala.actors.Actor.react.f">f</a>: <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[Any,Unit]">PartialFunction</a><span class="delimiter">[</span>Any, Unit<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Nothing">Nothing</span> =
+    <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor.react" title="(handler: PartialFunction[Any,Unit])Nothing">react</a><span class="delimiter">(</span><a href="#scala.actors.Actor.react.f" title="PartialFunction[Any,Unit]">f</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Lightweight variant of `receiveWithin`.
+   *
+   * Actions in `f` have to contain the rest of the computation of `self`,
+   * as this method will never return.
+   *
+   * @param  msec the time span before timeout
+   * @param  f    a partial function specifying patterns and actions
+   * @return      this function never returns
+   */</span>
+  def <a title="(msec: Long)(f: PartialFunction[Any,Unit])Nothing" id="scala.actors.Actor.reactWithin">reactWithin</a><span class="delimiter">(</span><a title="Long" id="scala.actors.Actor.reactWithin.msec">msec</a>: <a href="../Long.scala.html#scala;Long" title="Long">Long</a><span class="delimiter">)</span><span class="delimiter">(</span><a title="PartialFunction[Any,Unit]" id="scala.actors.Actor.reactWithin.f">f</a>: <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[Any,Unit]">PartialFunction</a><span class="delimiter">[</span>Any, Unit<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Nothing">Nothing</span> =
+    <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.reactWithin" title="(msec: Long)(handler: PartialFunction[Any,Unit])Nothing">reactWithin</a><span class="delimiter">(</span><a href="#scala.actors.Actor.reactWithin.msec" title="Long">msec</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#scala.actors.Actor.reactWithin.f" title="PartialFunction[Any,Unit]">f</a><span class="delimiter">)</span>
+
+  def <a title="(f: PartialFunction[Any,Unit])Nothing" id="scala.actors.Actor.eventloop">eventloop</a><span class="delimiter">(</span><a title="PartialFunction[Any,Unit]" id="scala.actors.Actor.eventloop.f">f</a>: <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[Any,Unit]">PartialFunction</a><span class="delimiter">[</span>Any, Unit<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Nothing">Nothing</span> =
+    <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor.react" title="(handler: PartialFunction[Any,Unit])Nothing">react</a><span class="delimiter">(</span>new <a href="#scala.actors.Actor;RecursiveProxyHandler" title="scala.actors.Actor.RecursiveProxyHandler">RecursiveProxyHandler</a><span class="delimiter">(</span><a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>, <a href="#scala.actors.Actor.eventloop.f" title="PartialFunction[Any,Unit]">f</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  private class <a title="class RecursiveProxyHandler extends AnyRef with PartialFunction[Any,Unit]" id="scala.actors.Actor;RecursiveProxyHandler">RecursiveProxyHandler</a><a href="#scala.actors.Actor;RecursiveProxyHandler" title="scala.actors.Actor.RecursiveProxyHandler" class="delimiter">(</a><a title="scala.actors.InternalReplyReactor" id="scala.actors.Actor;RecursiveProxyHandler.a">a</a>: <a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor" title="scala.actors.InternalReplyReactor">InternalReplyReactor</a>, <a title="PartialFunction[Any,Unit]" id="scala.actors.Actor;RecursiveProxyHandler.f">f</a>: <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[Any,Unit]">PartialFunction</a><span class="delimiter">[</span>Any, Unit<span class="delimiter">]</span><span class="delimiter">)</span>
+          extends <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[Any,Unit]">PartialFunction</a><span class="delimiter">[</span>Any, Unit<span class="delimiter">]</span> <span class="delimiter">{</span>
+    def <a title="(m: Any)Boolean" id="scala.actors.Actor;RecursiveProxyHandler.isDefinedAt">isDefinedAt</a><span class="delimiter">(</span><a title="Any" id="scala.actors.Actor;RecursiveProxyHandler.isDefinedAt.m">m</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> =
+      true <span class="comment">// events are immediately removed from the mailbox</span>
+    def <a title="(m: Any)Unit" id="scala.actors.Actor;RecursiveProxyHandler.apply">apply</a><span class="delimiter">(</span><a title="Any" id="scala.actors.Actor;RecursiveProxyHandler.apply.m">m</a>: <span title="Any">Any</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#scala.actors.Actor;RecursiveProxyHandler.f" title="PartialFunction[Any,Unit]">f</a>.<a href="../PartialFunction.scala.html#scala;PartialFunction.isDefinedAt" title="(x: Any)Boolean">isDefinedAt</a><span class="delimiter">(</span><a href="#scala.actors.Actor;RecursiveProxyHandler.apply.m" title="Any">m</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="../Function1.scala.html#scala;Function1.apply" title="(v1: Any)Unit">f</a><span class="delimiter">(</span><a href="#scala.actors.Actor;RecursiveProxyHandler.apply.m" title="Any">m</a><span class="delimiter">)</span>
+      <a href="#scala.actors.Actor;RecursiveProxyHandler.a" title="scala.actors.InternalReplyReactor">a</a>.<a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor.react" title="(handler: PartialFunction[Any,Unit])Nothing">react</a><span class="delimiter">(</span>this<span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Returns the actor which sent the last received message.
+   */</span>
+  def <a title="=&gt; scala.actors.OutputChannel[Any]" id="scala.actors.Actor.sender">sender</a>: <a href="OutputChannel.scala.html#scala.actors;OutputChannel" title="scala.actors.OutputChannel[Any]">OutputChannel</a><span class="delimiter">[</span>Any<span class="delimiter">]</span> =
+    <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor.internalSender" title="=&gt; scala.actors.OutputChannel[Any]">internalSender</a>
+
+  <span class="comment">/**
+   * Sends `msg` to the actor waiting in a call to `!?`.
+   */</span>
+  def <a title="(msg: Any)Unit" id="scala.actors.Actor.reply(95eb915eef)">reply</a><span class="delimiter">(</span><a title="Any" id="scala.actors.Actor.reply(95eb915eef).msg">msg</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a> =
+    <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor.reply" title="(msg: Any)Unit">reply</a><span class="delimiter">(</span><a href="#scala.actors.Actor.reply(95eb915eef).msg" title="Any">msg</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Sends `()` to the actor waiting in a call to `!?`.
+   */</span>
+  def <a title="()Unit" id="scala.actors.Actor.reply(aa97cb1b3d)">reply</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a> =
+    <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="InternalReplyReactor.scala.html#scala.actors;InternalReplyReactor.reply" title="(msg: Any)Unit">reply</a><span class="delimiter">(</span><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Returns the number of messages in `self`'s mailbox
+   *
+   * @return the number of messages in `self`'s mailbox
+   */</span>
+  def <a title="=&gt; Int" id="scala.actors.Actor.mailboxSize">mailboxSize</a>: <a href="../Int.scala.html#scala;Int" title="Int">Int</a> = <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="Reactor.scala.html#scala.actors;Reactor.mailboxSize" title="=&gt; Int">mailboxSize</a>
+
+  <span class="comment">/**
+   * Converts a synchronous event-based operation into
+   * an asynchronous `Responder`.
+   *
+   * @example {{{
+   * val adder = reactor {
+   *   for {
+   *     _ &lt;- respondOn(react) { case Add(a, b) =&gt; reply(a+b) }
+   *   } yield {}
+   * }
+   * }}}
+   */</span>
+  def <a title="[A, B](fun: PartialFunction[A,Unit] =&gt; Nothing)PartialFunction[A,B] =&gt; Responder[B]" id="scala.actors.Actor.respondOn">respondOn</a><span class="delimiter">[</span><a title="" id="scala.actors.Actor.respondOn;A">A</a>, <a title="" id="scala.actors.Actor.respondOn;B">B</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="PartialFunction[A,Unit] =&gt; Nothing" id="scala.actors.Actor.respondOn.fun">fun</a>: PartialFunction<span class="delimiter">[</span>A, Unit<span class="delimiter">]</span> =&gt; Nothing<span class="delimiter">)</span>:
+    PartialFunction<span class="delimiter">[</span>A, B<span class="delimiter">]</span> =&gt; Responder<span class="delimiter">[</span>B<span class="delimiter">]</span> =
+      <span class="delimiter">(</span>caseBlock: <a href="../PartialFunction.scala.html#scala;PartialFunction" title="PartialFunction[A,B]">PartialFunction</a><span class="delimiter">[</span>A, B<span class="delimiter">]</span><span class="delimiter">)</span> =&gt; new <a title="&lt;$anon: Responder[B]&gt; extends Responder[B]" id="scala.actors.Actor.respondOn.$anonfun;$anon">Responder</a><span class="delimiter">[</span>B<span class="delimiter">]</span> <span class="delimiter">{</span>
+        def <a title="(k: B =&gt; Unit)Nothing" id="scala.actors.Actor.respondOn.$anonfun;$anon.respond">respond</a><span class="delimiter">(</span><a title="B =&gt; Unit" id="scala.actors.Actor.respondOn.$anonfun;$anon.respond.k">k</a>: B =&gt; Unit<span class="delimiter">)</span> = <a href="../Function1.scala.html#scala;Function1.apply" title="(v1: PartialFunction[A,Unit])Nothing">fun</a><span class="delimiter">(</span><a href="#scala.actors.Actor.respondOn.$anonfun.caseBlock" title="PartialFunction[A,B]">caseBlock</a> <a href="../PartialFunction.scala.html#scala;PartialFunction.andThen" title="(k: B =&gt; Unit)PartialFunction[A,Unit]">andThen</a> <a href="#scala.actors.Actor.respondOn.$anonfun;$anon.respond.k" title="B =&gt; Unit">k</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+  private<span class="delimiter">[</span>actors<span class="delimiter">]</span> trait <a title="trait Body[a] extends AnyRef" id="scala.actors.Actor;Body">Body</a><span class="delimiter">[</span><a title="" id="scala.actors.Actor;Body;a">a</a><span class="delimiter">]</span> <span class="delimiter">{</span>
+    def <a title="[b](other: =&gt; b)Unit" id="scala.actors.Actor;Body.andThen">andThen</a><span class="delimiter">[</span><a title="" id="scala.actors.Actor;Body.andThen;b">b</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; b" id="scala.actors.Actor;Body.andThen.other">other</a>: =&gt; b<span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a>
+  <span class="delimiter">}</span>
+
+  implicit def <a title="[a](body: =&gt; a)scala.actors.InternalActor.Body[a]" id="scala.actors.Actor.mkBody">mkBody</a><span class="delimiter">[</span><a title="" id="scala.actors.Actor.mkBody;a">a</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; a" id="scala.actors.Actor.mkBody.body">body</a>: =&gt; a<span class="delimiter">)</span> = new <a title="&lt;$anon: scala.actors.InternalActor.Body[a]&gt; extends AnyRef with scala.actors.InternalActor.Body[a]" id="scala.actors.Actor.mkBody;$anon">InternalActor</a>.<a href="InternalActor.scala.html#scala.actors.InternalActor;Body" title="scala.actors.InternalActor.Body[a]">Body</a><span class="delimiter">[</span>a<span class="delimiter">]</span> <span class="delimiter">{</span>
+    def <a title="[b](other: =&gt; b)Unit" id="scala.actors.Actor.mkBody;$anon.andThen">andThen</a><span class="delimiter">[</span><a title="" id="scala.actors.Actor.mkBody;$anon.andThen;b">b</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="=&gt; b" id="scala.actors.Actor.mkBody;$anon.andThen.other">other</a>: =&gt; b<span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="Reactor.scala.html#scala.actors;Reactor.seq" title="(first: =&gt; a, next: =&gt; b)Unit">seq</a><span class="delimiter">(</span><a href="#scala.actors.Actor.mkBody.body" title="=&gt; a">body</a>, <a href="#scala.actors.Actor.mkBody;$anon.andThen.other" title="=&gt; b">other</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Links `self` to actor `to`.
+   *
+   * @param  to the actor to link to
+   * @return    the parameter actor
+   */</span>
+  def <a title="(to: scala.actors.AbstractActor)scala.actors.AbstractActor" id="scala.actors.Actor.link(3023dd7be2)">link</a><span class="delimiter">(</span><a title="scala.actors.AbstractActor" id="scala.actors.Actor.link(3023dd7be2).to">to</a>: <a href="AbstractActor.scala.html#scala.actors;AbstractActor" title="scala.actors.AbstractActor">AbstractActor</a><span class="delimiter">)</span>: <a href="AbstractActor.scala.html#scala.actors;AbstractActor" title="scala.actors.AbstractActor">AbstractActor</a> = <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.link(3023dd7be2)" title="(to: scala.actors.AbstractActor)scala.actors.AbstractActor">link</a><span class="delimiter">(</span><a href="#scala.actors.Actor.link(3023dd7be2).to" title="scala.actors.AbstractActor">to</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Links `self` to the actor defined by `body`.
+   *
+   * @param body the body of the actor to link to
+   * @return     the parameter actor
+   */</span>
+  def <a title="(body: =&gt; Unit)scala.actors.Actor" id="scala.actors.Actor.link(1663ec2b44)">link</a><span class="delimiter">(</span><a title="=&gt; Unit" id="scala.actors.Actor.link(1663ec2b44).body">body</a>: =&gt; Unit<span class="delimiter">)</span>: <a href="#scala.actors;Actor" title="scala.actors.Actor">Actor</a> = <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.link(1663ec2b44)" title="(body: =&gt; Unit)scala.actors.Actor">link</a><span class="delimiter">(</span><a href="#scala.actors.Actor.link(1663ec2b44).body" title="=&gt; Unit">body</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Unlinks `self` from actor `from`.
+   *
+   * @param from the actor to unlink from
+   */</span>
+  def <a title="(from: scala.actors.AbstractActor)Unit" id="scala.actors.Actor.unlink">unlink</a><span class="delimiter">(</span><a title="scala.actors.AbstractActor" id="scala.actors.Actor.unlink.from">from</a>: <a href="AbstractActor.scala.html#scala.actors;AbstractActor" title="scala.actors.AbstractActor">AbstractActor</a><span class="delimiter">)</span>: <a href="../Unit.scala.html#scala;Unit" title="Unit">Unit</a> = <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.unlink(7610d88b74)" title="(from: scala.actors.AbstractActor)Unit">unlink</a><span class="delimiter">(</span><a href="#scala.actors.Actor.unlink.from" title="scala.actors.AbstractActor">from</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Terminates execution of `self` with the following effect on
+   * linked actors:
+   *
+   * For each linked actor `a` with `trapExit` set to `'''true'''`,
+   * send message `Exit(self, reason)` to `a`.
+   *
+   * For each linked actor `a` with `trapExit` set to `'''false'''`
+   * (default), call `a.exit(reason)` if `reason != 'normal`.
+   */</span>
+  def <a title="(reason: AnyRef)Nothing" id="scala.actors.Actor.exit(1f0b6465e5)">exit</a><span class="delimiter">(</span><a title="AnyRef" id="scala.actors.Actor.exit(1f0b6465e5).reason">reason</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>: <span title="Nothing">Nothing</span> = <a href="#scala.actors.Actor.self(821061aedf)" title="=&gt; scala.actors.Actor">self</a>.<a href="InternalActor.scala.html#scala.actors;InternalActor.exit(1f0b6465e5)" title="(reason: AnyRef)Nothing">exit</a><span class="delimiter">(</span><a href="#scala.actors.Actor.exit(1f0b6465e5).reason" title="AnyRef">reason</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Terminates execution of `self` with the following effect on
+   * linked actors:
+   *
+   * For each linked actor `a` with `trapExit` set to `'''true'''`,
+   * send message `Exit(self, 'normal)` to `a`.
+   */</span>
+  def <a title="()Nothing" id="scala.actors.Actor.exit(e84ebd0650)">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Nothing">Nothing</span> = <a href="#scala.actors.Actor.rawSelf(f1fae37cd4)" title="=&gt; scala.actors.InternalReplyReactor">rawSelf</a>.<a href="Reactor.scala.html#scala.actors;Reactor.exit" title="()Nothing">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/** Provides lightweight, concurrent actors. Actors are created by extending
+ *  the `Actor` trait (alternatively, one of the factory methods in its
+ *  companion object can be used).  The behavior of an `Actor` subclass is
+ *  defined by implementing its `act` method:
+ *  {{{
+ *  class MyActor extends Actor {
+ *    def act() {
+ *      // actor behavior goes here
+ *    }
+ *  }
+ *  }}}
+ *  A new `Actor` instance is started by invoking its `start` method.
+ *
+ *  '''Note:''' care must be taken when invoking thread-blocking methods other
+ *  than those provided by the `Actor` trait or its companion object (such as
+ *  `receive`). Blocking the underlying thread inside an actor may lead to
+ *  starvation of other actors. This also applies to actors hogging their
+ *  thread for a long time between invoking `receive`/`react`.
+ *
+ *  If actors use blocking operations (for example, methods for blocking I/O),
+ *  there are several options:
+ *
+ *  - The run-time system can be configured to use a larger thread pool size
+ *    (for example, by setting the `actors.corePoolSize` JVM property).
+ *  - The `scheduler` method of the `Actor` trait can be overridden to return a
+ *    `ResizableThreadPoolScheduler`, which resizes its thread pool to
+ *    avoid starvation caused by actors that invoke arbitrary blocking methods.
+ *  - The `actors.enableForkJoin` JVM property can be set to `false`, in which
+ *    case a `ResizableThreadPoolScheduler` is used by default to execute actors.
+ *
+ *  The main ideas of the implementation are explained in the two papers
+ *
+ *  - [[http://lampwww.epfl.ch/~odersky/papers/jmlc06.pdf Event-Based
+ *    Programming without Inversion of Control]],
+ *    Philipp Haller and Martin Odersky, ''Proc. JMLC 2006'', and
+ *  - [[http://lamp.epfl.ch/~phaller/doc/haller07coord.pdf Actors that
+ *    Unify Threads and Events]],
+ *    Philipp Haller and Martin Odersky, ''Proc. COORDINATION 2007''.
+ *
+ *  @author Philipp Haller
+ *
+ *  @define actor actor
+ *  @define channel actor's mailbox
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span>-<span class="long">781154067877019505L</span><span class="delimiter">)</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;Use the akka.actor package instead. For migration from the scala.actors package refer to the Actors Migration Guide.&quot;</span>, <span class="string">&quot;2.11.0&quot;</span><span class="delimiter">)</span>
+trait <a title="trait Actor extends AnyRef with scala.actors.InternalActor with scala.actors.ReplyReactor" id="scala.actors;Actor">Actor</a> extends <a href="InternalActor.scala.html#scala.actors;InternalActor" title="scala.actors.InternalActor">InternalActor</a> with <a href="ReplyReactor.scala.html#scala.actors;ReplyReactor" title="scala.actors.ReplyReactor">ReplyReactor</a> <span class="delimiter">{</span>
+
+  override def <a title="()scala.actors.Actor" id="scala.actors;Actor.start">start</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="#scala.actors;Actor" title="scala.actors.Actor">Actor</a> = <a href="#scala.actors;Actor" title="(x$1: scala.actors.Actor)scala.actors.Actor">synchronized</a> <span class="delimiter">{</span>
+    super.<a href="InternalActor.scala.html#scala.actors;InternalActor.start" title="()scala.actors.InternalActor">start</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    this
+  <span class="delimiter">}</span>
+
+  <span class="delimiter">}</span>
+
+
+        </pre>
+    </body>
+</html>

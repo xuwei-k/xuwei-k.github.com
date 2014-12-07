@@ -1,0 +1,783 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>scala/tools/nsc/backend/icode/Opcodes.scala</title>
+        <script type="text/javascript" src="../../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/* NSC -- new Scala compiler
+ * Copyright 2005-2013 LAMP/EPFL
+ * @author  Martin Odersky
+ */</span>
+
+package scala
+package tools.nsc
+package backend
+package icode
+
+import scala.reflect.internal.util.<span class="delimiter">{</span>Position,NoPosition<span class="delimiter">}</span>
+
+<span class="comment">/*
+  A pattern match
+
+  // locals
+    case THIS(clasz) =&gt;
+    case STORE_THIS(kind) =&gt;
+    case LOAD_LOCAL(local) =&gt;
+    case STORE_LOCAL(local) =&gt;
+    case SCOPE_ENTER(lv) =&gt;
+    case SCOPE_EXIT(lv) =&gt;
+  // stack
+    case LOAD_MODULE(module) =&gt;
+    case LOAD_EXCEPTION(clasz) =&gt;
+    case DROP(kind) =&gt;
+    case DUP(kind) =&gt;
+  // constants
+    case CONSTANT(const) =&gt;
+  // arithlogic
+    case CALL_PRIMITIVE(primitive) =&gt;
+  // casts
+    case IS_INSTANCE(tpe) =&gt;
+    case CHECK_CAST(tpe) =&gt;
+  // objs
+    case NEW(kind) =&gt;
+    case MONITOR_ENTER() =&gt;
+    case MONITOR_EXIT() =&gt;
+    case BOX(boxType) =&gt;
+    case UNBOX(tpe) =&gt;
+  // flds
+    case LOAD_FIELD(field, isStatic) =&gt;
+    case STORE_FIELD(field, isStatic) =&gt;
+  // mthds
+    case CALL_METHOD(method, style) =&gt;
+  // arrays
+    case LOAD_ARRAY_ITEM(kind) =&gt;
+    case STORE_ARRAY_ITEM(kind) =&gt;
+    case CREATE_ARRAY(elem, dims) =&gt;
+  // jumps
+    case SWITCH(tags, labels) =&gt;
+    case JUMP(whereto) =&gt;
+    case CJUMP(success, failure, cond, kind) =&gt;
+    case CZJUMP(success, failure, cond, kind) =&gt;
+  // ret
+    case RETURN(kind) =&gt;
+    case THROW(clasz) =&gt;
+*/</span>
+
+
+<span class="comment">/**
+ * The ICode intermediate representation. It is a stack-based
+ * representation, very close to the JVM and .NET. It uses the
+ * erased types of Scala and references Symbols to refer named entities
+ * in the source files.
+ */</span>
+trait <a title="trait Opcodes extends AnyRef" id="scala.tools.nsc.backend.icode;Opcodes">Opcodes</a> <a href="../../../../Unit.scala.html#scala;Unit" title="Unit" class="delimiter">{</a> self: ICodes =&gt;
+  import <a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.global" title="=&gt; scala.tools.nsc.Global">global</a>.<span class="delimiter">{</span>Symbol, NoSymbol, Name, Constant<span class="delimiter">}</span>
+
+  <span class="comment">// categories of ICode instructions</span>
+  final val <a title="Int(1)" id="scala.tools.nsc.backend.icode;Opcodes.localsCat">localsCat</a> =  <span title="Int(1)" class="int">1</span>
+  final val <a title="Int(2)" id="scala.tools.nsc.backend.icode;Opcodes.stackCat">stackCat</a>  =  <span title="Int(2)" class="int">2</span>
+  final val <a title="Int(3)" id="scala.tools.nsc.backend.icode;Opcodes.constCat">constCat</a>  =  <span title="Int(3)" class="int">3</span>
+  final val <a title="Int(4)" id="scala.tools.nsc.backend.icode;Opcodes.arilogCat">arilogCat</a> =  <span title="Int(4)" class="int">4</span>
+  final val <a title="Int(5)" id="scala.tools.nsc.backend.icode;Opcodes.castsCat">castsCat</a>  =  <span title="Int(5)" class="int">5</span>
+  final val <a title="Int(6)" id="scala.tools.nsc.backend.icode;Opcodes.objsCat">objsCat</a>   =  <span title="Int(6)" class="int">6</span>
+  final val <a title="Int(7)" id="scala.tools.nsc.backend.icode;Opcodes.fldsCat">fldsCat</a>   =  <span title="Int(7)" class="int">7</span>
+  final val <a title="Int(8)" id="scala.tools.nsc.backend.icode;Opcodes.mthdsCat">mthdsCat</a>  =  <span title="Int(8)" class="int">8</span>
+  final val <a title="Int(9)" id="scala.tools.nsc.backend.icode;Opcodes.arraysCat">arraysCat</a> =  <span title="Int(9)" class="int">9</span>
+  final val <a title="Int(10)" id="scala.tools.nsc.backend.icode;Opcodes.jumpsCat">jumpsCat</a>  = <span title="Int(10)" class="int">10</span>
+  final val <a title="Int(11)" id="scala.tools.nsc.backend.icode;Opcodes.retCat">retCat</a>    = <span title="Int(11)" class="int">11</span>
+
+  private lazy val ObjectReferenceList = <a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.ObjectReference" title="=&gt; Opcodes.this.TypeKind">ObjectReference</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.ObjectReferenceList">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+  <span class="comment">/** This class represents an instruction of the intermediate code.
+   *  Each case subclass will represent a specific operation.
+   */</span>
+  abstract class <a title="class Instruction extends Object with Cloneable" id="scala.tools.nsc.backend.icode;Opcodes;Instruction">Instruction</a> extends <a href="../../../../Cloneable.scala.html#scala;Cloneable" title="Cloneable">Cloneable</a> <span class="delimiter">{</span>
+    <span class="comment">// Vlad: I used these for checking the quality of the implementation, and we should regularely run a build with them</span>
+    <span class="comment">// enabled. But for production these should definitely be disabled, unless we enjoy getting angry emails from Greg :)</span>
+    <span class="comment">//if (!this.isInstanceOf[opcodes.LOAD_EXCEPTION])</span>
+    <span class="comment">//  assert(consumed == consumedTypes.length)</span>
+    <span class="comment">//assert(produced == producedTypes.length)</span>
+
+    def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.category">category</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = <span title="Int(0)" class="int">0</span> <span class="comment">// undefined</span>
+
+    <span class="comment">/** This abstract method returns the number of used elements on the stack */</span>
+    def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.consumed">consumed</a> : <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = <span title="Int(0)" class="int">0</span>
+
+    <span class="comment">/** This abstract method returns the number of produced elements on the stack */</span>
+    def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.produced">produced</a> : <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = <span title="Int(0)" class="int">0</span>
+
+    <span class="comment">/** This instruction consumes these types from the top of the stack, the first
+     *  element in the list is the deepest element on the stack.
+     */</span>
+    def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.consumedTypes">consumedTypes</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[Opcodes.this.TypeKind]">List</a><span class="delimiter">[</span>TypeKind<span class="delimiter">]</span> = <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+    <span class="comment">/** This instruction produces these types on top of the stack. */</span>
+    <span class="comment">// Vlad: I wonder why we keep producedTypes around -- it looks like an useless thing to have</span>
+    def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.producedTypes">producedTypes</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[Opcodes.this.TypeKind]">List</a><span class="delimiter">[</span>TypeKind<span class="delimiter">]</span> = <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+    <span class="comment">/** The corresponding position in the source file */</span>
+    private var <a title="scala.reflect.internal.util.Position" id="scala.tools.nsc.backend.icode;Opcodes;Instruction._pos_=">_pos</a>: <a href="../../../../reflect/internal/util/Position.scala.html#scala.reflect.internal.util;Position" title="scala.reflect.internal.util.Position">Position</a> = <a href="../../../../reflect/internal/util/Position.scala.html#scala.reflect.internal.util.NoPosition" title="scala.reflect.internal.util.NoPosition.type">NoPosition</a>
+
+    def <a title="=&gt; scala.reflect.internal.util.Position" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.pos">pos</a>: <a href="../../../../reflect/internal/util/Position.scala.html#scala.reflect.internal.util;Position" title="scala.reflect.internal.util.Position">Position</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction._pos_=" title="=&gt; scala.reflect.internal.util.Position">_pos</a>
+
+    def <a title="(p: scala.reflect.internal.util.Position)Instruction.this.type" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.setPos">setPos</a><span class="delimiter">(</span><a title="scala.reflect.internal.util.Position" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.setPos.p">p</a>: <a href="../../../../reflect/internal/util/Position.scala.html#scala.reflect.internal.util;Position" title="scala.reflect.internal.util.Position">Position</a><span class="delimiter">)</span>: this.type = <span class="delimiter">{</span>
+      <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction._pos_=" title="(x$1: scala.reflect.internal.util.Position)Unit">_pos</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction.setPos.p" title="scala.reflect.internal.util.Position">p</a>
+      this
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Clone this instruction. */</span>
+    override def <a title="()Opcodes.this.Instruction" id="scala.tools.nsc.backend.icode;Opcodes;Instruction.clone">clone</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> =
+      super.<span title="()Object">clone</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Opcodes.this.Instruction" class="delimiter">[</span><a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a><span class="delimiter">]</span>
+  <span class="delimiter">}</span>
+
+  object <a title="Opcodes.this.opcodes.type" id="scala.tools.nsc.backend.icode;Opcodes.opcodes">opcodes</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes" title="Opcodes.this.opcodes.type" class="delimiter">{</a>
+    <span class="comment">/** Loads &quot;this&quot; on top of the stack.
+     * Stack: ...
+     *    -&gt;: ...:ref
+     */</span>
+    case class <a title="class THIS extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.THIS.readResolve">THIS</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.clasz">clasz</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this constant */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.toString">toString</a> = <span title="String(&quot;THIS(&quot;)" class="string">&quot;THIS(&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.clasz" title="=&gt; Opcodes.this.global.Symbol">clasz</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.name" title="=&gt; THIS.this.clasz.NameType">name</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.producedTypes">producedTypes</a> =
+        <span class="comment">// we're not allowed to have REFERENCE(Array), but what about compiling the Array class? Well, we use object for it.</span>
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.clasz" title="=&gt; Opcodes.this.global.Symbol">clasz</a> <span title="(x$1: Any)Boolean">!=</span> <a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.global" title="=&gt; scala.tools.nsc.Global">global</a>.<a href="../../../../reflect/internal/Definitions.scala.html#scala.reflect.internal;Definitions.definitions" title="Opcodes.this.global.definitions.type">definitions</a>.<a href="../../../../reflect/internal/Definitions.scala.html#scala.reflect.internal;Definitions;DefinitionsClass.ArrayClass" title="=&gt; Opcodes.this.global.ClassSymbol">ArrayClass</a><span class="delimiter">)</span>
+          <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;REFERENCE" title="(cls: Opcodes.this.global.Symbol)Opcodes.this.REFERENCE">REFERENCE</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.clasz" title="=&gt; Opcodes.this.global.Symbol">clasz</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.REFERENCE)List[Opcodes.this.REFERENCE]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        else
+          <a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.ObjectReference" title="=&gt; Opcodes.this.TypeKind">ObjectReference</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THIS.category">category</a> = <span title="Int(1)">localsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Loads a constant on the stack.
+     * Stack: ...
+     *    -&gt;: ...:constant
+     */</span>
+    case class <a title="class CONSTANT extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.CONSTANT.readResolve">CONSTANT</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Constant" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.constant">constant</a>: <a href="../../../../reflect/internal/Constants.scala.html#scala.reflect.internal;Constants;Constant" title="Opcodes.this.global.Constant">Constant</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.toString">toString</a> = <span title="String(&quot;CONSTANT(&quot;)" class="string">&quot;CONSTANT(&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.constant" title="=&gt; Opcodes.this.global.Constant">constant</a>.<a href="../../../../reflect/internal/Constants.scala.html#scala.reflect.internal;Constants;Constant.escapedStringValue" title="=&gt; String">escapedStringValue</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.producedTypes">producedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.toTypeKind" title="(t: Opcodes.this.global.Type)Opcodes.this.TypeKind">toTypeKind</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.constant" title="=&gt; Opcodes.this.global.Constant">constant</a>.<a href="../../../../reflect/internal/Constants.scala.html#scala.reflect.internal;Constants;Constant.tpe" title="=&gt; Opcodes.this.global.Type">tpe</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CONSTANT.category">category</a> = <span title="Int(3)">constCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Loads an element of an array. The array and the index should
+     * be on top of the stack.
+     * Stack: ...:array[a](Ref):index(Int)
+     *    -&gt;: ...:element(a)
+     */</span>
+    case class <a title="class LOAD_ARRAY_ITEM extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.LOAD_ARRAY_ITEM.readResolve">LOAD_ARRAY_ITEM</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.kind">kind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.consumed">consumed</a> = <span title="Int(2)" class="int">2</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Product with Serializable with Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.consumedTypes">consumedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;ARRAY" title="(elem: Opcodes.this.TypeKind)Opcodes.this.ARRAY">ARRAY</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.kind" title="=&gt; Opcodes.this.TypeKind">kind</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Product with Serializable with Opcodes.this.TypeKind)List[Product with Serializable with Opcodes.this.TypeKind]">::</a> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.INT" title="Opcodes.this.INT.type">INT</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.INT.type)List[Opcodes.this.INT.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_ARRAY_ITEM.category">category</a> = <span title="Int(9)">arraysCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Load a local variable on the stack. It can be a method argument.
+     * Stack: ...
+     *    -&gt;: ...:value
+     */</span>
+    case class <a title="class LOAD_LOCAL extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.LOAD_LOCAL.readResolve">LOAD_LOCAL</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.Local" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_LOCAL.local">local</a>: <a href="Members.scala.html#scala.tools.nsc.backend.icode;Members;Local" title="Opcodes.this.Local">Local</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_LOCAL.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_LOCAL.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_LOCAL.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_LOCAL.local" title="=&gt; Opcodes.this.Local">local</a>.<a href="Members.scala.html#scala.tools.nsc.backend.icode;Members;Local.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_LOCAL.category">category</a> = <span title="Int(1)">localsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Load a field on the stack. The object to which it refers should be
+     * on the stack.
+     * Stack: ...:ref       (assuming isStatic = false)
+     *    -&gt;: ...:value
+     */</span>
+    case class <a title="class LOAD_FIELD extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.LOAD_FIELD.readResolve">LOAD_FIELD</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.field">field</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a>, <a title="Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.isStatic">isStatic</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =
+        <span title="String(&quot;LOAD_FIELD &quot;)" class="string">&quot;LOAD_FIELD &quot;</span> <span title="(x$1: Any)String">+</span> <span class="delimiter">(</span>if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.isStatic" title="=&gt; Boolean">isStatic</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.fullName(3bf7c90be7)" title="=&gt; String">fullName</a> else <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.toString" title="()String">toString</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.consumed">consumed</a> = if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.isStatic" title="=&gt; Boolean">isStatic</a><span class="delimiter">)</span> <span title="Int(0)" class="int">0</span> else <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.consumedTypes">consumedTypes</a> = if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.isStatic" title="=&gt; Boolean">isStatic</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a> else <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;REFERENCE" title="(cls: Opcodes.this.global.Symbol)Opcodes.this.REFERENCE">REFERENCE</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.owner" title="=&gt; Opcodes.this.global.Symbol">owner</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.REFERENCE)List[Opcodes.this.REFERENCE]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.producedTypes">producedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.toTypeKind" title="(t: Opcodes.this.global.Type)Opcodes.this.TypeKind">toTypeKind</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.tpe" title="=&gt; Opcodes.this.global.Type">tpe</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      <span class="comment">// more precise information about how to load this field</span>
+      <span class="comment">// see #4283</span>
+      var <a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.hostClass_=">hostClass</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.owner" title="=&gt; Opcodes.this.global.Symbol">owner</a>
+      def <a title="(cls: Opcodes.this.global.Symbol)LOAD_FIELD.this.type" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.setHostClass">setHostClass</a><span class="delimiter">(</span><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.setHostClass.cls">cls</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a><span class="delimiter">)</span>: this.type = <span class="delimiter">{</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.hostClass_=" title="(x$1: Opcodes.this.global.Symbol)Unit">hostClass</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.setHostClass.cls" title="Opcodes.this.global.Symbol">cls</a>; this <span class="delimiter">}</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_FIELD.category">category</a> = <span title="Int(7)">fldsCat</span>
+    <span class="delimiter">}</span>
+
+    case class <a title="class LOAD_MODULE extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.LOAD_MODULE.readResolve">LOAD_MODULE</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.module">module</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(0f40bc559c)" title="(assertion: Boolean, message: =&gt; Any)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.module" title="=&gt; Opcodes.this.global.Symbol">module</a> <span title="(x$1: Any)Boolean">!=</span> <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols.NoSymbol" title="=&gt; Opcodes.this.global.NoSymbol">NoSymbol</a>, <span title="String(&quot;Invalid module symbol&quot;)" class="string">&quot;Invalid module symbol&quot;</span><span class="delimiter">)</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="String(&quot;LOAD_MODULE &quot;)" class="string">&quot;LOAD_MODULE &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.module" title="=&gt; Opcodes.this.global.Symbol">module</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.REFERENCE]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.producedTypes">producedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;REFERENCE" title="(cls: Opcodes.this.global.Symbol)Opcodes.this.REFERENCE">REFERENCE</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.module" title="=&gt; Opcodes.this.global.Symbol">module</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.REFERENCE)List[Opcodes.this.REFERENCE]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_MODULE.category">category</a> = <span title="Int(2)">stackCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Store a value into an array at a specified index.
+     * Stack: ...:array[a](Ref):index(Int):value(a)
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class STORE_ARRAY_ITEM extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.STORE_ARRAY_ITEM.readResolve">STORE_ARRAY_ITEM</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_ARRAY_ITEM.kind">kind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_ARRAY_ITEM.consumed">consumed</a> = <span title="Int(3)" class="int">3</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_ARRAY_ITEM.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_ARRAY_ITEM.consumedTypes">consumedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;ARRAY" title="(elem: Opcodes.this.TypeKind)Opcodes.this.ARRAY">ARRAY</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_ARRAY_ITEM.kind" title="=&gt; Opcodes.this.TypeKind">kind</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.INT" title="Opcodes.this.INT.type">INT</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_ARRAY_ITEM.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_ARRAY_ITEM.category">category</a> = <span title="Int(9)">arraysCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Store a value into a local variable. It can be an argument.
+     * Stack: ...:value
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class STORE_LOCAL extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.STORE_LOCAL.readResolve">STORE_LOCAL</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.Local" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_LOCAL.local">local</a>: <a href="Members.scala.html#scala.tools.nsc.backend.icode;Members;Local" title="Opcodes.this.Local">Local</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_LOCAL.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_LOCAL.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_LOCAL.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_LOCAL.local" title="=&gt; Opcodes.this.Local">local</a>.<a href="Members.scala.html#scala.tools.nsc.backend.icode;Members;Local.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_LOCAL.category">category</a> = <span title="Int(1)">localsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Store a value into a field.
+     * Stack: ...:ref:value   (assuming isStatic=false)
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class STORE_FIELD extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.STORE_FIELD.readResolve">STORE_FIELD</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.field">field</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a>, <a title="Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.isStatic">isStatic</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =
+        <span title="String(&quot;STORE_FIELD &quot;)" class="string">&quot;STORE_FIELD &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a> <span title="(x$1: Any)String">+</span> <span class="delimiter">(</span>if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.isStatic" title="=&gt; Boolean">isStatic</a><span class="delimiter">)</span> <span title="String(&quot; (static)&quot;)" class="string">&quot; (static)&quot;</span> else <span title="String(&quot; (dynamic)&quot;)" class="string">&quot; (dynamic)&quot;</span><span class="delimiter">)</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.consumed">consumed</a> = if<span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.isStatic" title="=&gt; Boolean">isStatic</a><span class="delimiter">)</span> <span title="Int(1)" class="int">1</span> else <span title="Int(2)" class="int">2</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.consumedTypes">consumedTypes</a> =
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.isStatic" title="=&gt; Boolean">isStatic</a><span class="delimiter">)</span>
+          <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.toTypeKind" title="(t: Opcodes.this.global.Type)Opcodes.this.TypeKind">toTypeKind</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.tpe" title="=&gt; Opcodes.this.global.Type">tpe</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        else
+          <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;REFERENCE" title="(cls: Opcodes.this.global.Symbol)Opcodes.this.REFERENCE">REFERENCE</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.owner" title="=&gt; Opcodes.this.global.Symbol">owner</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.toTypeKind" title="(t: Opcodes.this.global.Type)Opcodes.this.TypeKind">toTypeKind</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.field" title="=&gt; Opcodes.this.global.Symbol">field</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.tpe" title="=&gt; Opcodes.this.global.Type">tpe</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_FIELD.category">category</a> = <span title="Int(7)">fldsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Store a value into the 'this' pointer.
+       * Stack: ...:ref
+       *    -&gt;: ...
+       */</span>
+    case class <a title="class STORE_THIS extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.STORE_THIS.readResolve">STORE_THIS</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_THIS.kind">kind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_THIS.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_THIS.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_THIS.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_THIS.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;STORE_THIS.category">category</a> = <span title="Int(1)">localsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Call a primitive function.
+     * Stack: ...:arg1:arg2:...:argn
+     *    -&gt;: ...:result
+     */</span>
+    case class <a title="class CALL_PRIMITIVE extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.CALL_PRIMITIVE.readResolve">CALL_PRIMITIVE</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.Primitive" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.primitive">primitive</a>: <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives;Primitive" title="Opcodes.this.Primitive">Primitive</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.consumed">consumed</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.primitive" title="=&gt; Opcodes.this.Primitive">primitive</a> match <span class="delimiter">{</span>
+        case Negation<span class="delimiter">(</span>_<span class="delimiter">)</span>       =&gt; <span title="Int(1)" class="int">1</span>
+        case Test<span class="delimiter">(</span>_,_, true<span class="delimiter">)</span>   =&gt; <span title="Int(1)" class="int">1</span>
+        case Test<span class="delimiter">(</span>_,_, false<span class="delimiter">)</span>  =&gt; <span title="Int(2)" class="int">2</span>
+        case Comparison<span class="delimiter">(</span>_,_<span class="delimiter">)</span>   =&gt; <span title="Int(2)" class="int">2</span>
+        case Arithmetic<span class="delimiter">(</span><a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.NOT" title="Opcodes.this.NOT.type">NOT</a>,_<span class="delimiter">)</span> =&gt; <span title="Int(1)" class="int">1</span>
+        case Arithmetic<span class="delimiter">(</span>_,_<span class="delimiter">)</span>   =&gt; <span title="Int(2)" class="int">2</span>
+        case Logical<span class="delimiter">(</span>_,_<span class="delimiter">)</span>      =&gt; <span title="Int(2)" class="int">2</span>
+        case Shift<span class="delimiter">(</span>_,_<span class="delimiter">)</span>        =&gt; <span title="Int(2)" class="int">2</span>
+        case Conversion<span class="delimiter">(</span>_,_<span class="delimiter">)</span>   =&gt; <span title="Int(1)" class="int">1</span>
+        case ArrayLength<span class="delimiter">(</span>_<span class="delimiter">)</span>    =&gt; <span title="Int(1)" class="int">1</span>
+        case StringConcat<span class="delimiter">(</span>_<span class="delimiter">)</span>   =&gt; <span title="Int(2)" class="int">2</span>
+        case <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.StartConcat" title="Opcodes.this.StartConcat.type">StartConcat</a>       =&gt; <span title="Int(0)" class="int">0</span>
+        case <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.EndConcat" title="Opcodes.this.EndConcat.type">EndConcat</a>         =&gt; <span title="Int(1)" class="int">1</span>
+      <span class="delimiter">}</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.primitive" title="=&gt; Opcodes.this.Primitive">primitive</a> match <span class="delimiter">{</span>
+        case Negation<span class="delimiter">(</span><span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>        =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Test<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span>, true<span class="delimiter">)</span>   =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Test<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span>, false<span class="delimiter">)</span>  =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Comparison<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>   =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Arithmetic<span class="delimiter">(</span><a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.NOT" title="Opcodes.this.NOT.type">NOT</a>, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span> =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Arithmetic<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>   =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Logical<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>      =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Shift<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>        =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.INT" title="Opcodes.this.INT.type">INT</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.INT.type)List[Opcodes.this.INT.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Conversion<span class="delimiter">(</span><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.consumedTypes.from">from</a>, _<span class="delimiter">)</span>   =&gt; <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.consumedTypes.from" title="Opcodes.this.TypeKind">from</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case ArrayLength<span class="delimiter">(</span><span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>     =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;ARRAY" title="(elem: Opcodes.this.TypeKind)Opcodes.this.ARRAY">ARRAY</a><span class="delimiter">(</span><span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.ARRAY)List[Opcodes.this.ARRAY]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case StringConcat<span class="delimiter">(</span><span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>    =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.ConcatClass" title="Opcodes.this.ConcatClass.type">ConcatClass</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.StartConcat" title="Opcodes.this.StartConcat.type">StartConcat</a>           =&gt; <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.EndConcat" title="Opcodes.this.EndConcat.type">EndConcat</a>             =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.ConcatClass" title="Opcodes.this.ConcatClass.type">ConcatClass</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.ConcatClass.type)List[Opcodes.this.ConcatClass.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      <span class="delimiter">}</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.primitive" title="=&gt; Opcodes.this.Primitive">primitive</a> match <span class="delimiter">{</span>
+        case Negation<span class="delimiter">(</span><span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>      =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Test<span class="delimiter">(</span>_, _, true<span class="delimiter">)</span>    =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.BOOL" title="Opcodes.this.BOOL.type">BOOL</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.BOOL.type)List[Opcodes.this.BOOL.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Test<span class="delimiter">(</span>_, _, false<span class="delimiter">)</span>   =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.BOOL" title="Opcodes.this.BOOL.type">BOOL</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.BOOL.type)List[Opcodes.this.BOOL.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Comparison<span class="delimiter">(</span>_, _<span class="delimiter">)</span>    =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.INT" title="Opcodes.this.INT.type">INT</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.INT.type)List[Opcodes.this.INT.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Arithmetic<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span> =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Logical<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>    =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Shift<span class="delimiter">(</span>_, <span title="Opcodes.this.TypeKind">kind</span><span class="delimiter">)</span>      =&gt; <span title="Opcodes.this.TypeKind">kind</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case Conversion<span class="delimiter">(</span>_, <a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.producedTypes.to">to</a><span class="delimiter">)</span>   =&gt; <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.producedTypes.to" title="Opcodes.this.TypeKind">to</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case ArrayLength<span class="delimiter">(</span>_<span class="delimiter">)</span>      =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.INT" title="Opcodes.this.INT.type">INT</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.INT.type)List[Opcodes.this.INT.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case StringConcat<span class="delimiter">(</span>_<span class="delimiter">)</span>     =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.ConcatClass" title="Opcodes.this.ConcatClass.type">ConcatClass</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.ConcatClass.type)List[Opcodes.this.ConcatClass.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.StartConcat" title="Opcodes.this.StartConcat.type">StartConcat</a>         =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.ConcatClass" title="Opcodes.this.ConcatClass.type">ConcatClass</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.ConcatClass.type)List[Opcodes.this.ConcatClass.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives.EndConcat" title="Opcodes.this.EndConcat.type">EndConcat</a>           =&gt; <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;REFERENCE" title="(cls: Opcodes.this.global.Symbol)Opcodes.this.REFERENCE">REFERENCE</a><span class="delimiter">(</span><a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.global" title="=&gt; scala.tools.nsc.Global">global</a>.<a href="../../../../reflect/internal/Definitions.scala.html#scala.reflect.internal;Definitions.definitions" title="Opcodes.this.global.definitions.type">definitions</a>.<a href="../../../../reflect/internal/Definitions.scala.html#scala.reflect.internal;Definitions;DefinitionsClass.StringClass" title="=&gt; Opcodes.this.global.ClassSymbol">StringClass</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.REFERENCE)List[Opcodes.this.REFERENCE]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      <span class="delimiter">}</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_PRIMITIVE.category">category</a> = <span title="Int(4)">arilogCat</span>
+   <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a CALL_METHOD instruction
+     * STYLE: dynamic / static(StaticInstance)
+     * Stack: ...:ref:arg1:arg2:...:argn
+     *    -&gt;: ...:result
+     *
+     * STYLE: static(StaticClass)
+     * Stack: ...:arg1:arg2:...:argn
+     *    -&gt;: ...:result
+     *
+     */</span>
+    case class <a title="class CALL_METHOD extends Opcodes.this.Instruction with scala.tools.nsc.backend.icode.ReferenceEquality with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.CALL_METHOD.readResolve">CALL_METHOD</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.method">method</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a>, <a title="scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.style">style</a>: <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle" title="scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle">InvokeStyle</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> with <a href="Members.scala.html#scala.tools.nsc.backend.icode;ReferenceEquality" title="scala.tools.nsc.backend.icode.ReferenceEquality">ReferenceEquality</a> <span class="delimiter">{</span>
+      def <a title="=&gt; String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.toShortString">toShortString</a> =
+        <span title="String(&quot;CALL_METHOD &quot;)" class="string">&quot;CALL_METHOD &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.method" title="=&gt; Opcodes.this.global.Symbol">method</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.name" title="=&gt; CALL_METHOD.this.method.NameType">name</a> <span title="(x$1: Any)String">+</span><span title="String(&quot; (&quot;)" class="string">&quot; (&quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.style" title="=&gt; scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle">style</a><span title="(x$1: Any)String">+</span><span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =
+        <span title="String(&quot;CALL_METHOD &quot;)" class="string">&quot;CALL_METHOD &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.method" title="=&gt; Opcodes.this.global.Symbol">method</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.fullName(3bf7c90be7)" title="=&gt; String">fullName</a> <span title="(x$1: Any)String">+</span><span title="String(&quot; (&quot;)" class="string">&quot; (&quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.style" title="=&gt; scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle">style</a><span title="(x$1: Any)String">+</span><span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+
+      var <a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.hostClass_=">hostClass</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.method" title="=&gt; Opcodes.this.global.Symbol">method</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.owner" title="=&gt; Opcodes.this.global.Symbol">owner</a>
+      def <a title="(cls: Opcodes.this.global.Symbol)CALL_METHOD.this.type" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.setHostClass">setHostClass</a><span class="delimiter">(</span><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.setHostClass.cls">cls</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a><span class="delimiter">)</span>: this.type = <span class="delimiter">{</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.hostClass_=" title="(x$1: Opcodes.this.global.Symbol)Unit">hostClass</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.setHostClass.cls" title="Opcodes.this.global.Symbol">cls</a>; this <span class="delimiter">}</span>
+
+      <span class="comment">/** This is specifically for preserving the target native Array type long
+       *  enough that clone() can generate the right call.
+       */</span>
+      var <a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.targetTypeKind_=">targetTypeKind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.UNIT" title="Opcodes.this.UNIT.type">UNIT</a> <span class="comment">// the default should never be used, so UNIT should fail fast.</span>
+      def <a title="(tk: Opcodes.this.TypeKind)Unit" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.setTargetTypeKind">setTargetTypeKind</a><span class="delimiter">(</span><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.setTargetTypeKind.tk">tk</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.targetTypeKind_=" title="(x$1: Opcodes.this.TypeKind)Unit">targetTypeKind</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.setTargetTypeKind.tk" title="Opcodes.this.TypeKind">tk</a>
+
+      private def <a title="=&gt; List[Opcodes.this.global.Type]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.params">params</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.method" title="=&gt; Opcodes.this.global.Symbol">method</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.info" title="=&gt; Opcodes.this.global.Type">info</a>.<a href="../../../../reflect/internal/Types.scala.html#scala.reflect.internal;Types;Type.paramTypes" title="=&gt; List[Opcodes.this.global.Type]">paramTypes</a>
+      private def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumesInstance">consumesInstance</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.style" title="=&gt; scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle">style</a> match <span class="delimiter">{</span>
+        case Static<span class="delimiter">(</span>false<span class="delimiter">)</span>  =&gt; <span title="Int(0)" class="int">0</span>
+        case _              =&gt; <span title="Int(1)" class="int">1</span>
+      <span class="delimiter">}</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumed">consumed</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.params" title="=&gt; List[Opcodes.this.global.Type]">params</a>.<a href="../../../../collection/LinearSeqOptimized.scala.html#scala.collection;LinearSeqOptimized.length" title="=&gt; Int">length</a> <a href="../../../../Int.scala.html#scala;Int.+(1409840560)" title="(x: Int)Int">+</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumesInstance" title="=&gt; Int">consumesInstance</a>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumedTypes">consumedTypes</a> = <span class="delimiter">{</span>
+        val args = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.params" title="=&gt; List[Opcodes.this.global.Type]">params</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.map" title="List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumedTypes.args">map</a> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.toTypeKind" title="(t: Opcodes.this.global.Type)Opcodes.this.TypeKind">toTypeKind</a>
+        if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumesInstance" title="=&gt; Int">consumesInstance</a> <a href="../../../../Int.scala.html#scala;Int.>(5f58a84eb3)" title="(x: Int)Boolean">&gt;</a> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.ObjectReference" title="=&gt; Opcodes.this.TypeKind">ObjectReference</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumedTypes.args" title="List[Opcodes.this.TypeKind]">args</a>
+        else <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.consumedTypes.args" title="List[Opcodes.this.TypeKind]">args</a>
+      <span class="delimiter">}</span>
+
+      private val <a title="List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.producedList">producedList</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.toTypeKind" title="(t: Opcodes.this.global.Type)Opcodes.this.TypeKind">toTypeKind</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.method" title="=&gt; Opcodes.this.global.Symbol">method</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.info" title="=&gt; Opcodes.this.global.Type">info</a>.<a href="../../../../reflect/internal/Types.scala.html#scala.reflect.internal;Types;Type.resultType(9b9cdebb0f)" title="=&gt; Opcodes.this.global.Type">resultType</a><span class="delimiter">)</span> match <span class="delimiter">{</span>
+        case <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.UNIT" title="Opcodes.this.UNIT.type">UNIT</a>                      =&gt; <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case _ if <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.method" title="=&gt; Opcodes.this.global.Symbol">method</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.isConstructor" title="=&gt; Boolean">isConstructor</a> =&gt; <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+        case <a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.producedList.kind">kind</a>                      =&gt; <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.producedList.kind" title="Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      <span class="delimiter">}</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.produced">produced</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.producedList" title="=&gt; List[Opcodes.this.TypeKind]">producedList</a>.<a href="../../../../collection/SeqLike.scala.html#scala.collection;SeqLike.size" title="=&gt; Int">size</a>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.producedList" title="=&gt; List[Opcodes.this.TypeKind]">producedList</a>
+
+      <span class="comment">/** object identity is equality for CALL_METHODs. Needed for
+       *  being able to store such instructions into maps, when more
+       *  than one CALL_METHOD to the same method might exist.
+       */</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CALL_METHOD.category">category</a> = <span title="Int(8)">mthdsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * A place holder entry that allows us to parse class files with invoke dynamic
+     * instructions. Because the compiler doesn't yet really understand the
+     * behavior of invokeDynamic, this op acts as a poison pill. Any attempt to analyze
+     * this instruction will cause a failure. The only optimization that
+     * should ever look at non-Scala generated icode is the inliner, and it
+     * has been modified to not examine any method with invokeDynamic
+     * instructions. So if this poison pill ever causes problems then
+     * there's been a serious misunderstanding
+     */</span>
+    <span class="comment">// TODO do the real thing</span>
+    case class <a title="class INVOKE_DYNAMIC extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.INVOKE_DYNAMIC.readResolve">INVOKE_DYNAMIC</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.poolEntry">poolEntry</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      private def <a title="=&gt; Nothing" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.error">error</a> = sys.<a href="../../../../sys/package.scala.html#scala.sys.package.error" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="String(&quot;INVOKE_DYNAMIC is not fully implemented and should not be analyzed&quot;)" class="string">&quot;INVOKE_DYNAMIC is not fully implemented and should not be analyzed&quot;</span><span class="delimiter">)</span>
+      override def <a title="=&gt; Nothing" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.consumed">consumed</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.error" title="=&gt; Nothing">error</a>
+      override def <a title="=&gt; Nothing" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.produced">produced</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.error" title="=&gt; Nothing">error</a>
+      override def <a title="=&gt; Nothing" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.error" title="=&gt; Nothing">error</a>
+      override def <a title="=&gt; Nothing" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.category">category</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;INVOKE_DYNAMIC.error" title="=&gt; Nothing">error</a>
+    <span class="delimiter">}</span>
+
+    case class <a title="class BOX extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.BOX.readResolve">BOX</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.boxType">boxType</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(65d7b4917f)" title="(assertion: Boolean)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a>.<a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind.isValueType" title="=&gt; Boolean">isValueType</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a> <span title="(x$1: AnyRef)Boolean">ne</span> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.UNIT" title="Opcodes.this.UNIT.type">UNIT</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="comment">// documentation</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="String(&quot;BOX &quot;)" class="string">&quot;BOX &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; List[Opcodes.this.BOXED]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.producedTypes">producedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;BOXED" title="(kind: Opcodes.this.TypeKind)Opcodes.this.BOXED">BOXED</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.BOXED)List[Opcodes.this.BOXED]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;BOX.category">category</a> = <span title="Int(6)">objsCat</span>
+    <span class="delimiter">}</span>
+
+    case class <a title="class UNBOX extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.UNBOX.readResolve">UNBOX</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.boxType">boxType</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <a href="../../../../Predef.scala.html#scala.Predef.assert(65d7b4917f)" title="(assertion: Boolean)Unit">assert</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a>.<a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind.isValueType" title="=&gt; Boolean">isValueType</a> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <a href="../../../../Boolean.scala.html#scala;Boolean.unary_!" title="=&gt; Boolean">!</a><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;BOXED" title="Opcodes.this.BOXED">BOXED</a><span class="delimiter">]</span> <a href="../../../../Boolean.scala.html#scala;Boolean.&&" title="(x: Boolean)Boolean">&amp;&amp;</a> <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a> <span title="(x$1: AnyRef)Boolean">ne</span> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.UNIT" title="Opcodes.this.UNIT.type">UNIT</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="comment">// documentation</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="String(&quot;UNBOX &quot;)" class="string">&quot;UNBOX &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.ObjectReferenceList" title="=&gt; List[Opcodes.this.TypeKind]">ObjectReferenceList</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.boxType" title="=&gt; Opcodes.this.TypeKind">boxType</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;UNBOX.category">category</a> = <span title="Int(6)">objsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Create a new instance of a class through the specified constructor
+     * Stack: ...:arg1:arg2:...:argn
+     *    -&gt;: ...:ref
+     */</span>
+    case class <a title="class NEW extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.NEW.readResolve">NEW</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.REFERENCE" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.kind">kind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;REFERENCE" title="Opcodes.this.REFERENCE">REFERENCE</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="String(&quot;NEW &quot;)" class="string">&quot;NEW &quot;</span><span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.kind" title="=&gt; Opcodes.this.REFERENCE">kind</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.REFERENCE]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.kind" title="=&gt; Opcodes.this.REFERENCE">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.REFERENCE)List[Opcodes.this.REFERENCE]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      <span class="comment">/** The corresponding constructor call. */</span>
+      var <a title="scala.tools.nsc.backend.icode.Opcodes.opcodes.CALL_METHOD" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.init_=">init</a>: <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes.CALL_METHOD.readResolve" title="scala.tools.nsc.backend.icode.Opcodes.opcodes.CALL_METHOD">CALL_METHOD</a> = _
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;NEW.category">category</a> = <span title="Int(6)">objsCat</span>
+    <span class="delimiter">}</span>
+
+
+    <span class="comment">/** This class represents a CREATE_ARRAY instruction
+     * Stack: ...:size_1:size_2:..:size_n
+     *    -&gt;: ...:arrayref
+     */</span>
+    case class <a title="class CREATE_ARRAY extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.CREATE_ARRAY.readResolve">CREATE_ARRAY</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.elem">elem</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a>, <a title="Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.dims">dims</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;CREATE_ARRAY &quot;)" class="string">&quot;CREATE_ARRAY &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.elem" title="=&gt; Opcodes.this.TypeKind">elem</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; x &quot;)" class="string">&quot; x &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.dims" title="=&gt; Int">dims</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.consumed">consumed</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.dims" title="=&gt; Int">dims</a>
+
+      override def <a title="=&gt; List[Opcodes.this.INT.type]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.consumedTypes">consumedTypes</a> = <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.List" title="scala.collection.immutable.List.type">List</a>.<a href="../../../../collection/generic/GenTraversableFactory.scala.html#scala.collection.generic;GenTraversableFactory.fill(7c98e57083)" title="(n: Int)(elem: =&gt; Opcodes.this.INT.type)List[Opcodes.this.INT.type]">fill</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.dims" title="=&gt; Int">dims</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.INT" title="Opcodes.this.INT.type">INT</a><span class="delimiter">)</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; List[Opcodes.this.ARRAY]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.producedTypes">producedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;ARRAY" title="(elem: Opcodes.this.TypeKind)Opcodes.this.ARRAY">ARRAY</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.elem" title="=&gt; Opcodes.this.TypeKind">elem</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.ARRAY)List[Opcodes.this.ARRAY]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CREATE_ARRAY.category">category</a> = <span title="Int(9)">arraysCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a IS_INSTANCE instruction
+     * Stack: ...:ref
+     *    -&gt;: ...:result(boolean)
+     */</span>
+    case class <a title="class IS_INSTANCE extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.IS_INSTANCE.readResolve">IS_INSTANCE</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.typ">typ</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;IS_INSTANCE &quot;)" class="string">&quot;IS_INSTANCE &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.typ" title="=&gt; Opcodes.this.TypeKind">typ</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.ObjectReferenceList" title="=&gt; List[Opcodes.this.TypeKind]">ObjectReferenceList</a>
+      override def <a title="=&gt; List[Opcodes.this.BOOL.type]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.producedTypes">producedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.BOOL" title="Opcodes.this.BOOL.type">BOOL</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.BOOL.type)List[Opcodes.this.BOOL.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;IS_INSTANCE.category">category</a> = <span title="Int(5)">castsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a CHECK_CAST instruction
+     * Stack: ...:ref(oldtype)
+     *    -&gt;: ...:ref(typ &lt;=: oldtype)
+     */</span>
+    case class <a title="class CHECK_CAST extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.CHECK_CAST.readResolve">CHECK_CAST</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.typ">typ</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;CHECK_CAST &quot;)" class="string">&quot;CHECK_CAST &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.typ" title="=&gt; Opcodes.this.TypeKind">typ</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.ObjectReferenceList" title="=&gt; List[Opcodes.this.TypeKind]">ObjectReferenceList</a>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.typ" title="=&gt; Opcodes.this.TypeKind">typ</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CHECK_CAST.category">category</a> = <span title="Int(5)">castsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a SWITCH instruction
+     * Stack: ...:index(int)
+     *    -&gt;: ...:
+     *
+     * The tags array contains one entry per label, each entry consisting of
+     * an array of ints, any of which will trigger the jump to the corresponding label.
+     * labels should contain an extra label, which is the 'default' jump.
+     */</span>
+    case class <a title="class SWITCH extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.SWITCH.readResolve">SWITCH</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="List[List[Int]]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.tags">tags</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[List[Int]]">List</a><span class="delimiter">[</span>List<span class="delimiter">[</span>Int<span class="delimiter">]</span><span class="delimiter">]</span>, <a title="List[Opcodes.this.BasicBlock]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.labels">labels</a>: <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List" title="List[Opcodes.this.BasicBlock]">List</a><span class="delimiter">[</span>BasicBlock<span class="delimiter">]</span><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;SWITCH ...&quot;)" class="string">&quot;SWITCH ...&quot;</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.INT.type]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.consumedTypes">consumedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.INT" title="Opcodes.this.INT.type">INT</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.INT.type)List[Opcodes.this.INT.type]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount">flatTagsCount</a>: <a href="../../../../Int.scala.html#scala;Int" title="Int">Int</a> = <span class="delimiter">{</span> var <a title="Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.acc">acc</a> = <span title="Int(0)" class="int">0</span>; var <a title="List[List[Int]]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.rest">rest</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.tags" title="=&gt; List[List[Int]]">tags</a>; while<span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.rest" title="List[List[Int]]">rest</a>.<a href="../../../../collection/TraversableOnce.scala.html#scala.collection;TraversableOnce.nonEmpty" title="=&gt; Boolean">nonEmpty</a><span class="delimiter">)</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.while$1" title="()Unit" class="delimiter">{</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.acc" title="Int">acc</a> <a href="../../../../Int.scala.html#scala;Int.+(1409840560)" title="(x: Int)Int">+=</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.rest" title="List[List[Int]]">rest</a>.<a href="../../../../collection/IterableLike.scala.html#scala.collection;IterableLike.head" title="=&gt; List[Int]">head</a>.<a href="../../../../collection/LinearSeqOptimized.scala.html#scala.collection;LinearSeqOptimized.length" title="=&gt; Int">length</a>; <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.rest" title="List[List[Int]]">rest</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.rest" title="List[List[Int]]">rest</a>.<a href="../../../../collection/TraversableLike.scala.html#scala.collection;TraversableLike.tail" title="=&gt; List[List[Int]]">tail</a> <span class="delimiter">}</span>; <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.flatTagsCount.acc" title="Int">acc</a> <span class="delimiter">}</span> <span class="comment">// a one-liner</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SWITCH.category">category</a> = <span title="Int(10)">jumpsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a JUMP instruction
+     * Stack: ...
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class JUMP extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.JUMP.readResolve">JUMP</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.BasicBlock" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;JUMP.whereto">whereto</a>: <a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock" title="Opcodes.this.BasicBlock">BasicBlock</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;JUMP.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;JUMP &quot;)" class="string">&quot;JUMP &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;JUMP.whereto" title="=&gt; Opcodes.this.BasicBlock">whereto</a>.<a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock.label" title="=&gt; Int">label</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;JUMP.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;JUMP.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;JUMP.category">category</a> = <span title="Int(10)">jumpsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a CJUMP instruction
+     * It compares the two values on the stack with the 'cond' test operator
+     * Stack: ...:value1:value2
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class CJUMP extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.CJUMP.readResolve">CJUMP</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.BasicBlock" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.successBlock">successBlock</a>: <a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock" title="Opcodes.this.BasicBlock">BasicBlock</a>,
+		     <a title="Opcodes.this.BasicBlock" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.failureBlock">failureBlock</a>: <a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock" title="Opcodes.this.BasicBlock">BasicBlock</a>,
+		     <a title="Opcodes.this.TestOp" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.cond">cond</a>: <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives;TestOp" title="Opcodes.this.TestOp">TestOp</a>,
+                     <a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.kind">kind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a>
+    <span class="delimiter">{</span>
+
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">(</span>
+        <span title="String(&quot;CJUMP (&quot;)" class="string">&quot;CJUMP (&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span> <span title="(x$1: Any)String">+</span>
+        <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.cond" title="=&gt; Opcodes.this.TestOp">cond</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; ? &quot;)" class="string">&quot; ? &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.successBlock" title="=&gt; Opcodes.this.BasicBlock">successBlock</a>.<a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock.label" title="=&gt; Int">label</a><span title="(x$1: Any)String">+</span><span title="String(&quot; : &quot;)" class="string">&quot; : &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.failureBlock" title="=&gt; Opcodes.this.BasicBlock">failureBlock</a>.<a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock.label" title="=&gt; Int">label</a>
+      <span class="delimiter">)</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.consumed">consumed</a> = <span title="Int(2)" class="int">2</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CJUMP.category">category</a> = <span title="Int(10)">jumpsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a CZJUMP instruction
+     * It compares the one value on the stack and zero with the 'cond' test operator
+     * Stack: ...:value:
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class CZJUMP extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.CZJUMP.readResolve">CZJUMP</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.BasicBlock" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.successBlock">successBlock</a>: <a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock" title="Opcodes.this.BasicBlock">BasicBlock</a>,
+                      <a title="Opcodes.this.BasicBlock" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.failureBlock">failureBlock</a>: <a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock" title="Opcodes.this.BasicBlock">BasicBlock</a>,
+                      <a title="Opcodes.this.TestOp" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.cond">cond</a>: <a href="Primitives.scala.html#scala.tools.nsc.backend.icode;Primitives;TestOp" title="Opcodes.this.TestOp">TestOp</a>,
+                      <a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.kind">kind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">(</span>
+        <span title="String(&quot;CZJUMP (&quot;)" class="string">&quot;CZJUMP (&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span> <span title="(x$1: Any)String">+</span>
+        <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.cond" title="=&gt; Opcodes.this.TestOp">cond</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; ? &quot;)" class="string">&quot; ? &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.successBlock" title="=&gt; Opcodes.this.BasicBlock">successBlock</a>.<a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock.label" title="=&gt; Int">label</a><span title="(x$1: Any)String">+</span><span title="String(&quot; : &quot;)" class="string">&quot; : &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.failureBlock" title="=&gt; Opcodes.this.BasicBlock">failureBlock</a>.<a href="BasicBlocks.scala.html#scala.tools.nsc.backend.icode;BasicBlocks;BasicBlock.label" title="=&gt; Int">label</a>
+      <span class="delimiter">)</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;CZJUMP.category">category</a> = <span title="Int(10)">jumpsCat</span>
+    <span class="delimiter">}</span>
+
+
+    <span class="comment">/** This class represents a RETURN instruction
+     * Stack: ...
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class RETURN extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.RETURN.readResolve">RETURN</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.kind">kind</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.consumed">consumed</a> = if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <span title="(x$1: Any)Boolean">==</span> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.UNIT" title="Opcodes.this.UNIT.type">UNIT</a><span class="delimiter">)</span> <span title="Int(0)" class="int">0</span> else <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.consumedTypes">consumedTypes</a> = if <span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <span title="(x$1: Any)Boolean">==</span> <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.UNIT" title="Opcodes.this.UNIT.type">UNIT</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a> else <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.kind" title="=&gt; Opcodes.this.TypeKind">kind</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;RETURN.category">category</a> = <span title="Int(11)">retCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a THROW instruction
+     * Stack: ...:Throwable(Ref)
+     *    -&gt;: ...:
+     */</span>
+    case class <a title="class THROW extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.THROW.readResolve">THROW</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.clasz">clasz</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** PP to ID: We discussed parameterizing LOAD_EXCEPTION but
+       *  not THROW, which came about organically.  It seems like the
+       *  right thing, but can you confirm?
+       */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.toString">toString</a> = <span title="String(&quot;THROW(&quot;)" class="string">&quot;THROW(&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.clasz" title="=&gt; Opcodes.this.global.Symbol">clasz</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.name" title="=&gt; THROW.this.clasz.NameType">name</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.consumedTypes">consumedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds.toTypeKind" title="(t: Opcodes.this.global.Type)Opcodes.this.TypeKind">toTypeKind</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.clasz" title="=&gt; Opcodes.this.global.Symbol">clasz</a>.<a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol.tpe" title="=&gt; Opcodes.this.global.Type">tpe</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;THROW.category">category</a> = <span title="Int(11)">retCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a DROP instruction
+     * Stack: ...:something
+     *    -&gt;: ...
+     */</span>
+    case class <a title="class DROP extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.DROP.readResolve">DROP</a> <a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.typ">typ</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;DROP &quot;)" class="string">&quot;DROP &quot;</span><span title="(x$1: Any)String">+</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.typ" title="=&gt; Opcodes.this.TypeKind">typ</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.typ" title="=&gt; Opcodes.this.TypeKind">typ</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DROP.category">category</a> = <span title="Int(2)">stackCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a DUP instruction
+     * Stack: ...:something
+     *    -&gt;: ...:something:something
+     */</span>
+    case class <a title="class DUP extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.DUP.readResolve">DUP</a> <a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.TypeKind" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.typ">typ</a>: <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;TypeKind" title="Opcodes.this.TypeKind">TypeKind</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.produced">produced</a> = <span title="Int(2)" class="int">2</span>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.consumedTypes">consumedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.typ" title="=&gt; Opcodes.this.TypeKind">typ</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.producedTypes">producedTypes</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.typ" title="=&gt; Opcodes.this.TypeKind">typ</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.typ" title="=&gt; Opcodes.this.TypeKind">typ</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;DUP.category">category</a> = <span title="Int(2)">stackCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a MONITOR_ENTER instruction
+     * Stack: ...:object(ref)
+     *    -&gt;: ...:
+     */</span>
+    case class <a title="class MONITOR_ENTER extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.MONITOR_ENTER.readResolve">MONITOR_ENTER</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_ENTER.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;MONITOR_ENTER&quot;)" class="string">&quot;MONITOR_ENTER&quot;</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_ENTER.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_ENTER.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_ENTER.consumedTypes">consumedTypes</a> = <a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.ObjectReference" title="=&gt; Opcodes.this.TypeKind">ObjectReference</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_ENTER.category">category</a> = <span title="Int(6)">objsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a MONITOR_EXIT instruction
+     * Stack: ...:object(ref)
+     *    -&gt;: ...:
+     */</span>
+    case class <a title="class MONITOR_EXIT extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.MONITOR_EXIT.readResolve">MONITOR_EXIT</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      <span class="comment">/** Returns a string representation of this instruction */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_EXIT.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> =<span title="String(&quot;MONITOR_EXIT&quot;)" class="string">&quot;MONITOR_EXIT&quot;</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_EXIT.consumed">consumed</a> = <span title="Int(1)" class="int">1</span>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_EXIT.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+
+      override def <a title="=&gt; List[Opcodes.this.TypeKind]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_EXIT.consumedTypes">consumedTypes</a> = <a href="ICodes.scala.html#scala.tools.nsc.backend.icode;ICodes.ObjectReference" title="=&gt; Opcodes.this.TypeKind">ObjectReference</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.TypeKind)List[Opcodes.this.TypeKind]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;MONITOR_EXIT.category">category</a> = <span title="Int(6)">objsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** A local variable becomes visible at this point in code.
+     *  Used only for generating precise local variable tables as
+     *  debugging information.
+     */</span>
+    case class <a title="class SCOPE_ENTER extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.SCOPE_ENTER.readResolve">SCOPE_ENTER</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.Local" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_ENTER.lv">lv</a>: <a href="Members.scala.html#scala.tools.nsc.backend.icode;Members;Local" title="Opcodes.this.Local">Local</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_ENTER.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="String(&quot;SCOPE_ENTER &quot;)" class="string">&quot;SCOPE_ENTER &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_ENTER.lv" title="=&gt; Opcodes.this.Local">lv</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_ENTER.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_ENTER.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_ENTER.category">category</a> = <span title="Int(1)">localsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** A local variable leaves its scope at this point in code.
+     *  Used only for generating precise local variable tables as
+     *  debugging information.
+     */</span>
+    case class <a title="class SCOPE_EXIT extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.SCOPE_EXIT.readResolve">SCOPE_EXIT</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.Local" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_EXIT.lv">lv</a>: <a href="Members.scala.html#scala.tools.nsc.backend.icode;Members;Local" title="Opcodes.this.Local">Local</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_EXIT.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="String(&quot;SCOPE_EXIT &quot;)" class="string">&quot;SCOPE_EXIT &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_EXIT.lv" title="=&gt; Opcodes.this.Local">lv</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_EXIT.consumed">consumed</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_EXIT.produced">produced</a> = <span title="Int(0)" class="int">0</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SCOPE_EXIT.category">category</a> = <span title="Int(1)">localsCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Fake instruction. It designates the VM who pushes an exception
+     *  on top of the /empty/ stack at the beginning of each exception handler.
+     *  Note: Unlike other instructions, it consumes all elements on the stack!
+     *        then pushes one exception instance.
+     */</span>
+    case class <a title="class LOAD_EXCEPTION extends Opcodes.this.Instruction with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.LOAD_EXCEPTION.readResolve">LOAD_EXCEPTION</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Symbol" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_EXCEPTION.clasz">clasz</a>: <a href="../../../../reflect/internal/Symbols.scala.html#scala.reflect.internal;Symbols;Symbol" title="Opcodes.this.global.Symbol">Symbol</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes;Instruction" title="Opcodes.this.Instruction">Instruction</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Nothing" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_EXCEPTION.consumed">consumed</a> = sys.<a href="../../../../sys/package.scala.html#scala.sys.package.error" title="(message: String)Nothing">error</a><span class="delimiter">(</span><span title="String(&quot;LOAD_EXCEPTION does clean the whole stack, no idea how many things it consumes!&quot;)" class="string">&quot;LOAD_EXCEPTION does clean the whole stack, no idea how many things it consumes!&quot;</span><span class="delimiter">)</span>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_EXCEPTION.produced">produced</a> = <span title="Int(1)" class="int">1</span>
+      override def <a title="=&gt; List[Opcodes.this.REFERENCE]" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_EXCEPTION.producedTypes">producedTypes</a> = <a href="TypeKinds.scala.html#scala.tools.nsc.backend.icode;TypeKinds;REFERENCE" title="(cls: Opcodes.this.global.Symbol)Opcodes.this.REFERENCE">REFERENCE</a><span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_EXCEPTION.clasz" title="=&gt; Opcodes.this.global.Symbol">clasz</a><span class="delimiter">)</span> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable;List.::" title="(x: Opcodes.this.REFERENCE)List[Opcodes.this.REFERENCE]">::</a> <a href="../../../../collection/immutable/List.scala.html#scala.collection.immutable.Nil" title="scala.collection.immutable.Nil.type">Nil</a>
+      override def <a title="=&gt; Int" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;LOAD_EXCEPTION.category">category</a> = <span title="Int(2)">stackCat</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** This class represents a method invocation style. */</span>
+    sealed abstract class <a title="class InvokeStyle extends AnyRef" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle">InvokeStyle</a> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle" title="scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle" class="delimiter">{</a>
+      <span class="comment">/** Is this a dynamic method call? */</span>
+      def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle.isDynamic">isDynamic</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = false
+
+      <span class="comment">/** Is this a static method call? */</span>
+      def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle.isStatic">isStatic</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = false
+
+      def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle.isSuper">isSuper</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = false
+
+      <span class="comment">/** Is this an instance method call? */</span>
+      def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle.hasInstance">hasInstance</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a> = true
+
+      <span class="comment">/** Returns a string representation of this style. */</span>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Virtual calls.
+     *  On JVM, translated to either `invokeinterface` or `invokevirtual`.
+     */</span>
+    case object <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes.Dynamic.productElement.x$1" title="scala.tools.nsc.backend.icode.Opcodes.opcodes.Dynamic.type" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.Dynamic.readResolve">Dynamic</a> extends <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle" title="scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle">InvokeStyle</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.Dynamic.isDynamic">isDynamic</a> = true
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.Dynamic.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span title="String(&quot;dynamic&quot;)" class="string">&quot;dynamic&quot;</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Special invoke:
+     *   Static(true)  is used for calls to private members, ie `invokespecial` on JVM.
+     *   Static(false) is used for calls to class-level instance-less static methods, ie `invokestatic` on JVM.
+     */</span>
+    case class <a title="class Static extends scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.Static.readResolve">Static</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;Static.onInstance">onInstance</a>: <a href="../../../../Boolean.scala.html#scala;Boolean" title="Boolean">Boolean</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle" title="scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle">InvokeStyle</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;Static.isStatic">isStatic</a>    = true
+      override def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;Static.hasInstance">hasInstance</a> = <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;Static.onInstance" title="=&gt; Boolean">onInstance</a>
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;Static.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span>
+        if<span class="delimiter">(</span><a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;Static.onInstance" title="=&gt; Boolean">onInstance</a><span class="delimiter">)</span> <span title="String(&quot;static-instance&quot;)" class="string">&quot;static-instance&quot;</span>
+        else           <span title="String(&quot;static-class&quot;)" class="string">&quot;static-class&quot;</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Call through super[mix].
+     *  On JVM, translated to `invokespecial`.
+     */</span>
+    case class <a title="class SuperCall extends scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle with Product with Serializable" id="scala.tools.nsc.backend.icode;Opcodes.opcodes.SuperCall.readResolve">SuperCall</a><a href="../../../../Product.scala.html#scala;Product" title="Product" class="delimiter">(</a><a title="Opcodes.this.global.Name" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SuperCall.mix">mix</a>: <a href="../../../../reflect/internal/Names.scala.html#scala.reflect.internal;Names;Name" title="Opcodes.this.global.Name">Name</a><span class="delimiter">)</span> extends <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;InvokeStyle" title="scala.tools.nsc.backend.icode.Opcodes.opcodes.InvokeStyle">InvokeStyle</a> <span class="delimiter">{</span>
+      override def <a title="=&gt; Boolean" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SuperCall.isSuper">isSuper</a> = true
+      override def <a title="()String" id="scala.tools.nsc.backend.icode;Opcodes.opcodes;SuperCall.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="String">String</span> = <span class="delimiter">{</span> <span title="String(&quot;super(&quot;)" class="string">&quot;super(&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#scala.tools.nsc.backend.icode;Opcodes.opcodes;SuperCall.mix" title="=&gt; Opcodes.this.global.Name">mix</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span> <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span title="AnyRef" class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
