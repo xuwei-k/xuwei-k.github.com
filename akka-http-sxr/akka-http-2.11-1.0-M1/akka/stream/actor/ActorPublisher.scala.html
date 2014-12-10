@@ -1,0 +1,433 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>akka/stream/actor/ActorPublisher.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+package akka.stream.actor
+
+import java.util.concurrent.ConcurrentHashMap
+import akka.actor.Cancellable
+import akka.stream.impl.<span class="delimiter">{</span> ReactiveStreamsCompliance, StreamSubscriptionTimeoutSupport <span class="delimiter">}</span>
+import org.reactivestreams.<span class="delimiter">{</span> Publisher, Subscriber, Subscription <span class="delimiter">}</span>
+import akka.actor.AbstractActor
+import akka.actor.Actor
+import akka.actor.ActorRef
+import akka.actor.ActorSystem
+import akka.actor.ExtendedActorSystem
+import akka.actor.Extension
+import akka.actor.ExtensionId
+import akka.actor.ExtensionIdProvider
+import akka.actor.UntypedActor
+
+import concurrent.duration.Duration
+import concurrent.duration.FiniteDuration
+
+object <a title="akka.stream.actor.ActorPublisher.type" id="akka.stream.actor.ActorPublisher">ActorPublisher</a> <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type" class="delimiter">{</a>
+
+  <span class="comment">/**
+   * Create a [[org.reactivestreams.Publisher]] backed by a [[ActorPublisher]] actor. It can be
+   * attached to a [[org.reactivestreams.Subscriber]] or be used as an input source for a
+   * [[akka.stream.scaladsl.Flow]].
+   */</span>
+  def <a title="[T](ref: akka.actor.ActorRef)org.reactivestreams.Publisher[T]" id="akka.stream.actor.ActorPublisher.apply">apply</a><span class="delimiter">[</span><a title="" id="akka.stream.actor.ActorPublisher.apply;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.actor.ActorPublisher.apply.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span><span class="delimiter">)</span>: <span title="org.reactivestreams.Publisher[T]">Publisher</span><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#akka.stream.actor.ActorPublisherImpl.readResolve" title="(ref: akka.actor.ActorRef)akka.stream.actor.ActorPublisherImpl[T]">ActorPublisherImpl</a><span class="delimiter">(</span><a href="#akka.stream.actor.ActorPublisher.apply.ref" title="akka.actor.ActorRef">ref</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> object <a title="akka.stream.actor.ActorPublisher.Internal.type" id="akka.stream.actor.ActorPublisher.Internal">Internal</a> <a href="#akka.stream.actor.ActorPublisher.Internal" title="akka.stream.actor.ActorPublisher.Internal.type" class="delimiter">{</a>
+    case class <a title="class Subscribe extends AnyRef with Product with Serializable" id="akka.stream.actor.ActorPublisher.Internal.Subscribe.readResolve">Subscribe</a><a href="#akka.stream.actor.ActorPublisher.Internal.Subscribe.readResolve" title="Product" class="delimiter">(</a><a title="org.reactivestreams.Subscriber[Any]" id="akka.stream.actor.ActorPublisher.Internal;Subscribe.subscriber">subscriber</a>: <span title="org.reactivestreams.Subscriber[Any]">Subscriber</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>
+
+    sealed trait <a title="trait LifecycleState extends AnyRef" id="akka.stream.actor.ActorPublisher.Internal;LifecycleState">LifecycleState</a>
+    case object <a href="#akka.stream.actor.ActorPublisher.Internal.PreSubscriber.productElement.x$1" title="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.type" id="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.readResolve">PreSubscriber</a> extends <a href="#akka.stream.actor.ActorPublisher.Internal;LifecycleState" title="akka.stream.actor.ActorPublisher.Internal.LifecycleState">LifecycleState</a>
+    case object <a href="#akka.stream.actor.ActorPublisher.Internal.Active.productElement.x$1" title="akka.stream.actor.ActorPublisher.Internal.Active.type" id="akka.stream.actor.ActorPublisher.Internal.Active.readResolve">Active</a> extends <a href="#akka.stream.actor.ActorPublisher.Internal;LifecycleState" title="akka.stream.actor.ActorPublisher.Internal.LifecycleState">LifecycleState</a>
+    case object <a href="#akka.stream.actor.ActorPublisher.Internal.Canceled.productElement.x$1" title="akka.stream.actor.ActorPublisher.Internal.Canceled.type" id="akka.stream.actor.ActorPublisher.Internal.Canceled.readResolve">Canceled</a> extends <a href="#akka.stream.actor.ActorPublisher.Internal;LifecycleState" title="akka.stream.actor.ActorPublisher.Internal.LifecycleState">LifecycleState</a>
+    case object <a href="#akka.stream.actor.ActorPublisher.Internal.Completed.productElement.x$1" title="akka.stream.actor.ActorPublisher.Internal.Completed.type" id="akka.stream.actor.ActorPublisher.Internal.Completed.readResolve">Completed</a> extends <a href="#akka.stream.actor.ActorPublisher.Internal;LifecycleState" title="akka.stream.actor.ActorPublisher.Internal.LifecycleState">LifecycleState</a>
+    case class <a title="class ErrorEmitted extends AnyRef with akka.stream.actor.ActorPublisher.Internal.LifecycleState with Product with Serializable" id="akka.stream.actor.ActorPublisher.Internal.ErrorEmitted.readResolve">ErrorEmitted</a><span title="Product" class="delimiter">(</span><a title="Throwable" id="akka.stream.actor.ActorPublisher.Internal;ErrorEmitted.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span> extends <a href="#akka.stream.actor.ActorPublisher.Internal;LifecycleState" title="akka.stream.actor.ActorPublisher.Internal.LifecycleState">LifecycleState</a>
+  <span class="delimiter">}</span>
+<span title="AnyRef" class="delimiter">}</span>
+
+sealed abstract class <a title="class ActorPublisherMessage extends AnyRef" id="akka.stream.actor;ActorPublisherMessage">ActorPublisherMessage</a>
+
+object <a title="akka.stream.actor.ActorPublisherMessage.type" id="akka.stream.actor.ActorPublisherMessage">ActorPublisherMessage</a> <a href="#akka.stream.actor.ActorPublisherMessage" title="akka.stream.actor.ActorPublisherMessage.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * This message is delivered to the [[ActorPublisher]] actor when the stream subscriber requests
+   * more elements.
+   * @param n number of requested elements
+   */</span>
+  @SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span> case class <a title="class Request extends akka.stream.actor.ActorPublisherMessage with Product with Serializable" id="akka.stream.actor.ActorPublisherMessage.Request.readResolve">Request</a><span title="Product" class="delimiter">(</span><a title="Long" id="akka.stream.actor.ActorPublisherMessage;Request.n">n</a>: <span title="Long">Long</span><span class="delimiter">)</span> extends <a href="#akka.stream.actor;ActorPublisherMessage" title="akka.stream.actor.ActorPublisherMessage">ActorPublisherMessage</a>
+
+  <span class="comment">/**
+   * This message is delivered to the [[ActorPublisher]] actor when the stream subscriber cancels the
+   * subscription.
+   */</span>
+  @SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span> case object <a href="#akka.stream.actor.ActorPublisherMessage.Cancel.productElement.x$1" title="akka.stream.actor.ActorPublisherMessage.Cancel.type" id="akka.stream.actor.ActorPublisherMessage.Cancel.readResolve">Cancel</a> extends <a href="#akka.stream.actor;ActorPublisherMessage" title="akka.stream.actor.ActorPublisherMessage">ActorPublisherMessage</a>
+
+  <span class="comment">/**
+   * This message is delivered to the [[ActorPublisher]] actor in order to signal the exceeding of an subscription timeout.
+   * Once the actor receives this message, this publisher will already be in cancelled state, thus the actor should clean-up and stop itself.
+   */</span>
+  @SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span> case object <a href="#akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded.productElement.x$1" title="akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded.type" id="akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded.readResolve">SubscriptionTimeoutExceeded</a> extends <a href="#akka.stream.actor;ActorPublisherMessage" title="akka.stream.actor.ActorPublisherMessage">ActorPublisherMessage</a>
+
+  <span class="comment">/**
+   * Java API: get the singleton instance of the `Cancel` message
+   */</span>
+  def <a title="=&gt; akka.stream.actor.ActorPublisherMessage.Cancel.type" id="akka.stream.actor.ActorPublisherMessage.cancelInstance">cancelInstance</a> = <a href="#akka.stream.actor.ActorPublisherMessage.Cancel.readResolve" title="akka.stream.actor.ActorPublisherMessage.Cancel.type">Cancel</a>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Extend/mixin this trait in your [[akka.actor.Actor]] to make it a
+ * stream publisher that keeps track of the subscription life cycle and
+ * requested elements.
+ *
+ * Create a [[org.reactivestreams.Publisher]] backed by this actor with Scala API [[ActorPublisher#apply]],
+ * or Java API [[UntypedActorPublisher#create]] or Java API compatible with lambda expressions
+ * [[AbstractActorPublisher#create]].
+ *
+ * It can be attached to a [[org.reactivestreams.Subscriber]] or be used as an input source for a
+ * [[akka.stream.scaladsl.Flow]]. You can only attach one subscriber to this publisher.
+ *
+ * The life cycle state of the subscription is tracked with the following boolean members:
+ * [[#isActive]], [[#isCompleted]], [[#isErrorEmitted]], and [[#isCanceled]].
+ *
+ * You send elements to the stream by calling [[#onNext]]. You are allowed to send as many
+ * elements as have been requested by the stream subscriber. This amount can be inquired with
+ * [[#totalDemand]]. It is only allowed to use `onNext` when `isActive` and `totalDemand &gt; 0`,
+ * otherwise `onNext` will throw `IllegalStateException`.
+ *
+ * When the stream subscriber requests more elements the [[ActorPublisher#Request]] message
+ * is delivered to this actor, and you can act on that event. The [[#totalDemand]]
+ * is updated automatically.
+ *
+ * When the stream subscriber cancels the subscription the [[ActorPublisher#Cancel]] message
+ * is delivered to this actor. After that subsequent calls to `onNext` will be ignored.
+ *
+ * You can complete the stream by calling [[#onComplete]]. After that you are not allowed to
+ * call [[#onNext]], [[#onError]] and [[#onComplete]].
+ *
+ * You can terminate the stream with failure by calling [[#onError]]. After that you are not allowed to
+ * call [[#onNext]], [[#onError]] and [[#onComplete]].
+ *
+ * If you suspect that this [[ActorPublisher]] may never get subscribed to, you can override the [[#subscriptionTimeout]]
+ * method to provide a timeout after which this Publisher should be considered canceled. The actor will be notified when
+ * the timeout triggers via an [[akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded]] message and MUST then perform cleanup and stop itself.
+ *
+ * If the actor is stopped the stream will be completed, unless it was not already terminated with
+ * failure, completed or canceled.
+ */</span>
+trait <a title="trait ActorPublisher[T] extends AnyRef with akka.actor.Actor" id="akka.stream.actor;ActorPublisher">ActorPublisher</a><span class="delimiter">[</span><a title="" id="akka.stream.actor;ActorPublisher;T">T</a><span class="delimiter">]</span> extends <span title="akka.actor.Actor">Actor</span> <span class="delimiter">{</span>
+  import <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>._
+  import akka.stream.actor.<a href="#akka.stream.actor.ActorPublisherMessage" title="akka.stream.actor.ActorPublisherMessage.type">ActorPublisherMessage</a>._
+  import <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>.<a href="#akka.stream.actor.ActorPublisher.Internal" title="akka.stream.actor.ActorPublisher.Internal.type">Internal</a>._
+  import <a href="#akka.stream.actor.ActorPublisherMessage" title="akka.stream.actor.ActorPublisherMessage.type">ActorPublisherMessage</a>._
+
+  private val <a title="akka.stream.actor.ActorPublisherState" id="akka.stream.actor;ActorPublisher.state">state</a> = <a href="#akka.stream.actor.ActorPublisherState" title="(system: akka.actor.ActorSystem)akka.stream.actor.ActorPublisherState">ActorPublisherState</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorContext">context</a>.<span title="=&gt; akka.actor.ActorSystem">system</span><span class="delimiter">)</span>
+  private var <a title="org.reactivestreams.Subscriber[Any]" id="akka.stream.actor;ActorPublisher.subscriber_=">subscriber</a>: <span title="org.reactivestreams.Subscriber[Any]">Subscriber</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> = _
+  private var <a title="Long" id="akka.stream.actor;ActorPublisher.demand_=">demand</a> = <span title="Long(0L)" class="long">0L</span>
+  private var <a title="akka.stream.actor.ActorPublisher.Internal.LifecycleState" id="akka.stream.actor;ActorPublisher.lifecycleState_=">lifecycleState</a>: <a href="#akka.stream.actor.ActorPublisher.Internal;LifecycleState" title="akka.stream.actor.ActorPublisher.Internal.LifecycleState">LifecycleState</a> = <a href="#akka.stream.actor.ActorPublisher.Internal.PreSubscriber.readResolve" title="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.type">PreSubscriber</a>
+  private var <a title="akka.actor.Cancellable" id="akka.stream.actor;ActorPublisher.scheduledSubscriptionTimeout_=">scheduledSubscriptionTimeout</a>: <span title="akka.actor.Cancellable">Cancellable</span> = <a href="../impl/StreamSubscriptionTimeout.scala.html#akka.stream.impl.StreamSubscriptionTimeoutSupport" title="akka.stream.impl.StreamSubscriptionTimeoutSupport.type">StreamSubscriptionTimeoutSupport</a>.<a href="../impl/StreamSubscriptionTimeout.scala.html#akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout" title="akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.type">NoopSubscriptionTimeout</a>
+
+  <span class="comment">/**
+   * Subscription timeout after which this actor will become Canceled and reject any incoming &quot;late&quot; subscriber.
+   *
+   * The actor will receive an [[SubscriptionTimeoutExceeded]] message upon which it
+   * MUST react by performing all necessary cleanup and stopping itself.
+   *
+   * Use this feature in order to avoid leaking actors when you suspect that this Publisher may never get subscribed to by some Subscriber.
+   */</span>
+  def <a title="=&gt; scala.concurrent.duration.Duration" id="akka.stream.actor;ActorPublisher.subscriptionTimeout">subscriptionTimeout</a>: <span title="scala.concurrent.duration.Duration">Duration</span> = <span title="scala.concurrent.duration.Duration.type">Duration</span>.<span title="=&gt; scala.concurrent.duration.Duration.Infinite">Inf</span>
+
+  <span class="comment">/**
+   * The state when the publisher is active, i.e. before the subscriber is attached
+   * and when an subscriber is attached. It is allowed to
+   * call [[#onComplete]] and [[#onError]] in this state. It is
+   * allowed to call [[#onNext]] in this state when [[#totalDemand]]
+   * is greater than zero.
+   */</span>
+  final def <a title="=&gt; Boolean" id="akka.stream.actor;ActorPublisher.isActive">isActive</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a> <span title="(x: Boolean)Boolean">||</span> <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.actor.ActorPublisher.Internal.PreSubscriber.readResolve" title="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.type">PreSubscriber</a>
+
+  <span class="comment">/**
+   * Total number of requested elements from the stream subscriber.
+   * This actor automatically keeps tracks of this amount based on
+   * incoming request messages and outgoing `onNext`.
+   */</span>
+  final def <a title="=&gt; Long" id="akka.stream.actor;ActorPublisher.totalDemand">totalDemand</a>: <span title="Long">Long</span> = <a href="#akka.stream.actor;ActorPublisher.demand_=" title="=&gt; Long">demand</a>
+
+  <span class="comment">/**
+   * The terminal state after calling [[#onComplete]]. It is not allowed to
+   * call [[#onNext]], [[#onError]], and [[#onComplete]] in this state.
+   */</span>
+  final def <a title="=&gt; Boolean" id="akka.stream.actor;ActorPublisher.isCompleted">isCompleted</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.actor.ActorPublisher.Internal.Completed.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Completed.type">Completed</a>
+
+  <span class="comment">/**
+   * The terminal state after calling [[#onError]]. It is not allowed to
+   * call [[#onNext]], [[#onError]], and [[#onComplete]] in this state.
+   */</span>
+  final def <a title="=&gt; Boolean" id="akka.stream.actor;ActorPublisher.isErrorEmitted">isErrorEmitted</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="#akka.stream.actor.ActorPublisher.Internal.ErrorEmitted.readResolve" title="akka.stream.actor.ActorPublisher.Internal.ErrorEmitted">ErrorEmitted</a><span class="delimiter">]</span>
+
+  <span class="comment">/**
+   * The state after the stream subscriber has canceled the subscription.
+   * It is allowed to call [[#onNext]], [[#onError]], and [[#onComplete]] in
+   * this state, but the calls will not perform anything.
+   */</span>
+  final def <a title="=&gt; Boolean" id="akka.stream.actor;ActorPublisher.isCanceled">isCanceled</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.actor.ActorPublisher.Internal.Canceled.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Canceled.type">Canceled</a>
+
+  <span class="comment">/**
+   * Send an element to the stream subscriber. You are allowed to send as many elements
+   * as have been requested by the stream subscriber. This amount can be inquired with
+   * [[#totalDemand]]. It is only allowed to use `onNext` when `isActive` and `totalDemand &gt; 0`,
+   * otherwise `onNext` will throw `IllegalStateException`.
+   */</span>
+  def <a title="(element: T)Unit" id="akka.stream.actor;ActorPublisher.onNext">onNext</a><span class="delimiter">(</span><a title="T" id="akka.stream.actor;ActorPublisher.onNext.element">element</a>: <a href="#akka.stream.actor;ActorPublisher;T" title="T">T</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> match <span class="delimiter">{</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a> | <a href="#akka.stream.actor.ActorPublisher.Internal.PreSubscriber.readResolve" title="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.type">PreSubscriber</a> ⇒
+      if <span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.demand_=" title="=&gt; Long">demand</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.stream.actor;ActorPublisher.demand_=" title="(x$1: Long)Unit">demand</a> <span title="(x: Int)Long">-=</span> <span title="Int(1)" class="int">1</span>
+        <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a>.<span title="(x$1: Any)Unit">onNext</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.onNext.element" title="T">element</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span> else
+        throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span>
+          <span title="String(&quot;onNext is not allowed when the stream has not requested elements, totalDemand was 0&quot;)" class="string">&quot;onNext is not allowed when the stream has not requested elements, totalDemand was 0&quot;</span><span class="delimiter">)</span>
+    case _: <a href="#akka.stream.actor.ActorPublisher.Internal.ErrorEmitted.readResolve" title="akka.stream.actor.ActorPublisher.Internal.ErrorEmitted">ErrorEmitted</a> ⇒
+      throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;onNext must not be called after onError&quot;)" class="string">&quot;onNext must not be called after onError&quot;</span><span class="delimiter">)</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Completed.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Completed.type">Completed</a> ⇒
+      throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;onNext must not be called after onComplete&quot;)" class="string">&quot;onNext must not be called after onComplete&quot;</span><span class="delimiter">)</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Canceled.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Canceled.type">Canceled</a> ⇒ <span class="comment">// drop</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Complete the stream. After that you are not allowed to
+   * call [[#onNext]], [[#onError]] and [[#onComplete]].
+   */</span>
+  def <a title="()Unit" id="akka.stream.actor;ActorPublisher.onComplete">onComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> match <span class="delimiter">{</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a> | <a href="#akka.stream.actor.ActorPublisher.Internal.PreSubscriber.readResolve" title="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.type">PreSubscriber</a> ⇒
+      <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="(x$1: akka.stream.actor.ActorPublisher.Internal.LifecycleState)Unit">lifecycleState</a> = <a href="#akka.stream.actor.ActorPublisher.Internal.Completed.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Completed.type">Completed</a>
+      if <span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a> <span title="(x$1: AnyRef)Boolean">ne</span> null<span class="delimiter">)</span> <span class="comment">// otherwise onComplete will be called when the subscription arrives</span>
+        <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a>.<span title="()Unit">onComplete</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="(x$1: org.reactivestreams.Subscriber[Any])Unit">subscriber</a> = null <span class="comment">// not used after onError</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Completed.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Completed.type">Completed</a> ⇒
+      throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;onComplete must only be called once&quot;)" class="string">&quot;onComplete must only be called once&quot;</span><span class="delimiter">)</span>
+    case _: <a href="#akka.stream.actor.ActorPublisher.Internal.ErrorEmitted.readResolve" title="akka.stream.actor.ActorPublisher.Internal.ErrorEmitted">ErrorEmitted</a> ⇒
+      throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;onComplete must not be called after onError&quot;)" class="string">&quot;onComplete must not be called after onError&quot;</span><span class="delimiter">)</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Canceled.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Canceled.type">Canceled</a> ⇒ <span class="comment">// drop</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Terminate the stream with failure. After that you are not allowed to
+   * call [[#onNext]], [[#onError]] and [[#onComplete]].
+   */</span>
+  def <a title="(cause: Throwable)Unit" id="akka.stream.actor;ActorPublisher.onError">onError</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.actor;ActorPublisher.onError.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> match <span class="delimiter">{</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a> | <a href="#akka.stream.actor.ActorPublisher.Internal.PreSubscriber.readResolve" title="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.type">PreSubscriber</a> ⇒
+      <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="(x$1: akka.stream.actor.ActorPublisher.Internal.LifecycleState)Unit">lifecycleState</a> = <a href="#akka.stream.actor.ActorPublisher.Internal.ErrorEmitted.readResolve" title="(cause: Throwable)akka.stream.actor.ActorPublisher.Internal.ErrorEmitted">ErrorEmitted</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.onError.cause" title="Throwable">cause</a><span class="delimiter">)</span>
+      if <span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a> <span title="(x$1: AnyRef)Boolean">ne</span> null<span class="delimiter">)</span> <span class="comment">// otherwise onError will be called when the subscription arrives</span>
+        <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a>.<span title="(x$1: Throwable)Unit">onError</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.onError.cause" title="Throwable">cause</a><span class="delimiter">)</span>
+      <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="(x$1: org.reactivestreams.Subscriber[Any])Unit">subscriber</a> = null <span class="comment">// not used after onError</span>
+    case _: <a href="#akka.stream.actor.ActorPublisher.Internal.ErrorEmitted.readResolve" title="akka.stream.actor.ActorPublisher.Internal.ErrorEmitted">ErrorEmitted</a> ⇒
+      throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;onError must only be called once&quot;)" class="string">&quot;onError must only be called once&quot;</span><span class="delimiter">)</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Completed.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Completed.type">Completed</a> ⇒
+      throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;onError must not be called after onComplete&quot;)" class="string">&quot;onError must not be called after onComplete&quot;</span><span class="delimiter">)</span>
+    case <a href="#akka.stream.actor.ActorPublisher.Internal.Canceled.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Canceled.type">Canceled</a> ⇒ <span class="comment">// drop</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  protected<span class="delimiter">[</span>akka<span class="delimiter">]</span> override def <a title="(receive: ActorPublisher.this.Receive, msg: Any)Unit" id="akka.stream.actor;ActorPublisher.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="ActorPublisher.this.Receive" id="akka.stream.actor;ActorPublisher.aroundReceive.receive">receive</a>: <span title="ActorPublisher.this.Receive">Receive</span>, <a title="Any" id="akka.stream.actor;ActorPublisher.aroundReceive.msg">msg</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.actor;ActorPublisher.aroundReceive.msg" title="Any">msg</a> match <span class="delimiter">{</span>
+    case Request<span class="delimiter">(</span><a title="Long" id="akka.stream.actor;ActorPublisher.aroundReceive.n">n</a><span class="delimiter">)</span> ⇒
+      <a href="#akka.stream.actor;ActorPublisher.demand_=" title="(x$1: Long)Unit">demand</a> <span title="(x: Long)Long">+=</span> <a href="#akka.stream.actor;ActorPublisher.aroundReceive.n" title="Long">n</a>
+      if <span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.demand_=" title="=&gt; Long">demand</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(0)" class="int">0</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// Long has overflown</span>
+        val <a title="IllegalStateException" id="akka.stream.actor;ActorPublisher.aroundReceive.demandOverflowException">demandOverflowException</a> = new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span>ReactiveStreamsCompliance.<span title="String(&quot;Total pending demand MUST NOT be &gt; `java.lang.Long.MAX_VALUE` (see reactive-streams specification, rule 3.17)&quot;)">TotalPendingDemandMustNotExceedLongMaxValue</span><span class="delimiter">)</span>
+        <a href="#akka.stream.actor;ActorPublisher.onError" title="(cause: Throwable)Unit">onError</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundReceive.demandOverflowException" title="IllegalStateException">demandOverflowException</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span> else
+        super.<span title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundReceive.receive" title="ActorPublisher.this.Receive">receive</a>, <a href="#akka.stream.actor;ActorPublisher.aroundReceive.msg" title="Any">msg</a><span class="delimiter">)</span>
+
+    case Subscribe<span class="delimiter">(</span><a title="org.reactivestreams.Subscriber[Any]" id="akka.stream.actor;ActorPublisher.aroundReceive.sub">sub</a>: <span title="org.reactivestreams.Subscriber[_]">Subscriber</span><span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">)</span> ⇒
+      <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> match <span class="delimiter">{</span>
+        case <a href="#akka.stream.actor.ActorPublisher.Internal.PreSubscriber.readResolve" title="akka.stream.actor.ActorPublisher.Internal.PreSubscriber.type">PreSubscriber</a> ⇒
+          <a href="#akka.stream.actor;ActorPublisher.scheduledSubscriptionTimeout_=" title="=&gt; akka.actor.Cancellable">scheduledSubscriptionTimeout</a>.<span title="()Boolean">cancel</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="(x$1: org.reactivestreams.Subscriber[Any])Unit">subscriber</a> = <a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a>
+          <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="(x$1: akka.stream.actor.ActorPublisher.Internal.LifecycleState)Unit">lifecycleState</a> = <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a>
+          <a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a>.<span title="(x$1: org.reactivestreams.Subscription)Unit">onSubscribe</span><span class="delimiter">(</span>new <a href="#akka.stream.actor;ActorPublisherSubscription" title="akka.stream.actor.ActorPublisherSubscription[Nothing]">ActorPublisherSubscription</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        case ErrorEmitted<span class="delimiter">(</span><a title="Throwable" id="akka.stream.actor;ActorPublisher.aroundReceive.cause">cause</a><span class="delimiter">)</span> ⇒ <a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a>.<span title="(x$1: Throwable)Unit">onError</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundReceive.cause" title="Throwable">cause</a><span class="delimiter">)</span>
+        case <a href="#akka.stream.actor.ActorPublisher.Internal.Completed.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Completed.type">Completed</a>           ⇒ <a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a>.<span title="()Unit">onComplete</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        case <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a> | <a href="#akka.stream.actor.ActorPublisher.Internal.Canceled.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Canceled.type">Canceled</a> ⇒
+          if <span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a><span class="delimiter">)</span>
+            <a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a>.<span title="(x$1: Throwable)Unit">onError</span><span class="delimiter">(</span>new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;ActorPublisher [&quot;)">ActorPublisher [$</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a><span title="String(&quot;, sub: &quot;)">, sub: $</span><a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a><span title="String(&quot;] &quot;)">] $</span><span class="delimiter">{</span>ReactiveStreamsCompliance.<span title="String(&quot;can not subscribe the same subscriber multiple times (see reactive-streams specification, rules 1.10 and 2.12)&quot;)">CanNotSubscribeTheSameSubscriberMultipleTimes</span><span class="delimiter">}</span><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+          else
+            <a href="#akka.stream.actor;ActorPublisher.aroundReceive.sub" title="org.reactivestreams.Subscriber[Any]">sub</a>.<span title="(x$1: Throwable)Unit">onError</span><span class="delimiter">(</span>new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;ActorPublisher [&quot;)">ActorPublisher [$</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a><span title="String(&quot;] &quot;)">] $</span><span class="delimiter">{</span>ReactiveStreamsCompliance.<span title="String(&quot;only supports one subscriber (which is allowed, see reactive-streams specification, rule 1.12)&quot;)">SupportsOnlyASingleSubscriber</span><span class="delimiter">}</span><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+    case <a href="#akka.stream.actor.ActorPublisherMessage.Cancel.readResolve" title="akka.stream.actor.ActorPublisherMessage.Cancel.type">Cancel</a> ⇒
+      <a href="#akka.stream.actor;ActorPublisher.cancelSelf" title="()Unit">cancelSelf</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      super.<span title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundReceive.receive" title="ActorPublisher.this.Receive">receive</a>, <a href="#akka.stream.actor;ActorPublisher.aroundReceive.msg" title="Any">msg</a><span class="delimiter">)</span>
+
+    case <a href="#akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded.readResolve" title="akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded.type">SubscriptionTimeoutExceeded</a> ⇒
+      if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.stream.actor;ActorPublisher.scheduledSubscriptionTimeout_=" title="=&gt; akka.actor.Cancellable">scheduledSubscriptionTimeout</a>.<span title="=&gt; Boolean">isCancelled</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.stream.actor;ActorPublisher.cancelSelf" title="()Unit">cancelSelf</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        super.<span title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundReceive.receive" title="ActorPublisher.this.Receive">receive</a>, <a href="#akka.stream.actor;ActorPublisher.aroundReceive.msg" title="Any">msg</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+    case _ ⇒
+      super.<span title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundReceive.receive" title="ActorPublisher.this.Receive">receive</a>, <a href="#akka.stream.actor;ActorPublisher.aroundReceive.msg" title="Any">msg</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="()Unit" id="akka.stream.actor;ActorPublisher.cancelSelf">cancelSelf</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="(x$1: akka.stream.actor.ActorPublisher.Internal.LifecycleState)Unit">lifecycleState</a> = <a href="#akka.stream.actor.ActorPublisher.Internal.Canceled.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Canceled.type">Canceled</a>
+    <a href="#akka.stream.actor;ActorPublisher.demand_=" title="(x$1: Long)Unit">demand</a> = <span title="Long(0L)" class="int">0</span>
+    <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="(x$1: org.reactivestreams.Subscriber[Any])Unit">subscriber</a> = null
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  override protected<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="()Unit" id="akka.stream.actor;ActorPublisher.aroundPreStart">aroundPreStart</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    super.<span title="()Unit">aroundPreStart</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    import <a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorContext">context</a>.dispatcher
+
+    <a href="#akka.stream.actor;ActorPublisher.subscriptionTimeout" title="=&gt; scala.concurrent.duration.Duration">subscriptionTimeout</a> match <span class="delimiter">{</span>
+      case <a title="scala.concurrent.duration.FiniteDuration" id="akka.stream.actor;ActorPublisher.aroundPreStart.timeout">timeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span> ⇒
+        <a href="#akka.stream.actor;ActorPublisher.scheduledSubscriptionTimeout_=" title="(x$1: akka.actor.Cancellable)Unit">scheduledSubscriptionTimeout</a> = <a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorContext">context</a>.<span title="=&gt; akka.actor.ActorSystem">system</span>.<span title="=&gt; akka.actor.Scheduler">scheduler</span>.<span title="(delay: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">scheduleOnce</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; scala.concurrent.ExecutionContextExecutor" class="delimiter">(</a><a href="#akka.stream.actor;ActorPublisher.aroundPreStart.timeout" title="scala.concurrent.duration.FiniteDuration">timeout</a>, <a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded.readResolve" title="akka.stream.actor.ActorPublisherMessage.SubscriptionTimeoutExceeded.type">SubscriptionTimeoutExceeded</a><span class="delimiter">)</span>
+      case _ ⇒
+      <span class="comment">// ignore...</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  protected<span class="delimiter">[</span>akka<span class="delimiter">]</span> override def <a title="(reason: Throwable, message: Option[Any])Unit" id="akka.stream.actor;ActorPublisher.aroundPreRestart">aroundPreRestart</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.actor;ActorPublisher.aroundPreRestart.reason">reason</a>: <span title="Throwable">Throwable</span>, <a title="Option[Any]" id="akka.stream.actor;ActorPublisher.aroundPreRestart.message">message</a>: <span title="Option[Any]">Option</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="comment">// some state must survive restart</span>
+    <a href="#akka.stream.actor;ActorPublisher.state" title="=&gt; akka.stream.actor.ActorPublisherState">state</a>.<a href="#akka.stream.actor;ActorPublisherState.set" title="(ref: akka.actor.ActorRef, s: akka.stream.actor.ActorPublisherState.State)Unit">set</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.stream.actor.ActorPublisherState" title="akka.stream.actor.ActorPublisherState.type">ActorPublisherState</a>.<a href="#akka.stream.actor.ActorPublisherState.State.readResolve" title="(subscriber: Option[org.reactivestreams.Subscriber[Any]], demand: Long, lifecycleState: akka.stream.actor.ActorPublisher.Internal.LifecycleState)akka.stream.actor.ActorPublisherState.State">State</a><span class="delimiter">(</span><span title="(x: org.reactivestreams.Subscriber[Any])Option[org.reactivestreams.Subscriber[Any]]">Option</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a><span class="delimiter">)</span>, <a href="#akka.stream.actor;ActorPublisher.demand_=" title="=&gt; Long">demand</a>, <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    super.<span title="(reason: Throwable, message: Option[Any])Unit">aroundPreRestart</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundPreRestart.reason" title="Throwable">reason</a>, <a href="#akka.stream.actor;ActorPublisher.aroundPreRestart.message" title="Option[Any]">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  protected<span class="delimiter">[</span>akka<span class="delimiter">]</span> override def <a title="(reason: Throwable)Unit" id="akka.stream.actor;ActorPublisher.aroundPostRestart">aroundPostRestart</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.actor;ActorPublisher.aroundPostRestart.reason">reason</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.stream.actor;ActorPublisher.state" title="=&gt; akka.stream.actor.ActorPublisherState">state</a>.<a href="#akka.stream.actor;ActorPublisherState.get" title="(ref: akka.actor.ActorRef)Option[akka.stream.actor.ActorPublisherState.State]">get</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span> <span title="(f: akka.stream.actor.ActorPublisherState.State =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span> <a title="akka.stream.actor.ActorPublisherState.State" id="akka.stream.actor;ActorPublisher.aroundPostRestart.$anonfun.s">s</a> ⇒
+      <span class="comment">// restore previous state</span>
+      <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="(x$1: org.reactivestreams.Subscriber[Any])Unit">subscriber</a> = <a href="#akka.stream.actor;ActorPublisher.aroundPostRestart.$anonfun.s" title="akka.stream.actor.ActorPublisherState.State">s</a>.<a href="#akka.stream.actor.ActorPublisherState;State.subscriber" title="=&gt; Option[org.reactivestreams.Subscriber[Any]]">subscriber</a>.<span title="(implicit ev: &lt;:&lt;[Null,org.reactivestreams.Subscriber[Any]])org.reactivestreams.Subscriber[Any]">orNull</span>
+      <a href="#akka.stream.actor;ActorPublisher.demand_=" title="(x$1: Long)Unit">demand</a> = <a href="#akka.stream.actor;ActorPublisher.aroundPostRestart.$anonfun.s" title="akka.stream.actor.ActorPublisherState.State">s</a>.<a href="#akka.stream.actor.ActorPublisherState;State.demand" title="=&gt; Long">demand</a>
+      <a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="(x$1: akka.stream.actor.ActorPublisher.Internal.LifecycleState)Unit">lifecycleState</a> = <a href="#akka.stream.actor;ActorPublisher.aroundPostRestart.$anonfun.s" title="akka.stream.actor.ActorPublisherState.State">s</a>.<a href="#akka.stream.actor.ActorPublisherState;State.lifecycleState" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a>
+    <span class="delimiter">}</span>
+    <a href="#akka.stream.actor;ActorPublisher.state" title="=&gt; akka.stream.actor.ActorPublisherState">state</a>.<a href="#akka.stream.actor;ActorPublisherState.remove" title="(ref: akka.actor.ActorRef)Unit">remove</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+    super.<span title="(reason: Throwable)Unit">aroundPostRestart</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.aroundPostRestart.reason" title="Throwable">reason</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  protected<span class="delimiter">[</span>akka<span class="delimiter">]</span> override def <a title="()Unit" id="akka.stream.actor;ActorPublisher.aroundPostStop">aroundPostStop</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.stream.actor;ActorPublisher.state" title="=&gt; akka.stream.actor.ActorPublisherState">state</a>.<a href="#akka.stream.actor;ActorPublisherState.remove" title="(ref: akka.actor.ActorRef)Unit">remove</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisher.lifecycleState_=" title="=&gt; akka.stream.actor.ActorPublisher.Internal.LifecycleState">lifecycleState</a> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.actor.ActorPublisher.Internal.Active.readResolve" title="akka.stream.actor.ActorPublisher.Internal.Active.type">Active</a><span class="delimiter">)</span> <a href="#akka.stream.actor;ActorPublisher.subscriber_=" title="=&gt; org.reactivestreams.Subscriber[Any]">subscriber</a>.<span title="()Unit">onComplete</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    super.<span title="()Unit">aroundPostStop</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> case class <a href="#akka.stream.actor;ActorPublisherImpl.productElement.x$1" title="class ActorPublisherImpl[T] extends Object with org.reactivestreams.Publisher[T] with Product with Serializable" id="akka.stream.actor.ActorPublisherImpl.readResolve">ActorPublisherImpl</a><span class="delimiter">[</span><a title="" id="akka.stream.actor;ActorPublisherImpl;T">T</a><span class="delimiter">]</span><span title="Product" class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherImpl.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span><span class="delimiter">)</span> extends <a href="#akka.stream.actor.ActorPublisherImpl.readResolve" title="org.reactivestreams.Publisher[T]">Publisher</a><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+  import <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>._
+  import <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>.<a href="#akka.stream.actor.ActorPublisher.Internal" title="akka.stream.actor.ActorPublisher.Internal.type">Internal</a>._
+
+  override def <a title="(sub: org.reactivestreams.Subscriber[_ &gt;: T])Unit" id="akka.stream.actor;ActorPublisherImpl.subscribe">subscribe</a><span class="delimiter">(</span><a title="org.reactivestreams.Subscriber[_ &gt;: T]" id="akka.stream.actor;ActorPublisherImpl.subscribe.sub">sub</a>: <span title="org.reactivestreams.Subscriber[_ &gt;: T]">Subscriber</span><span class="delimiter">[</span>_ &gt;: T<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.stream.actor;ActorPublisherImpl.ref" title="akka.actor.ScalaActorRef" id="akka.stream.actor;ActorPublisherImpl.subscribe.qual$1">ref</a> <a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherImpl.subscribe.x$2">!</a> <a href="#akka.stream.actor.ActorPublisher.Internal.Subscribe.readResolve" title="(subscriber: org.reactivestreams.Subscriber[Any])akka.stream.actor.ActorPublisher.Internal.Subscribe">Subscribe</a><a title="akka.stream.actor.ActorPublisher.Internal.Subscribe" id="akka.stream.actor;ActorPublisherImpl.subscribe.x$1" class="delimiter">(</a><a href="#akka.stream.actor;ActorPublisherImpl.subscribe.sub" title="org.reactivestreams.Subscriber[_ &gt;: T]">sub</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="org.reactivestreams.Subscriber[Any]" class="delimiter">[</span><span title="org.reactivestreams.Subscriber[Any]">Subscriber</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> class <a title="class ActorPublisherSubscription[T] extends Object with org.reactivestreams.Subscription" id="akka.stream.actor;ActorPublisherSubscription">ActorPublisherSubscription</a><span class="delimiter">[</span><a title="" id="akka.stream.actor;ActorPublisherSubscription;T">T</a><span class="delimiter">]</span><a href="#akka.stream.actor;ActorPublisherSubscription" title="akka.stream.actor.ActorPublisherSubscription[T]" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherSubscription.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span><span class="delimiter">)</span> extends <a href="#akka.stream.actor;ActorPublisherSubscription" title="org.reactivestreams.Subscription">Subscription</a> <span class="delimiter">{</span>
+  import <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>._
+  import <a href="#akka.stream.actor.ActorPublisherMessage" title="akka.stream.actor.ActorPublisherMessage.type">ActorPublisherMessage</a>._
+
+  override def <a title="(n: Long)Unit" id="akka.stream.actor;ActorPublisherSubscription.request">request</a><span class="delimiter">(</span><a title="Long" id="akka.stream.actor;ActorPublisherSubscription.request.n">n</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="../impl/ReactiveStreamsCompliance.scala.html#akka.stream.impl.ReactiveStreamsCompliance" title="akka.stream.impl.ReactiveStreamsCompliance.type">ReactiveStreamsCompliance</a>.<a href="../impl/ReactiveStreamsCompliance.scala.html#akka.stream.impl.ReactiveStreamsCompliance.validateRequest" title="(n: Long)Unit">validateRequest</a><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisherSubscription.request.n" title="Long">n</a><span class="delimiter">)</span>
+    <a href="#akka.stream.actor;ActorPublisherSubscription.ref" title="akka.actor.ScalaActorRef" id="akka.stream.actor;ActorPublisherSubscription.request.qual$2">ref</a> <a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherSubscription.request.x$4">!</a> <a href="#akka.stream.actor.ActorPublisherMessage.Request.readResolve" title="(n: Long)akka.stream.actor.ActorPublisherMessage.Request">Request</a><a title="akka.stream.actor.ActorPublisherMessage.Request" id="akka.stream.actor;ActorPublisherSubscription.request.x$3" class="delimiter">(</a><a href="#akka.stream.actor;ActorPublisherSubscription.request.n" title="Long">n</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  override def <a title="()Unit" id="akka.stream.actor;ActorPublisherSubscription.cancel">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.actor;ActorPublisherSubscription.ref" title="akka.actor.ScalaActorRef" id="akka.stream.actor;ActorPublisherSubscription.cancel.qual$3">ref</a> <a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherSubscription.cancel.x$6">!</a> <a href="#akka.stream.actor.ActorPublisherMessage.Cancel.readResolve" title="akka.stream.actor.ActorPublisherMessage.Cancel.type" id="akka.stream.actor;ActorPublisherSubscription.cancel.x$5">Cancel</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ * Some state must survive restarts.
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> object <a title="akka.stream.actor.ActorPublisherState.type" id="akka.stream.actor.ActorPublisherState">ActorPublisherState</a> extends <span title="akka.actor.ExtensionId[akka.stream.actor.ActorPublisherState]">ExtensionId</span><span class="delimiter">[</span>ActorPublisherState<span class="delimiter">]</span> with <span title="akka.actor.ExtensionIdProvider">ExtensionIdProvider</span> <span class="delimiter">{</span>
+  import <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>.<a href="#akka.stream.actor.ActorPublisher.Internal" title="akka.stream.actor.ActorPublisher.Internal.type">Internal</a>.LifecycleState
+
+  override def <a title="(system: akka.actor.ActorSystem)akka.stream.actor.ActorPublisherState" id="akka.stream.actor.ActorPublisherState.get">get</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.stream.actor.ActorPublisherState.get.system">system</a>: <span title="akka.actor.ActorSystem">ActorSystem</span><span class="delimiter">)</span>: <a href="#akka.stream.actor;ActorPublisherState" title="akka.stream.actor.ActorPublisherState">ActorPublisherState</a> = super.<span title="(system: akka.actor.ActorSystem)akka.stream.actor.ActorPublisherState">get</span><span class="delimiter">(</span><a href="#akka.stream.actor.ActorPublisherState.get.system" title="akka.actor.ActorSystem">system</a><span class="delimiter">)</span>
+
+  override def <a title="()akka.stream.actor.ActorPublisherState.type" id="akka.stream.actor.ActorPublisherState.lookup">lookup</a> = <a href="#akka.stream.actor.ActorPublisherState" title="akka.stream.actor.ActorPublisherState.type">ActorPublisherState</a>
+
+  override def <a title="(system: akka.actor.ExtendedActorSystem)akka.stream.actor.ActorPublisherState" id="akka.stream.actor.ActorPublisherState.createExtension">createExtension</a><span class="delimiter">(</span><a title="akka.actor.ExtendedActorSystem" id="akka.stream.actor.ActorPublisherState.createExtension.system">system</a>: <span title="akka.actor.ExtendedActorSystem">ExtendedActorSystem</span><span class="delimiter">)</span>: <a href="#akka.stream.actor;ActorPublisherState" title="akka.stream.actor.ActorPublisherState">ActorPublisherState</a> =
+    new <a href="#akka.stream.actor;ActorPublisherState" title="akka.stream.actor.ActorPublisherState">ActorPublisherState</a>
+
+  case class <a title="class State extends AnyRef with Product with Serializable" id="akka.stream.actor.ActorPublisherState.State.readResolve">State</a><a href="#akka.stream.actor.ActorPublisherState.State.readResolve" title="Product" class="delimiter">(</a><a title="Option[org.reactivestreams.Subscriber[Any]]" id="akka.stream.actor.ActorPublisherState;State.subscriber">subscriber</a>: <span title="Option[org.reactivestreams.Subscriber[Any]]">Option</span><span class="delimiter">[</span>Subscriber<span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">]</span>, <a title="Long" id="akka.stream.actor.ActorPublisherState;State.demand">demand</a>: <span title="Long">Long</span>, <a title="akka.stream.actor.ActorPublisher.Internal.LifecycleState" id="akka.stream.actor.ActorPublisherState;State.lifecycleState">lifecycleState</a>: <a href="#akka.stream.actor.ActorPublisher.Internal;LifecycleState" title="akka.stream.actor.ActorPublisher.Internal.LifecycleState">LifecycleState</a><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> class <a title="class ActorPublisherState extends AnyRef with akka.actor.Extension" id="akka.stream.actor;ActorPublisherState">ActorPublisherState</a> extends <a href="#akka.stream.actor;ActorPublisherState" title="akka.actor.Extension">Extension</a> <span class="delimiter">{</span>
+  import <a href="#akka.stream.actor.ActorPublisherState" title="akka.stream.actor.ActorPublisherState.type">ActorPublisherState</a>.State
+  private val <a title="java.util.concurrent.ConcurrentHashMap[akka.actor.ActorRef,akka.stream.actor.ActorPublisherState.State]" id="akka.stream.actor;ActorPublisherState.state">state</a> = new <span title="java.util.concurrent.ConcurrentHashMap[akka.actor.ActorRef,akka.stream.actor.ActorPublisherState.State]">ConcurrentHashMap</span><span class="delimiter">[</span>ActorRef, State<span class="delimiter">]</span>
+
+  def <a title="(ref: akka.actor.ActorRef)Option[akka.stream.actor.ActorPublisherState.State]" id="akka.stream.actor;ActorPublisherState.get">get</a><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherState.get.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span><span class="delimiter">)</span>: <span title="Option[akka.stream.actor.ActorPublisherState.State]">Option</span><span class="delimiter">[</span>State<span class="delimiter">]</span> = <span title="(x: akka.stream.actor.ActorPublisherState.State)Option[akka.stream.actor.ActorPublisherState.State]">Option</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisherState.state" title="=&gt; java.util.concurrent.ConcurrentHashMap[akka.actor.ActorRef,akka.stream.actor.ActorPublisherState.State]">state</a>.<span title="(x$1: Any)akka.stream.actor.ActorPublisherState.State">get</span><span class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisherState.get.ref" title="akka.actor.ActorRef">ref</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  def <a title="(ref: akka.actor.ActorRef, s: akka.stream.actor.ActorPublisherState.State)Unit" id="akka.stream.actor;ActorPublisherState.set">set</a><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherState.set.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span>, <a title="akka.stream.actor.ActorPublisherState.State" id="akka.stream.actor;ActorPublisherState.set.s">s</a>: <a href="#akka.stream.actor.ActorPublisherState.State.readResolve" title="akka.stream.actor.ActorPublisherState.State">State</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.actor;ActorPublisherState.state" title="=&gt; java.util.concurrent.ConcurrentHashMap[akka.actor.ActorRef,akka.stream.actor.ActorPublisherState.State]">state</a>.<span title="(x$1: akka.actor.ActorRef, x$2: akka.stream.actor.ActorPublisherState.State)akka.stream.actor.ActorPublisherState.State">put</span><span title="Unit" class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisherState.set.ref" title="akka.actor.ActorRef">ref</a>, <a href="#akka.stream.actor;ActorPublisherState.set.s" title="akka.stream.actor.ActorPublisherState.State">s</a><span class="delimiter">)</span>
+
+  def <a title="(ref: akka.actor.ActorRef)Unit" id="akka.stream.actor;ActorPublisherState.remove">remove</a><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.actor;ActorPublisherState.remove.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.actor;ActorPublisherState.state" title="=&gt; java.util.concurrent.ConcurrentHashMap[akka.actor.ActorRef,akka.stream.actor.ActorPublisherState.State]">state</a>.<span title="(x$1: Any)akka.stream.actor.ActorPublisherState.State">remove</span><span title="Unit" class="delimiter">(</span><a href="#akka.stream.actor;ActorPublisherState.remove.ref" title="akka.actor.ActorRef">ref</a><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API
+ */</span>
+object <a title="akka.stream.actor.UntypedActorPublisher.type" id="akka.stream.actor.UntypedActorPublisher">UntypedActorPublisher</a> <a href="#akka.stream.actor.UntypedActorPublisher" title="akka.stream.actor.UntypedActorPublisher.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Java API: Create a [[org.reactivestreams.Publisher]] backed by a [[UntypedActorPublisher]] actor. It can be
+   * attached to a [[org.reactivestreams.Subscriber]] or be used as an input source for a
+   * [[akka.stream.javadsl.Flow]].
+   */</span>
+  def <a title="[T](ref: akka.actor.ActorRef)org.reactivestreams.Publisher[T]" id="akka.stream.actor.UntypedActorPublisher.create">create</a><span class="delimiter">[</span><a title="" id="akka.stream.actor.UntypedActorPublisher.create;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.actor.UntypedActorPublisher.create.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span><span class="delimiter">)</span>: <span title="org.reactivestreams.Publisher[T]">Publisher</span><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>.<a href="#akka.stream.actor.ActorPublisher.apply" title="(ref: akka.actor.ActorRef)org.reactivestreams.Publisher[T]">apply</a><span class="delimiter">(</span><a href="#akka.stream.actor.UntypedActorPublisher.create.ref" title="akka.actor.ActorRef">ref</a><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API
+ * @see [[akka.stream.actor.ActorPublisher]]
+ */</span>
+abstract class <a title="class UntypedActorPublisher[T] extends akka.actor.UntypedActor with akka.stream.actor.ActorPublisher[T]" id="akka.stream.actor;UntypedActorPublisher">UntypedActorPublisher</a><span class="delimiter">[</span><a title="" id="akka.stream.actor;UntypedActorPublisher;T">T</a><span class="delimiter">]</span> extends <a href="#akka.stream.actor;UntypedActorPublisher" title="akka.actor.UntypedActor">UntypedActor</a> with <a href="#akka.stream.actor;ActorPublisher" title="akka.stream.actor.ActorPublisher[T]">ActorPublisher</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+
+<span class="comment">/**
+ * Java API compatible with lambda expressions
+ */</span>
+object <a title="akka.stream.actor.AbstractActorPublisher.type" id="akka.stream.actor.AbstractActorPublisher">AbstractActorPublisher</a> <a href="#akka.stream.actor.AbstractActorPublisher" title="akka.stream.actor.AbstractActorPublisher.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Java API compatible with lambda expressions: Create a [[org.reactivestreams.Publisher]]
+   * backed by a [[AbstractActorPublisher]] actor. It can be attached to a [[org.reactivestreams.Subscriber]]
+   * or be used as an input source for a [[akka.stream.javadsl.Flow]].
+   */</span>
+  def <a title="[T](ref: akka.actor.ActorRef)org.reactivestreams.Publisher[T]" id="akka.stream.actor.AbstractActorPublisher.create">create</a><span class="delimiter">[</span><a title="" id="akka.stream.actor.AbstractActorPublisher.create;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.actor.AbstractActorPublisher.create.ref">ref</a>: <span title="akka.actor.ActorRef">ActorRef</span><span class="delimiter">)</span>: <span title="org.reactivestreams.Publisher[T]">Publisher</span><span class="delimiter">[</span>T<span class="delimiter">]</span> = <a href="#akka.stream.actor.ActorPublisher" title="akka.stream.actor.ActorPublisher.type">ActorPublisher</a>.<a href="#akka.stream.actor.ActorPublisher.apply" title="(ref: akka.actor.ActorRef)org.reactivestreams.Publisher[T]">apply</a><span class="delimiter">(</span><a href="#akka.stream.actor.AbstractActorPublisher.create.ref" title="akka.actor.ActorRef">ref</a><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API compatible with lambda expressions
+ * @see [[akka.stream.actor.ActorPublisher]]
+ */</span>
+abstract class <a title="class AbstractActorPublisher[T] extends akka.actor.AbstractActor with akka.stream.actor.ActorPublisher[T]" id="akka.stream.actor;AbstractActorPublisher">AbstractActorPublisher</a><span class="delimiter">[</span><a title="" id="akka.stream.actor;AbstractActorPublisher;T">T</a><span class="delimiter">]</span> extends <a href="#akka.stream.actor;AbstractActorPublisher" title="akka.actor.AbstractActor">AbstractActor</a> with <a href="#akka.stream.actor;ActorPublisher" title="akka.stream.actor.ActorPublisher[T]">ActorPublisher</a><span class="delimiter">[</span>T<span class="delimiter">]</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>akka/stream/impl/StreamSubscriptionTimeout.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+package akka.stream.impl
+
+import akka.actor._
+import akka.stream.<a href="../FlowMaterializer.scala.html#akka.stream.StreamSubscriptionTimeoutTerminationMode" title="akka.stream.StreamSubscriptionTimeoutTerminationMode.type">StreamSubscriptionTimeoutTerminationMode</a>.<span class="delimiter">{</span> CancelTermination, NoopTermination, WarnTermination <span class="delimiter">}</span>
+import akka.stream.StreamSubscriptionTimeoutSettings
+import org.reactivestreams._
+import scala.concurrent.duration.FiniteDuration
+import scala.util.control.NoStackTrace
+
+object <a title="akka.stream.impl.StreamSubscriptionTimeoutSupport.type" id="akka.stream.impl.StreamSubscriptionTimeoutSupport">StreamSubscriptionTimeoutSupport</a> <a href="#akka.stream.impl.StreamSubscriptionTimeoutSupport" title="akka.stream.impl.StreamSubscriptionTimeoutSupport.type" class="delimiter">{</a>
+
+  <span class="comment">/**
+   * A subscriber who calls `cancel` directly from `onSubscribe` and ignores all other callbacks.
+   */</span>
+  final case object <a href="#akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.productElement.x$1" title="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.type" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.readResolve">CancelingSubscriber</a> extends <span title="org.reactivestreams.Subscriber[Any]">Subscriber</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> <span class="delimiter">{</span>
+    override def <a title="(s: org.reactivestreams.Subscription)Unit" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onSubscribe">onSubscribe</a><span class="delimiter">(</span><a title="org.reactivestreams.Subscription" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onSubscribe.s">s</a>: <span title="org.reactivestreams.Subscription">Subscription</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onSubscribe.s" title="org.reactivestreams.Subscription">s</a>.<span title="()Unit">cancel</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    override def <a title="(t: Throwable)Unit" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onError">onError</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onError.t">t</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+    override def <a title="()Unit" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onComplete">onComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+    override def <a title="(t: Any)Unit" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onNext">onNext</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.CancelingSubscriber.onNext.t">t</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   *
+   * Subscription timeout which does not start any scheduled events and always returns `true`.
+   * This specialized implementation is to be used for &quot;noop&quot; timeout mode.
+   */</span>
+  final case object <a href="#akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.productElement.x$1" title="akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.type" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.readResolve">NoopSubscriptionTimeout</a> extends <span title="akka.actor.Cancellable">Cancellable</span> <span class="delimiter">{</span>
+    override def <a title="()Boolean" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.cancel">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span> = true
+    override def <a title="=&gt; Boolean" id="akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.isCancelled">isCancelled</a> = true
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Provides support methods to create Publishers and Subscribers which time-out gracefully,
+ * and are cancelled subscribing an `CancellingSubscriber` to the publisher, or by calling `onError` on the timed-out subscriber.
+ *
+ * See `akka.stream.materializer.subscription-timeout` for configuration options.
+ */</span>
+trait <a title="trait StreamSubscriptionTimeoutSupport extends AnyRef" id="akka.stream.impl;StreamSubscriptionTimeoutSupport">StreamSubscriptionTimeoutSupport</a> <span title="Unit" class="delimiter">{</span>
+  this: Actor with ActorLogging ⇒
+
+  import <a href="#akka.stream.impl.StreamSubscriptionTimeoutSupport" title="akka.stream.impl.StreamSubscriptionTimeoutSupport.type">StreamSubscriptionTimeoutSupport</a>._
+
+  <span class="comment">/**
+   * Default settings for subscription timeouts.
+   */</span>
+  protected def <a title="=&gt; akka.stream.StreamSubscriptionTimeoutSettings" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimeoutSettings">subscriptionTimeoutSettings</a>: <a href="../FlowMaterializer.scala.html#akka.stream;StreamSubscriptionTimeoutSettings" title="akka.stream.StreamSubscriptionTimeoutSettings">StreamSubscriptionTimeoutSettings</a>
+
+  <span class="comment">/**
+   * Schedules a Subscription timeout.
+   * The actor will receive the message created by the provided block if the timeout triggers.
+   */</span>
+  protected def <a title="(actor: akka.actor.ActorRef, message: Any)akka.actor.Cancellable" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.scheduleSubscriptionTimeout">scheduleSubscriptionTimeout</a><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.scheduleSubscriptionTimeout.actor">actor</a>: <span title="akka.actor.ActorRef">ActorRef</span>, <a title="Any" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.scheduleSubscriptionTimeout.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="akka.actor.Cancellable">Cancellable</span> =
+    <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimeoutSettings" title="=&gt; akka.stream.StreamSubscriptionTimeoutSettings">subscriptionTimeoutSettings</a>.<a href="../FlowMaterializer.scala.html#akka.stream;StreamSubscriptionTimeoutSettings.mode" title="=&gt; akka.stream.StreamSubscriptionTimeoutTerminationMode">mode</a> match <span class="delimiter">{</span>
+      case <a href="../FlowMaterializer.scala.html#akka.stream.StreamSubscriptionTimeoutTerminationMode.NoopTermination" title="akka.stream.StreamSubscriptionTimeoutTerminationMode.NoopTermination.type">NoopTermination</a> ⇒
+        <a href="#akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.readResolve" title="akka.stream.impl.StreamSubscriptionTimeoutSupport.NoopSubscriptionTimeout.type">NoopSubscriptionTimeout</a>
+      case _ ⇒
+        import <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport" title="=&gt; akka.actor.ActorContext">context</a>.dispatcher
+        val <a title="akka.actor.Cancellable" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.scheduleSubscriptionTimeout.cancellable">cancellable</a> = <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport" title="=&gt; akka.actor.ActorContext">context</a>.<span title="=&gt; akka.actor.ActorSystem">system</span>.<span title="=&gt; akka.actor.Scheduler">scheduler</span>.<span title="(delay: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">scheduleOnce</span><a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport" title="=&gt; scala.concurrent.ExecutionContextExecutor" class="delimiter">(</a><a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimeoutSettings" title="=&gt; akka.stream.StreamSubscriptionTimeoutSettings">subscriptionTimeoutSettings</a>.<a href="../FlowMaterializer.scala.html#akka.stream;StreamSubscriptionTimeoutSettings.timeout" title="=&gt; scala.concurrent.duration.FiniteDuration">timeout</a>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.scheduleSubscriptionTimeout.actor" title="akka.actor.ActorRef">actor</a>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.scheduleSubscriptionTimeout.message" title="Any">message</a><span class="delimiter">)</span>
+        <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.scheduleSubscriptionTimeout.cancellable" title="akka.actor.Cancellable">cancellable</a>
+    <span class="delimiter">}</span>
+
+  private def <a title="(target: org.reactivestreams.Publisher[_], timeout: scala.concurrent.duration.FiniteDuration)Unit" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel">cancel</a><span class="delimiter">(</span><a title="org.reactivestreams.Publisher[_]" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.target">target</a>: <span title="org.reactivestreams.Publisher[_]">Publisher</span><span class="delimiter">[</span>_<span class="delimiter">]</span>, <a title="scala.concurrent.duration.FiniteDuration" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.timeout">timeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    val <a title="Long" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.millis">millis</a> = <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.timeout" title="scala.concurrent.duration.FiniteDuration">timeout</a>.<span title="=&gt; Long">toMillis</span>
+    <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.target" title="org.reactivestreams.Publisher[_]">target</a> match <span class="delimiter">{</span>
+      case <span title="org.reactivestreams.Processor[_,_]">p</span>: <span title="org.reactivestreams.Processor[_,_]">Processor</span><span class="delimiter">[</span>_, _<span class="delimiter">]</span> ⇒
+        <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport" title="=&gt; akka.event.LoggingAdapter">log</a>.<span title="(template: String, arg1: Any, arg2: Any)Unit">debug</span><span class="delimiter">(</span><span title="String(&quot;Cancelling {} Processor\'s publisher and subscriber sides (after {} ms)&quot;)" class="string">&quot;Cancelling {} Processor's publisher and subscriber sides (after {} ms)&quot;</span>, <span title="org.reactivestreams.Processor[_,_]">p</span>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.millis" title="Long">millis</a><span class="delimiter">)</span>
+        <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.handleSubscriptionTimeout" title="(target: org.reactivestreams.Publisher[_], cause: Exception)Unit">handleSubscriptionTimeout</a><span class="delimiter">(</span><a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.target" title="org.reactivestreams.Publisher[_]">target</a>, new <a href="#akka.stream.impl;SubscriptionTimeoutException" title="&lt;$anon: akka.stream.impl.SubscriptionTimeoutException with scala.util.control.NoStackTrace&gt; extends akka.stream.impl.SubscriptionTimeoutException with scala.util.control.NoStackTrace">SubscriptionTimeoutException</a><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;Publisher was not attached to upstream within deadline (&quot;)">Publisher was not attached to upstream within deadline ($</span><span class="delimiter">{</span><a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.millis" title="Long">millis</a><span class="delimiter">}</span><span title="String(&quot;) ms&quot;)" class="string">) ms&quot;</span><span class="delimiter">)</span> with <span title="scala.util.control.NoStackTrace">NoStackTrace</span><span class="delimiter">)</span>
+
+      case <span title="org.reactivestreams.Publisher[_$1]">p</span>: <span title="org.reactivestreams.Publisher[_]">Publisher</span><span class="delimiter">[</span>_<span class="delimiter">]</span> ⇒
+        <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport" title="=&gt; akka.event.LoggingAdapter">log</a>.<span title="(template: String, arg1: Any, arg2: Any)Unit">debug</span><span class="delimiter">(</span><span title="String(&quot;Cancelling {} (after: {} ms)&quot;)" class="string">&quot;Cancelling {} (after: {} ms)&quot;</span>, <span title="org.reactivestreams.Publisher[_$1]">p</span>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.millis" title="Long">millis</a><span class="delimiter">)</span>
+        <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.handleSubscriptionTimeout" title="(target: org.reactivestreams.Publisher[_], cause: Exception)Unit">handleSubscriptionTimeout</a><span class="delimiter">(</span><a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel.target" title="org.reactivestreams.Publisher[_]">target</a>, new <a href="#akka.stream.impl;SubscriptionTimeoutException" title="&lt;$anon: akka.stream.impl.SubscriptionTimeoutException with scala.util.control.NoStackTrace&gt; extends akka.stream.impl.SubscriptionTimeoutException with scala.util.control.NoStackTrace">SubscriptionTimeoutException</a><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;Publisher (&quot;)">Publisher ($</span><span class="delimiter">{</span><span title="org.reactivestreams.Publisher[_$1]">p</span><span class="delimiter">}</span><span title="String(&quot;) you are trying to subscribe to has been shut-down &quot;)" class="string">) you are trying to subscribe to has been shut-down &quot;</span> <span title="(x$1: Any)String">+</span>
+          <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;because exceeding it\'s subscription-timeout.&quot;)" class="string">because exceeding it's subscription-timeout.&quot;</span><span class="delimiter">)</span> with <span title="scala.util.control.NoStackTrace">NoStackTrace</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="(target: org.reactivestreams.Publisher[_], timeout: scala.concurrent.duration.FiniteDuration)Unit" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.warn">warn</a><span class="delimiter">(</span><a title="org.reactivestreams.Publisher[_]" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.warn.target">target</a>: <span title="org.reactivestreams.Publisher[_]">Publisher</span><span class="delimiter">[</span>_<span class="delimiter">]</span>, <a title="scala.concurrent.duration.FiniteDuration" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.warn.timeout">timeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport" title="=&gt; akka.event.LoggingAdapter">log</a>.<span title="(template: String, arg1: Any, arg2: Any, arg3: Any)Unit">warning</span><span class="delimiter">(</span><span title="String(&quot;Timed out {} detected (after {} ms)! You should investigate if you either cancel or consume all {} instances&quot;)" class="string">&quot;Timed out {} detected (after {} ms)! You should investigate if you either cancel or consume all {} instances&quot;</span>,
+      <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.warn.target" title="org.reactivestreams.Publisher[_]">target</a>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.warn.timeout" title="scala.concurrent.duration.FiniteDuration">timeout</a>.<span title="=&gt; Long">toMillis</span>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.warn.target" title="org.reactivestreams.Publisher[_]">target</a>.<span title="()Class[_]">getClass</span>.<span title="()String">getCanonicalName</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Called by the actor when a subscription has timed out. Expects the actual `Publisher` or `Processor` target.
+   */</span>
+  protected def <a title="(target: org.reactivestreams.Publisher[_])Unit" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimedOut">subscriptionTimedOut</a><span class="delimiter">(</span><a title="org.reactivestreams.Publisher[_]" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimedOut.target">target</a>: <span title="org.reactivestreams.Publisher[_]">Publisher</span><span class="delimiter">[</span>_<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimeoutSettings" title="=&gt; akka.stream.StreamSubscriptionTimeoutSettings">subscriptionTimeoutSettings</a>.<a href="../FlowMaterializer.scala.html#akka.stream;StreamSubscriptionTimeoutSettings.mode" title="=&gt; akka.stream.StreamSubscriptionTimeoutTerminationMode">mode</a> match <span class="delimiter">{</span>
+    case <a href="../FlowMaterializer.scala.html#akka.stream.StreamSubscriptionTimeoutTerminationMode.NoopTermination" title="akka.stream.StreamSubscriptionTimeoutTerminationMode.NoopTermination.type">NoopTermination</a>   ⇒ <span class="comment">// ignore...</span>
+    case <a href="../FlowMaterializer.scala.html#akka.stream.StreamSubscriptionTimeoutTerminationMode.WarnTermination" title="akka.stream.StreamSubscriptionTimeoutTerminationMode.WarnTermination.type">WarnTermination</a>   ⇒ <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.warn" title="(target: org.reactivestreams.Publisher[_], timeout: scala.concurrent.duration.FiniteDuration)Unit">warn</a><span class="delimiter">(</span><a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimedOut.target" title="org.reactivestreams.Publisher[_]">target</a>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimeoutSettings" title="=&gt; akka.stream.StreamSubscriptionTimeoutSettings">subscriptionTimeoutSettings</a>.<a href="../FlowMaterializer.scala.html#akka.stream;StreamSubscriptionTimeoutSettings.timeout" title="=&gt; scala.concurrent.duration.FiniteDuration">timeout</a><span class="delimiter">)</span>
+    case <a href="../FlowMaterializer.scala.html#akka.stream.StreamSubscriptionTimeoutTerminationMode.CancelTermination" title="akka.stream.StreamSubscriptionTimeoutTerminationMode.CancelTermination.type">CancelTermination</a> ⇒ <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.cancel" title="(target: org.reactivestreams.Publisher[_], timeout: scala.concurrent.duration.FiniteDuration)Unit">cancel</a><span class="delimiter">(</span><a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimedOut.target" title="org.reactivestreams.Publisher[_]">target</a>, <a href="#akka.stream.impl;StreamSubscriptionTimeoutSupport.subscriptionTimeoutSettings" title="=&gt; akka.stream.StreamSubscriptionTimeoutSettings">subscriptionTimeoutSettings</a>.<a href="../FlowMaterializer.scala.html#akka.stream;StreamSubscriptionTimeoutSettings.timeout" title="=&gt; scala.concurrent.duration.FiniteDuration">timeout</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Callback that should ensure that the target is cancelled with the given cause.
+   */</span>
+  protected def <a title="(target: org.reactivestreams.Publisher[_], cause: Exception)Unit" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.handleSubscriptionTimeout">handleSubscriptionTimeout</a><span class="delimiter">(</span><a title="org.reactivestreams.Publisher[_]" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.handleSubscriptionTimeout.target">target</a>: <span title="org.reactivestreams.Publisher[_]">Publisher</span><span class="delimiter">[</span>_<span class="delimiter">]</span>, <a title="Exception" id="akka.stream.impl;StreamSubscriptionTimeoutSupport.handleSubscriptionTimeout.cause">cause</a>: <span title="Exception">Exception</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+<span class="delimiter">}</span>
+
+class <a title="class SubscriptionTimeoutException extends RuntimeException" id="akka.stream.impl;SubscriptionTimeoutException">SubscriptionTimeoutException</a><a href="#akka.stream.impl;SubscriptionTimeoutException" title="akka.stream.impl.SubscriptionTimeoutException" class="delimiter">(</a><a title="String" id="akka.stream.impl;SubscriptionTimeoutException.msg">msg</a>: <span title="String">String</span><span class="delimiter">)</span> extends <a href="#akka.stream.impl;SubscriptionTimeoutException" title="RuntimeException">RuntimeException</a><span class="delimiter">(</span><a href="#akka.stream.impl;SubscriptionTimeoutException.msg" title="String">msg</a><span class="delimiter">)</span>
+
+        </pre>
+    </body>
+</html>

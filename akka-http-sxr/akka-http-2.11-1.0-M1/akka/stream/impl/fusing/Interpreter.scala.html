@@ -1,0 +1,547 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>akka/stream/impl/fusing/Interpreter.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+package akka.stream.impl.fusing
+
+import scala.annotation.tailrec
+import scala.collection.breakOut
+import scala.util.control.NonFatal
+import akka.stream.stage._
+
+<span class="comment">// TODO:</span>
+<span class="comment">// fix jumpback table with keep-going-on-complete ops (we might jump between otherwise isolated execution regions)</span>
+<span class="comment">// implement grouped, buffer</span>
+<span class="comment">// add recover</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ *
+ * `BoundaryStage` implementations are meant to communicate with the external world. These stages do not have most of the
+ * safety properties enforced and should be used carefully. One important ability of BoundaryStages that they can take
+ * off an execution signal by calling `ctx.exit()`. This is typically used immediately after an external signal has
+ * been produced (for example an actor message). BoundaryStages can also kickstart execution by calling `enter()` which
+ * returns a context they can use to inject signals into the interpreter. There is no checks in place to enforce that
+ * the number of signals taken out by exit() and the number of signals returned via enter() are the same -- using this
+ * stage type needs extra care from the implementer.
+ *
+ * BoundaryStages are the elements that make the interpreter *tick*, there is no other way to start the interpreter
+ * than using a BoundaryStage.
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> abstract class <a title="class BoundaryStage extends akka.stream.stage.AbstractStage[Any,Any,akka.stream.stage.Directive,akka.stream.stage.Directive,akka.stream.stage.BoundaryContext]" id="akka.stream.impl.fusing;BoundaryStage">BoundaryStage</a> extends <a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="akka.stream.stage.AbstractStage[Any,Any,akka.stream.stage.Directive,akka.stream.stage.Directive,akka.stream.stage.BoundaryContext]">AbstractStage</a><span class="delimiter">[</span>Any, Any, Directive, Directive, BoundaryContext<span class="delimiter">]</span> <span class="delimiter">{</span>
+  private<span class="delimiter">[</span>fusing<span class="delimiter">]</span> var <a title="akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing;BoundaryStage.bctx_=">bctx</a>: <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a> = _
+  def <a title="()akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing;BoundaryStage.enter">enter</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a> = <a href="#akka.stream.impl.fusing;BoundaryStage.bctx_=" title="=&gt; akka.stream.stage.BoundaryContext">bctx</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> object <a title="akka.stream.impl.fusing.OneBoundedInterpreter.type" id="akka.stream.impl.fusing.OneBoundedInterpreter">OneBoundedInterpreter</a> <a href="#akka.stream.impl.fusing.OneBoundedInterpreter" title="akka.stream.impl.fusing.OneBoundedInterpreter.type" class="delimiter">{</a>
+  final val <a title="Boolean(false)" id="akka.stream.impl.fusing.OneBoundedInterpreter.Debug">Debug</a> = false
+
+  <span class="comment">/**
+   * INTERNAL API
+   *
+   * This artificial op is used as a boundary to prevent two forked paths of execution (complete, cancel) to cross
+   * paths again. When finishing an op this op is injected in its place to isolate upstream and downstream execution
+   * domains.
+   */</span>
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> object <a title="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.type" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished">Finished</a> extends <a href="#akka.stream.impl.fusing;BoundaryStage" title="akka.stream.impl.fusing.BoundaryStage">BoundaryStage</a> <span class="delimiter">{</span>
+    override def <a title="(elem: Any, ctx: akka.stream.stage.BoundaryContext)akka.stream.stage.UpstreamDirective" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onPush">onPush</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onPush.elem">elem</a>: <span title="Any">Any</span>, <a title="akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onPush.ctx">ctx</a>: <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;UpstreamDirective" title="akka.stream.stage.UpstreamDirective">UpstreamDirective</a> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onPush.ctx" title="akka.stream.stage.BoundaryContext">ctx</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;Context.finish" title="()akka.stream.stage.FreeDirective">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    override def <a title="(ctx: akka.stream.stage.BoundaryContext)akka.stream.stage.DownstreamDirective" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onPull">onPull</a><span class="delimiter">(</span><a title="akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onPull.ctx">ctx</a>: <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;DownstreamDirective" title="akka.stream.stage.DownstreamDirective">DownstreamDirective</a> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onPull.ctx" title="akka.stream.stage.BoundaryContext">ctx</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;Context.finish" title="()akka.stream.stage.FreeDirective">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    override def <a title="(ctx: akka.stream.stage.BoundaryContext)akka.stream.stage.TerminationDirective" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onUpstreamFinish">onUpstreamFinish</a><span class="delimiter">(</span><a title="akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onUpstreamFinish.ctx">ctx</a>: <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;TerminationDirective" title="akka.stream.stage.TerminationDirective">TerminationDirective</a> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onUpstreamFinish.ctx" title="akka.stream.stage.BoundaryContext">ctx</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext.exit" title="()akka.stream.stage.FreeDirective">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    override def <a title="(ctx: akka.stream.stage.BoundaryContext)akka.stream.stage.TerminationDirective" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onDownstreamFinish">onDownstreamFinish</a><span class="delimiter">(</span><a title="akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onDownstreamFinish.ctx">ctx</a>: <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;TerminationDirective" title="akka.stream.stage.TerminationDirective">TerminationDirective</a> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onDownstreamFinish.ctx" title="akka.stream.stage.BoundaryContext">ctx</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext.exit" title="()akka.stream.stage.FreeDirective">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    override def <a title="(cause: Throwable, ctx: akka.stream.stage.BoundaryContext)akka.stream.stage.TerminationDirective" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onUpstreamFailure">onUpstreamFailure</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onUpstreamFailure.cause">cause</a>: <span title="Throwable">Throwable</span>, <a title="akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onUpstreamFailure.ctx">ctx</a>: <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;TerminationDirective" title="akka.stream.stage.TerminationDirective">TerminationDirective</a> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished.onUpstreamFailure.ctx" title="akka.stream.stage.BoundaryContext">ctx</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext.exit" title="()akka.stream.stage.FreeDirective">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ *
+ * One-bounded interpreter for a linear chain of stream operations (graph support is possible and will be implemented
+ * later)
+ *
+ * The ideas in this interpreter are an amalgamation of earlier ideas, notably:
+ *  - The original effect-tracking implementation by Johannes Rudolph -- the difference here that effects are not chained
+ *  together as classes but the callstack is used instead and only certain combinations are allowed.
+ *  - The on-stack reentrant implementation by Mathias Doenitz -- the difference here that reentrancy is handled by the
+ *  interpreter itself, not user code, and the interpreter is able to use the heap when needed instead of the
+ *  callstack.
+ *  - The pinball interpreter by Endre Sándor Varga -- the difference here that the restricition for &quot;one ball&quot; is
+ *  lifted by using isolated execution regions, completion handling is introduced and communication with the external
+ *  world is done via boundary ops.
+ *
+ * The design goals/features of this interpreter are:
+ *  - bounded callstack and heapless execution whenever possible
+ *  - callstack usage should be constant for the most common ops independently of the size of the op-chain
+ *  - allocation-free execution on the hot paths
+ *  - enforced backpressure-safety (boundedness) on user defined ops at compile-time (and runtime in a few cases)
+ *
+ * The main driving idea of this interpreter is the concept of 1-bounded execution of well-formed free choice Petri
+ * nets (J. Desel and J. Esparza: Free Choice Petri Nets - https://www7.in.tum.de/~esparza/bookfc.html). Technically
+ * different kinds of operations partition the chain of ops into regions where *exactly one* event is active all the
+ * time. This &quot;exactly one&quot; property is enforced by proper types and runtime checks where needed. Currently there are
+ * three kinds of ops:
+ *
+ *  - PushPullStage implementations participate in 1-bounded regions. For every external non-completion signal these
+ *  ops produce *exactly one* signal (completion is different, explained later) therefore keeping the number of events
+ *  the same: exactly one.
+ *
+ *  - DetachedStage implementations are boundaries between 1-bounded regions. This means that they need to enforce the
+ *  &quot;exactly one&quot; property both on their upstream and downstream regions. As a consequence a DetachedStage can never
+ *  answer an onPull with a ctx.pull() or answer an onPush() with a ctx.push() since such an action would &quot;steal&quot;
+ *  the event from one region (resulting in zero signals) and would inject it to the other region (resulting in two
+ *  signals). However DetachedStages have the ability to call ctx.hold() as a response to onPush/onPull which temporarily
+ *  takes the signal off and stops execution, at the same time putting the op in a &quot;holding&quot; state. If the op is in a
+ *  holding state it contains one absorbed signal, therefore in this state the only possible command to call is
+ *  ctx.pushAndPull() which results in two events making the balance right again:
+ *  1 hold + 1 external event = 2 external event
+ *  This mechanism allows synchronization between the upstream and downstream regions which otherwise can progress
+ *  independently.
+ *
+ *  - BoundaryStage implementations are meant to communicate with the external world. These ops do not have most of the
+ *  safety properties enforced and should be used carefully. One important ability of BoundaryStages that they can take
+ *  off an execution signal by calling ctx.exit(). This is typically used immediately after an external signal has
+ *  been produced (for example an actor message). BoundaryStages can also kickstart execution by calling enter() which
+ *  returns a context they can use to inject signals into the interpreter. There is no checks in place to enforce that
+ *  the number of signals taken out by exit() and the number of signals returned via enter() are the same -- using this
+ *  op type needs extra care from the implementer.
+ *  BoundaryStages are the elements that make the interpreter *tick*, there is no other way to start the interpreter
+ *  than using a BoundaryStage.
+ *
+ * Operations are allowed to do early completion and cancel/complete their upstreams and downstreams. It is *not*
+ * allowed however to do these independently to avoid isolated execution islands. The only call possible is ctx.finish()
+ * which is a combination of cancel/complete.
+ * Since onComplete is not a backpressured signal it is sometimes preferable to push a final element and then immediately
+ * finish. This combination is exposed as pushAndFinish() which enables op writers to propagate completion events without
+ * waiting for an extra round of pull.
+ * Another peculiarity is how to convert termination events (complete/failure) into elements. The problem
+ * here is that the termination events are not backpressured while elements are. This means that simply calling ctx.push()
+ * as a response to onUpstreamFinished() will very likely break boundedness and result in a buffer overflow somewhere.
+ * Therefore the only allowed command in this case is ctx.absorbTermination() which stops the propagation of the
+ * termination signal, and puts the op in a finishing state. Depending on whether the op has a pending pull signal it has
+ * not yet &quot;consumed&quot; by a push its onPull() handler might be called immediately.
+ *
+ * In order to execute different individual execution regions the interpreter uses the callstack to schedule these. The
+ * current execution forking operations are
+ *  - ctx.finish() which starts a wave of completion and cancellation in two directions. When an op calls finish()
+ *  it is immediately replaced by an artificial Finished op which makes sure that the two execution paths are isolated
+ *  forever.
+ *  - ctx.fail() which is similar to finish()
+ *  - ctx.pushAndPull() which (as a response to a previous ctx.hold()) starts a wawe of downstream push and upstream
+ *  pull. The two execution paths are isolated by the op itself since onPull() from downstream can only answered by hold or
+ *  push, while onPush() from upstream can only answered by hold or pull -- it is impossible to &quot;cross&quot; the op.
+ *  - ctx.pushAndFinish() which is different from the forking ops above because the execution of push and finish happens on
+ *  the same execution region and they are order dependent, too.
+ * The interpreter tracks the depth of recursive forking and allows various strategies of dealing with the situation
+ * when this depth reaches a certain limit. In the simplest case an error is reported (this is very useful for stress
+ * testing and finding callstack wasting bugs), in the other case the forked call is scheduled via a list -- i.e. instead
+ * of the stack the heap is used.
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> class <a title="class OneBoundedInterpreter extends AnyRef" id="akka.stream.impl.fusing;OneBoundedInterpreter">OneBoundedInterpreter</a><a href="#akka.stream.impl.fusing;OneBoundedInterpreter" title="akka.stream.impl.fusing.OneBoundedInterpreter" class="delimiter">(</a><a title="Seq[akka.stream.stage.Stage[_, _]]" id="akka.stream.impl.fusing;OneBoundedInterpreter.ops">ops</a>: <span title="Seq[akka.stream.stage.Stage[_, _]]">Seq</span><span class="delimiter">[</span>Stage<span class="delimiter">[</span>_, _<span class="delimiter">]</span><span class="delimiter">]</span>, val <a title="=&gt; Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.forkLimit">forkLimit</a>: <span title="Int">Int</span> = <span title="Int(100)" class="int">100</span>, val <a title="=&gt; Boolean" id="akka.stream.impl.fusing;OneBoundedInterpreter.overflowToHeap">overflowToHeap</a>: <span title="Boolean">Boolean</span> = true<span class="delimiter">)</span> <span class="delimiter">{</span>
+  import <a href="#akka.stream.impl.fusing.OneBoundedInterpreter" title="akka.stream.impl.fusing.OneBoundedInterpreter.type">OneBoundedInterpreter</a>._
+  type <a title="akka.stream.stage.AbstractStage[Any,Any,akka.stream.stage.Directive,akka.stream.stage.Directive,akka.stream.stage.Context[Any]]" id="akka.stream.impl.fusing;OneBoundedInterpreter;UntypedOp">UntypedOp</a> = <a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="akka.stream.stage.AbstractStage[Any,Any,akka.stream.stage.Directive,akka.stream.stage.Directive,akka.stream.stage.Context[Any]]">AbstractStage</a><span class="delimiter">[</span>Any, Any, Directive, Directive, Context<span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">]</span>
+  <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.ops" title="Seq[akka.stream.stage.Stage[_, _]]">ops</a>.<span title="=&gt; Boolean">nonEmpty</span>, <span title="String(&quot;OneBoundedInterpreter cannot be created without at least one Op&quot;)" class="string">&quot;OneBoundedInterpreter cannot be created without at least one Op&quot;</span><span class="delimiter">)</span>
+
+  private final val <a title="Array[OneBoundedInterpreter.this.UntypedOp]" id="akka.stream.impl.fusing;OneBoundedInterpreter.pipeline">pipeline</a>: <span title="Array[OneBoundedInterpreter.this.UntypedOp]">Array</span><span class="delimiter">[</span>UntypedOp<span class="delimiter">]</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.ops" title="Seq[akka.stream.stage.Stage[_, _]]">ops</a>.<span title="(f: akka.stream.stage.Stage[_, _] =&gt; OneBoundedInterpreter.this.UntypedOp)(implicit bf: scala.collection.generic.CanBuildFrom[Seq[akka.stream.stage.Stage[_, _]],OneBoundedInterpreter.this.UntypedOp,Array[OneBoundedInterpreter.this.UntypedOp]])Array[OneBoundedInterpreter.this.UntypedOp]">map</span><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline.$anonfun.x$1" title="akka.stream.stage.Stage[_, _]">_</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="OneBoundedInterpreter.this.UntypedOp" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="OneBoundedInterpreter.this.UntypedOp">UntypedOp</a><span class="delimiter">]</span><span class="delimiter">)</span><span class="delimiter">(</span><span title="(implicit b: scala.collection.generic.CanBuildFrom[Nothing,OneBoundedInterpreter.this.UntypedOp,Array[OneBoundedInterpreter.this.UntypedOp]])scala.collection.generic.CanBuildFrom[Seq[akka.stream.stage.Stage[_, _]],OneBoundedInterpreter.this.UntypedOp,Array[OneBoundedInterpreter.this.UntypedOp]]">breakOut</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * This table is used to accelerate demand propagation upstream. All ops that implement PushStage are guaranteed
+   * to only do upstream propagation of demand signals, therefore it is not necessary to execute them but enough to
+   * &quot;jump over&quot; them. This means that when a chain of one million maps gets a downstream demand it is propagated
+   * to the upstream *in one step* instead of one million onPull() calls.
+   * This table maintains the positions where execution should jump from a current position when a pull event is to
+   * be executed.
+   */</span>
+  private final val <a title="Array[Int]" id="akka.stream.impl.fusing;OneBoundedInterpreter.jumpBacks">jumpBacks</a>: <span title="Array[Int]">Array</span><span class="delimiter">[</span>Int<span class="delimiter">]</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks" title="=&gt; Array[Int]">calculateJumpBacks</a>
+
+  private final val <a title="Int(0)" id="akka.stream.impl.fusing;OneBoundedInterpreter.Upstream">Upstream</a> = <span title="Int(0)" class="int">0</span>
+  private final val Downstream = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="=&gt; Array[OneBoundedInterpreter.this.UntypedOp]">pipeline</a>.<span title="=&gt; Int">length</span> <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.Downstream">-</a> <span title="Int(1)" class="int">1</span>
+
+  <span class="comment">// Var to hold the current element if pushing. The only reason why this var is needed is to avoid allocations and</span>
+  <span class="comment">// make it possible for the Pushing state to be an object</span>
+  private var <a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=">elementInFlight</a>: <span title="Any">Any</span> = _
+  <span class="comment">// Points to the current point of execution inside the pipeline</span>
+  private var <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=">activeOpIndex</a> = -<span title="Int(-1)" class="int">1</span>
+  <span class="comment">// The current interpreter state that decides what happens at the next round</span>
+  private var <a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.state_=">state</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pushing" title="=&gt; OneBoundedInterpreter.this.State">Pushing</a>
+
+  <span class="comment">// Counter that keeps track of the depth of recursive forked executions</span>
+  private var <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.forkCount_=">forkCount</a> = <span title="Int(0)" class="int">0</span>
+  <span class="comment">// List that is used as an auxiliary stack if fork recursion depth reaches forkLimit</span>
+  private var <a title="List[(Int, OneBoundedInterpreter.this.State, Any)]" id="akka.stream.impl.fusing;OneBoundedInterpreter.overflowStack_=">overflowStack</a> = <span title="scala.collection.immutable.List.type">List</span>.<span title="[A]=&gt; List[A]">empty</span><span title="List[(Int, OneBoundedInterpreter.this.State, Any)]" class="delimiter">[</span><span title="(Int, OneBoundedInterpreter.this.State, Any)" class="delimiter">(</span>Int, State, Any<span class="delimiter">)</span><span class="delimiter">]</span>
+
+  private var <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.lastOpFailing_=">lastOpFailing</a>: <span title="Int">Int</span> = -<span title="Int(-1)" class="int">1</span>
+
+  @inline private def <a title="=&gt; OneBoundedInterpreter.this.UntypedOp" id="akka.stream.impl.fusing;OneBoundedInterpreter.currentOp">currentOp</a>: <a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="OneBoundedInterpreter.this.UntypedOp">UntypedOp</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int)OneBoundedInterpreter.this.UntypedOp">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span>
+
+  <span class="comment">// see the jumpBacks variable for explanation</span>
+  private def <a title="=&gt; Array[Int]" id="akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks">calculateJumpBacks</a>: <span title="Array[Int]">Array</span><span class="delimiter">[</span>Int<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    val <a title="Array[Int]" id="akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.table">table</a> = <span title="Array.type">Array</span>.<span title="[T](n1: Int)(implicit evidence$3: scala.reflect.ClassTag[T])Array[T]">ofDim</span><span title="(n1: Int)(implicit evidence$3: scala.reflect.ClassTag[Int])Array[Int]" class="delimiter">[</span><span title="Int">Int</span><span class="delimiter">]</span><span title="=&gt; scala.reflect.ClassTag[Int]" class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="=&gt; Array[OneBoundedInterpreter.this.UntypedOp]">pipeline</a>.<span title="=&gt; Int">length</span><span class="delimiter">)</span>
+    var <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.nextJumpBack">nextJumpBack</a> = -<span title="Int(-1)" class="int">1</span>
+    for <span class="delimiter">(</span><a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.$anonfun.pos">pos</a> ← <span title="implicit scala.LowPriorityImplicits.intWrapper : (x: Int)scala.runtime.RichInt" class="int">0</span> <span title="(f: Int =&gt; Unit)Unit">until</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="=&gt; Array[OneBoundedInterpreter.this.UntypedOp]">pipeline</a>.<span title="=&gt; Int">length</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.table" title="(i: Int, x: Int)Unit">table</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.$anonfun.pos" title="Int">pos</a><span class="delimiter">)</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.nextJumpBack" title="Int">nextJumpBack</a>
+      if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int)OneBoundedInterpreter.this.UntypedOp">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.$anonfun.pos" title="Int">pos</a><span class="delimiter">)</span>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;PushStage" title="akka.stream.stage.PushStage[_, _]">PushStage</a><span class="delimiter">[</span>_, _<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.nextJumpBack" title="Int">nextJumpBack</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.$anonfun.pos" title="Int">pos</a>
+    <span class="delimiter">}</span>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.calculateJumpBacks.table" title="Array[Int]">table</a>
+  <span class="delimiter">}</span>
+
+  private sealed trait <a title="trait State extends AnyRef with akka.stream.stage.DetachedContext[Any] with akka.stream.stage.BoundaryContext" id="akka.stream.impl.fusing;OneBoundedInterpreter;State">State</a> extends <a href="../../stage/Stage.scala.html#akka.stream.stage;DetachedContext" title="akka.stream.stage.DetachedContext[Any]">DetachedContext</a><span class="delimiter">[</span>Any<span class="delimiter">]</span> with <a href="../../stage/Stage.scala.html#akka.stream.stage;BoundaryContext" title="akka.stream.stage.BoundaryContext">BoundaryContext</a> <span class="delimiter">{</span>
+    final def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.progress">progress</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.advance" title="()Unit">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.inside" title="=&gt; Boolean">inside</a><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.run" title="()Unit">run</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      else <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.exit" title="()akka.stream.stage.FreeDirective">exit</a><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Override this method to do execution steps necessary after executing an op, and advance the activeOpIndex
+     * to another value (next or previous steps). Do NOT put code that invokes the next op, override run instead.
+     */</span>
+    def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+
+    <span class="comment">/**
+     * Override this method to enter the current op and execute it. Do NOT put code that should be executed after the
+     * op has been invoked, that should be in the advance() method of the next state resulting from the invokation of
+     * the op.
+     */</span>
+    def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+
+    override def <a title="(elem: Any)akka.stream.stage.DownstreamDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.push">push</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.push.elem">elem</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;DownstreamDirective" title="akka.stream.stage.DownstreamDirective">DownstreamDirective</a> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding" title="=&gt; Boolean">holding</a><span class="delimiter">)</span> throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Cannot push while holding, only pushAndPull&quot;)" class="string">&quot;Cannot push while holding, only pushAndPull&quot;</span><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.allowedToPush_=" title="(x$1: Boolean)Unit">allowedToPush</a> = false
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.push.elem" title="Any">elem</a>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pushing" title="=&gt; OneBoundedInterpreter.this.State">Pushing</a>
+      null
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.UpstreamDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.pull">pull</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;UpstreamDirective" title="akka.stream.stage.UpstreamDirective">UpstreamDirective</a> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding" title="=&gt; Boolean">holding</a><span class="delimiter">)</span> throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Cannot pull while holding, only pushAndPull&quot;)" class="string">&quot;Cannot pull while holding, only pushAndPull&quot;</span><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.allowedToPush_=" title="(x$1: Boolean)Unit">allowedToPush</a> = <span title="=&gt; Boolean">!</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;DetachedStage" title="akka.stream.stage.DetachedStage[_, _]">DetachedStage</a><span class="delimiter">[</span>_, _<span class="delimiter">]</span><span class="delimiter">]</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pulling" title="=&gt; OneBoundedInterpreter.this.State">Pulling</a>
+      null
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.finish">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.fork" title="(forkState: OneBoundedInterpreter.this.State, elem: Any)Unit">fork</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Completing" title="=&gt; OneBoundedInterpreter.this.State">Completing</a><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling" title="=&gt; OneBoundedInterpreter.this.State">Cancelling</a>
+      null
+    <span class="delimiter">}</span>
+
+    def <a title="=&gt; Boolean" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.isFinishing">isFinishing</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.terminationPending" title="=&gt; Boolean">terminationPending</a>
+
+    override def <a title="(elem: Any)akka.stream.stage.DownstreamDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.pushAndFinish">pushAndFinish</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.pushAndFinish.elem">elem</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;DownstreamDirective" title="akka.stream.stage.DownstreamDirective">DownstreamDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int, x: OneBoundedInterpreter.this.UntypedOp)Unit">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished" title="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.type">Finished</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="OneBoundedInterpreter.this.UntypedOp" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="OneBoundedInterpreter.this.UntypedOp">UntypedOp</a><span class="delimiter">]</span>
+      <span class="comment">// This MUST be an unsafeFork because the execution of PushFinish MUST strictly come before the finish execution</span>
+      <span class="comment">// path. Other forks are not order dependent because they execute on isolated execution domains which cannot</span>
+      <span class="comment">// &quot;cross paths&quot;. This unsafeFork is relatively safe here because PushAndFinish simply absorbs all later downstream</span>
+      <span class="comment">// calls of pushAndFinish since the finish event has been scheduled already.</span>
+      <span class="comment">// It might be that there are some degenerate cases where this can blow up the stack with a very long chain but I</span>
+      <span class="comment">// am not aware of such scenario yet. If you know one, put it in InterpreterStressSpec :)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork" title="(forkState: OneBoundedInterpreter.this.State, elem: Any)Unit">unsafeFork</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish" title="=&gt; OneBoundedInterpreter.this.State">PushFinish</a>, <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.pushAndFinish.elem" title="Any">elem</a><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = null
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.finish" title="()akka.stream.stage.FreeDirective">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="(cause: Throwable)akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.fail">fail</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.fail.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.fork" title="(forkState: OneBoundedInterpreter.this.State, elem: Any)Unit">fork</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Failing.readResolve" title="(cause: Throwable)OneBoundedInterpreter.this.Failing">Failing</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.fail.cause" title="Throwable">cause</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling" title="=&gt; OneBoundedInterpreter.this.State">Cancelling</a>
+      null
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.hold">hold</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding" title="=&gt; Boolean">holding</a><span class="delimiter">)</span> throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Cannot hold while already holding&quot;)" class="string">&quot;Cannot hold while already holding&quot;</span><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding_=" title="(x$1: Boolean)Unit">holding</a> = true
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.exit" title="()akka.stream.stage.FreeDirective">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="=&gt; Boolean" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.isHolding">isHolding</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding" title="=&gt; Boolean">holding</a>
+
+    override def <a title="(elem: Any)akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.pushAndPull">pushAndPull</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.pushAndPull.elem">elem</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding" title="=&gt; Boolean">holding</a><span class="delimiter">)</span> throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Cannot pushAndPull without holding first&quot;)" class="string">&quot;Cannot pushAndPull without holding first&quot;</span><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding_=" title="(x$1: Boolean)Unit">holding</a> = false
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.fork" title="(forkState: OneBoundedInterpreter.this.State, elem: Any)Unit">fork</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pushing" title="=&gt; OneBoundedInterpreter.this.State">Pushing</a>, <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.pushAndPull.elem" title="Any">elem</a><span class="delimiter">)</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pulling" title="=&gt; OneBoundedInterpreter.this.State">Pulling</a>
+      null
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.TerminationDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.absorbTermination">absorbTermination</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;TerminationDirective" title="akka.stream.stage.TerminationDirective">TerminationDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding_=" title="(x$1: Boolean)Unit">holding</a> = false
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.finish" title="()akka.stream.stage.FreeDirective">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;State.exit">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = null
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = -<span title="Int(-1)" class="int">1</span>
+      null
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private final val <a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pushing">Pushing</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a> = new <a title="&lt;$anon: OneBoundedInterpreter.this.State&gt; extends AnyRef with OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pushing;$anon">State</a> <span class="delimiter">{</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pushing;$anon.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pushing;$anon.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onPush" title="(elem: Any, ctx: akka.stream.stage.Context[Any])akka.stream.stage.Directive">onPush</a><span title="Unit" class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="=&gt; Any">elementInFlight</a>, ctx = this<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private final val <a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish">PushFinish</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a> = new <a title="&lt;$anon: OneBoundedInterpreter.this.State&gt; extends AnyRef with OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish;$anon">State</a> <span class="delimiter">{</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish;$anon.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish;$anon.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onPush" title="(elem: Any, ctx: akka.stream.stage.Context[Any])akka.stream.stage.Directive">onPush</a><span title="Unit" class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="=&gt; Any">elementInFlight</a>, ctx = this<span class="delimiter">)</span>
+
+    override def <a title="(elem: Any)akka.stream.stage.DownstreamDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish;$anon.pushAndFinish">pushAndFinish</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish;$anon.pushAndFinish.elem">elem</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;DownstreamDirective" title="akka.stream.stage.DownstreamDirective">DownstreamDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish;$anon.pushAndFinish.elem" title="Any">elem</a>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish" title="=&gt; OneBoundedInterpreter.this.State">PushFinish</a>
+      null
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish;$anon.finish">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Completing" title="=&gt; OneBoundedInterpreter.this.State">Completing</a>
+      null
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private final val <a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pulling">Pulling</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a> = new <a title="&lt;$anon: OneBoundedInterpreter.this.State&gt; extends AnyRef with OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pulling;$anon">State</a> <span class="delimiter">{</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pulling;$anon.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = null
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.jumpBacks" title="(i: Int)Int">jumpBacks</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pulling;$anon.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onPull" title="(ctx: akka.stream.stage.Context[Any])akka.stream.stage.Directive">onPull</a><span title="Unit" class="delimiter">(</span>ctx = this<span class="delimiter">)</span>
+
+    override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.Pulling;$anon.hold">hold</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.allowedToPush_=" title="(x$1: Boolean)Unit">allowedToPush</a> = true
+      super.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.hold" title="()akka.stream.stage.FreeDirective">hold</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private final val <a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Completing">Completing</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a> = new <a title="&lt;$anon: OneBoundedInterpreter.this.State&gt; extends AnyRef with OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Completing;$anon">State</a> <span class="delimiter">{</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Completing;$anon.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = null
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int, x: OneBoundedInterpreter.this.UntypedOp)Unit">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished" title="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.type">Finished</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="OneBoundedInterpreter.this.UntypedOp" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="OneBoundedInterpreter.this.UntypedOp">UntypedOp</a><span class="delimiter">]</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Completing;$anon.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.terminationPending" title="=&gt; Boolean">terminationPending</a><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onUpstreamFinish" title="(ctx: akka.stream.stage.Context[Any])akka.stream.stage.TerminationDirective">onUpstreamFinish</a><span title="Unit" class="delimiter">(</span>ctx = this<span class="delimiter">)</span>
+      else <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.exit" title="()akka.stream.stage.FreeDirective">exit</a><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.Completing;$anon.finish">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Completing" title="=&gt; OneBoundedInterpreter.this.State">Completing</a>
+      null
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.TerminationDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.Completing;$anon.absorbTermination">absorbTermination</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;TerminationDirective" title="akka.stream.stage.TerminationDirective">TerminationDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.terminationPending_=" title="(x$1: Boolean)Unit">terminationPending</a> = true
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding_=" title="(x$1: Boolean)Unit">holding</a> = false
+      <span class="comment">// FIXME: This state is potentially corrupted by the jumpBackTable (not updated when jumping over)</span>
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.allowedToPush" title="=&gt; Boolean">allowedToPush</a><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onPull" title="(ctx: akka.stream.stage.Context[Any])akka.stream.stage.Directive">onPull</a><span class="delimiter">(</span>ctx = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pulling" title="=&gt; OneBoundedInterpreter.this.State">Pulling</a><span class="delimiter">)</span>
+      else <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.exit" title="()akka.stream.stage.FreeDirective">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      null
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private final val <a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling">Cancelling</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a> = new <a title="&lt;$anon: OneBoundedInterpreter.this.State&gt; extends AnyRef with OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling;$anon">State</a> <span class="delimiter">{</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling;$anon.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = null
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int, x: OneBoundedInterpreter.this.UntypedOp)Unit">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished" title="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.type">Finished</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="OneBoundedInterpreter.this.UntypedOp" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="OneBoundedInterpreter.this.UntypedOp">UntypedOp</a><span class="delimiter">]</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> <span title="(x: Int)Int">-=</span> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+
+    def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling;$anon.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.terminationPending" title="=&gt; Boolean">terminationPending</a><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onDownstreamFinish" title="(ctx: akka.stream.stage.Context[Any])akka.stream.stage.TerminationDirective">onDownstreamFinish</a><span title="Unit" class="delimiter">(</span>ctx = this<span class="delimiter">)</span>
+      else <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.exit" title="()akka.stream.stage.FreeDirective">exit</a><span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling;$anon.finish">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling" title="=&gt; OneBoundedInterpreter.this.State">Cancelling</a>
+      null
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private final case class <a title="class Failing extends AnyRef with OneBoundedInterpreter.this.State with Product with Serializable" id="akka.stream.impl.fusing;OneBoundedInterpreter.Failing.readResolve">Failing</a><span title="Product" class="delimiter">(</span><a title="Throwable" id="akka.stream.impl.fusing;OneBoundedInterpreter;Failing.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span> extends <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a> <span class="delimiter">{</span>
+    override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter;Failing.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = null
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int, x: OneBoundedInterpreter.this.UntypedOp)Unit">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span> = <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished" title="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.type">Finished</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="OneBoundedInterpreter.this.UntypedOp" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage" title="OneBoundedInterpreter.this.UntypedOp">UntypedOp</a><span class="delimiter">]</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+
+    def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter;Failing.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onUpstreamFailure" title="(cause: Throwable, ctx: akka.stream.stage.Context[Any])akka.stream.stage.TerminationDirective">onUpstreamFailure</a><span title="Unit" class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter;Failing.cause" title="=&gt; Throwable">cause</a>, ctx = this<span class="delimiter">)</span>
+
+    override def <a title="()akka.stream.stage.TerminationDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter;Failing.absorbTermination">absorbTermination</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;TerminationDirective" title="akka.stream.stage.TerminationDirective">TerminationDirective</a> = <span class="delimiter">{</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.terminationPending_=" title="(x$1: Boolean)Unit">terminationPending</a> = true
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.holding_=" title="(x$1: Boolean)Unit">holding</a> = false
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.allowedToPush" title="=&gt; Boolean">allowedToPush</a><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.currentOp" title="=&gt; OneBoundedInterpreter.this.UntypedOp">currentOp</a>.<a href="../../stage/Stage.scala.html#akka.stream.stage;AbstractStage.onPull" title="(ctx: akka.stream.stage.Context[Any])akka.stream.stage.Directive">onPull</a><span class="delimiter">(</span>ctx = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pulling" title="=&gt; OneBoundedInterpreter.this.State">Pulling</a><span class="delimiter">)</span>
+      else <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.exit" title="()akka.stream.stage.FreeDirective">exit</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      null
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="=&gt; Boolean" id="akka.stream.impl.fusing;OneBoundedInterpreter.inside">inside</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a> <span title="(x: Int)Boolean">&gt;</span> -<span title="Int(-1)" class="int">1</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="=&gt; Array[OneBoundedInterpreter.this.UntypedOp]">pipeline</a>.<span title="=&gt; Int">length</span>
+
+  private def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.printDebug">printDebug</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    val padding = <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;    &quot;</span> <a title="String" id="akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.padding">*</a> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a>
+    val <a title="String" id="akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.icon">icon</a>: <span title="String">String</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="=&gt; OneBoundedInterpreter.this.State">state</a> match <span class="delimiter">{</span>
+      case <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pushing" title="=&gt; OneBoundedInterpreter.this.State">Pushing</a> | <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.PushFinish" title="=&gt; OneBoundedInterpreter.this.State">PushFinish</a> ⇒ <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.padding" title="String">padding</a> <span title="(x$1: Any)String">+</span> <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;---&gt; &quot;)">---&gt; $</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="=&gt; Any">elementInFlight</a><span title="String(&quot;&quot;)" class="string">&quot;</span>
+      case <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pulling" title="=&gt; OneBoundedInterpreter.this.State">Pulling</a> ⇒
+        <span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;    &quot;</span> <span title="(n: Int)String">*</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.jumpBacks" title="(i: Int)Int">jumpBacks</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span><span class="delimiter">)</span> <span title="(x$1: Any)String">+</span>
+          <span title="String(&quot;&lt;---&quot;)" class="string">&quot;&lt;---&quot;</span> <span title="(x$1: Any)String">+</span>
+          <span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;----&quot;</span> <span title="(n: Int)String">*</span> <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a> <span title="(x: Int)Int">-</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.jumpBacks" title="(i: Int)Int">jumpBacks</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a><span class="delimiter">)</span> <span title="(x: Int)Int">-</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      case <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Completing" title="=&gt; OneBoundedInterpreter.this.State">Completing</a> ⇒ <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.padding" title="String">padding</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;---|&quot;)" class="string">&quot;---|&quot;</span>
+      case <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Cancelling" title="=&gt; OneBoundedInterpreter.this.State">Cancelling</a> ⇒ <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.padding" title="String">padding</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;|---&quot;)" class="string">&quot;|---&quot;</span>
+      case Failing<span class="delimiter">(</span><a title="Throwable" id="akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.icon.e">e</a><span class="delimiter">)</span> ⇒ <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.padding" title="String">padding</a> <span title="(x$1: Any)String">+</span> <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;---X &quot;)">---X $</span><span class="delimiter">{</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.icon.e" title="Throwable">e</a>.<span title="()String">getMessage</span><span class="delimiter">}</span><span title="String(&quot;&quot;)" class="string">&quot;</span>
+    <span class="delimiter">}</span>
+    <span title="(x: Any)Unit">println</span><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.printDebug.icon" title="String">icon</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  @tailrec private def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.execute">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    while <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.inside" title="=&gt; Boolean">inside</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      try <span class="delimiter">{</span>
+        if <span class="delimiter">(</span><span title="Boolean(false)">Debug</span><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.printDebug" title="()Unit">printDebug</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="=&gt; OneBoundedInterpreter.this.State">state</a>.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.progress" title="()Unit">progress</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+        case <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute.<unapply-selector>" title="(t: Throwable)Option[Throwable]">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.impl.fusing;OneBoundedInterpreter.execute.e">e</a><span class="delimiter">)</span> if <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.lastOpFailing_=" title="=&gt; Int">lastOpFailing</a> <span title="(x: Int)Boolean">!=</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a> ⇒
+          <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.lastOpFailing_=" title="(x$1: Int)Unit">lastOpFailing</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a>
+          <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="=&gt; OneBoundedInterpreter.this.State">state</a>.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.fail" title="(cause: Throwable)akka.stream.stage.FreeDirective">fail</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute.e" title="Throwable">e</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">// Execute all delayed forks that were put on the heap if the fork limit has been reached</span>
+    if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.overflowStack_=" title="=&gt; List[(Int, OneBoundedInterpreter.this.State, Any)]">overflowStack</a>.<span title="=&gt; Boolean">nonEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a title="(Int, OneBoundedInterpreter.this.State, Any)" id="akka.stream.impl.fusing;OneBoundedInterpreter.execute.memo">memo</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.overflowStack_=" title="=&gt; List[(Int, OneBoundedInterpreter.this.State, Any)]">overflowStack</a>.<span title="=&gt; (Int, OneBoundedInterpreter.this.State, Any)">head</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute.memo" title="(Int, OneBoundedInterpreter.this.State, Any)">memo</a>.<span title="=&gt; Int">_1</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute.memo" title="(Int, OneBoundedInterpreter.this.State, Any)">memo</a>.<span title="=&gt; OneBoundedInterpreter.this.State">_2</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute.memo" title="(Int, OneBoundedInterpreter.this.State, Any)">memo</a>.<span title="=&gt; Any">_3</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.overflowStack_=" title="(x$1: List[(Int, OneBoundedInterpreter.this.State, Any)])Unit">overflowStack</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.overflowStack_=" title="=&gt; List[(Int, OneBoundedInterpreter.this.State, Any)]">overflowStack</a>.<span title="=&gt; List[(Int, OneBoundedInterpreter.this.State, Any)]">tail</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Forks off execution of the pipeline by saving current position, fully executing the effects of the given
+   * forkState then setting back the position to the saved value.
+   * By default forking is executed by using the callstack. If the depth of forking ever reaches the configured forkLimit
+   * this method either fails (useful for testing) or starts using the heap instead of the callstack to avoid a
+   * stack overflow.
+   */</span>
+  private def <a title="(forkState: OneBoundedInterpreter.this.State, elem: Any)Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.fork">fork</a><span class="delimiter">(</span><a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.fork.forkState">forkState</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a>, <a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter.fork$default$2">elem</a>: <span title="Any">Any</span> = null<span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.forkCount_=" title="(x$1: Int)Unit">forkCount</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+    if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.forkCount_=" title="=&gt; Int">forkCount</a> <span title="(x: Int)Boolean">==</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.forkLimit" title="=&gt; Int">forkLimit</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.overflowToHeap" title="=&gt; Boolean">overflowToHeap</a><span class="delimiter">)</span> throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Fork limit reached&quot;)" class="string">&quot;Fork limit reached&quot;</span><span class="delimiter">)</span>
+      else <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.overflowStack_=" title="(x$1: List[(Int, OneBoundedInterpreter.this.State, Any)])Unit">overflowStack</a> <span title="(x: (Int, OneBoundedInterpreter.this.State, Any))List[(Int, OneBoundedInterpreter.this.State, Any)]">::=</span> <span class="delimiter">(</span><span title="(_1: Int, _2: OneBoundedInterpreter.this.State, _3: Any)(Int, OneBoundedInterpreter.this.State, Any)" class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a>, <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.fork.forkState" title="OneBoundedInterpreter.this.State">forkState</a>, <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.fork$default$2" title="Any">elem</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span> else <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork" title="(forkState: OneBoundedInterpreter.this.State, elem: Any)Unit">unsafeFork</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.fork.forkState" title="OneBoundedInterpreter.this.State">forkState</a>, <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.fork$default$2" title="Any">elem</a><span class="delimiter">)</span>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.forkCount_=" title="(x$1: Int)Unit">forkCount</a> <span title="(x: Int)Int">-=</span> <span title="Int(1)" class="int">1</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Unsafe fork always uses the stack for execution. This call is needed by pushAndComplete where the forked execution
+   * is order dependent since the push and complete events travel in the same direction and not isolated by a boundary
+   */</span>
+  private def <a title="(forkState: OneBoundedInterpreter.this.State, elem: Any)Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork">unsafeFork</a><span class="delimiter">(</span><a title="OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork.forkState">forkState</a>: <a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State" title="OneBoundedInterpreter.this.State">State</a>, <a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork$default$2">elem</a>: <span title="Any">Any</span> = null<span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    val <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork.savePos">savePos</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="=&gt; Int">activeOpIndex</a>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.elementInFlight_=" title="(x$1: Any)Unit">elementInFlight</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork$default$2" title="Any">elem</a>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork.forkState" title="OneBoundedInterpreter.this.State">forkState</a>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.unsafeFork.savePos" title="Int">savePos</a>
+  <span class="delimiter">}</span>
+
+  def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.init">init</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries" title="()Unit">initBoundaries</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.runDetached" title="()Unit">runDetached</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  def <a title="=&gt; Boolean" id="akka.stream.impl.fusing;OneBoundedInterpreter.isFinished">isFinished</a>: <span title="Boolean">Boolean</span> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int)OneBoundedInterpreter.this.UntypedOp">pipeline</a><span class="delimiter">(</span><span title="Int(0)">Upstream</span><span class="delimiter">)</span> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished" title="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.type">Finished</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int)OneBoundedInterpreter.this.UntypedOp">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Downstream" title="=&gt; Int">Downstream</a><span class="delimiter">)</span> <span title="(x$1: Any)Boolean">==</span> <a href="#akka.stream.impl.fusing.OneBoundedInterpreter.Finished" title="akka.stream.impl.fusing.OneBoundedInterpreter.Finished.type">Finished</a>
+
+  <span class="comment">/**
+   * This method injects a Context to each of the BoundaryStages. This will be the context returned by enter().
+   */</span>
+  private def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries">initBoundaries</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    var <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries.op">op</a> = <span title="Int(0)" class="int">0</span>
+    while <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries.op" title="Int">op</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="=&gt; Array[OneBoundedInterpreter.this.UntypedOp]">pipeline</a>.<span title="=&gt; Int">length</span><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries.while$2" title="()Unit" class="delimiter">{</a>
+      <span class="comment">// FIXME try to change this to a pattern match `case boundary: BoundaryStage`</span>
+      <span class="comment">// but that doesn't work with current Context types</span>
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int)OneBoundedInterpreter.this.UntypedOp">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries.op" title="Int">op</a><span class="delimiter">)</span>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="#akka.stream.impl.fusing;BoundaryStage" title="akka.stream.impl.fusing.BoundaryStage">BoundaryStage</a><span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int)OneBoundedInterpreter.this.UntypedOp">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries.op" title="Int">op</a><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="akka.stream.impl.fusing.BoundaryStage" class="delimiter">[</span><a href="#akka.stream.impl.fusing;BoundaryStage" title="akka.stream.impl.fusing.BoundaryStage">BoundaryStage</a><span class="delimiter">]</span>.<a href="#akka.stream.impl.fusing;BoundaryStage.bctx_=" title="(x$1: akka.stream.stage.BoundaryContext)Unit">bctx</a> = new <a title="&lt;$anon: OneBoundedInterpreter.this.State&gt; extends AnyRef with OneBoundedInterpreter.this.State" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon">State</a> <span class="delimiter">{</span>
+          val <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.entryPoint">entryPoint</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries.op" title="Int">op</a>
+
+          override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+          override def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+
+          override def <a title="(elem: Any)akka.stream.stage.DownstreamDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.push">push</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.push.elem">elem</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;DownstreamDirective" title="akka.stream.stage.DownstreamDirective">DownstreamDirective</a> = <span class="delimiter">{</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.entryPoint" title="=&gt; Int">entryPoint</a>
+            super.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.push" title="(elem: Any)akka.stream.stage.DownstreamDirective">push</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.push.elem" title="Any">elem</a><span class="delimiter">)</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            null
+          <span class="delimiter">}</span>
+
+          override def <a title="()akka.stream.stage.UpstreamDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.pull">pull</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;UpstreamDirective" title="akka.stream.stage.UpstreamDirective">UpstreamDirective</a> = <span class="delimiter">{</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.entryPoint" title="=&gt; Int">entryPoint</a>
+            super.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.pull" title="()akka.stream.stage.UpstreamDirective">pull</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            null
+          <span class="delimiter">}</span>
+
+          override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.finish">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.entryPoint" title="=&gt; Int">entryPoint</a>
+            super.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.finish" title="()akka.stream.stage.FreeDirective">finish</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            null
+          <span class="delimiter">}</span>
+
+          override def <a title="(cause: Throwable)akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.fail">fail</a><span class="delimiter">(</span><a title="Throwable" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.fail.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.entryPoint" title="=&gt; Int">entryPoint</a>
+            super.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.fail" title="(cause: Throwable)akka.stream.stage.FreeDirective">fail</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.fail.cause" title="Throwable">cause</a><span class="delimiter">)</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            null
+          <span class="delimiter">}</span>
+
+          override def <a title="()akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.hold">hold</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.entryPoint" title="=&gt; Int">entryPoint</a>
+            super.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.hold" title="()akka.stream.stage.FreeDirective">hold</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            null
+          <span class="delimiter">}</span>
+
+          override def <a title="(elem: Any)akka.stream.stage.FreeDirective" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.pushAndPull">pushAndPull</a><span class="delimiter">(</span><a title="Any" id="akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.pushAndPull.elem">elem</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../stage/Stage.scala.html#akka.stream.stage;FreeDirective" title="akka.stream.stage.FreeDirective">FreeDirective</a> = <span class="delimiter">{</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.entryPoint" title="=&gt; Int">entryPoint</a>
+            super.<a href="#akka.stream.impl.fusing;OneBoundedInterpreter;State.pushAndPull" title="(elem: Any)akka.stream.stage.FreeDirective">pushAndPull</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries;$anon.pushAndPull.elem" title="Any">elem</a><span class="delimiter">)</span>
+            <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            null
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.initBoundaries.op" title="Int">op</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Starts execution of detached regions.
+   *
+   * Since detached ops partition the pipeline into different 1-bounded domains is is necessary to inject a starting
+   * signal into these regions (since there is no external signal that would kick off their execution otherwise).
+   */</span>
+  private def <a title="()Unit" id="akka.stream.impl.fusing;OneBoundedInterpreter.runDetached">runDetached</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    var op = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="=&gt; Array[OneBoundedInterpreter.this.UntypedOp]">pipeline</a>.<span title="=&gt; Int">length</span> <a title="Int" id="akka.stream.impl.fusing;OneBoundedInterpreter.runDetached.op">-</a> <span title="Int(1)" class="int">1</span>
+    while <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.runDetached.op" title="Int">op</a> <span title="(x: Int)Boolean">&gt;=</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.runDetached.while$3" title="()Unit" class="delimiter">{</a>
+      if <span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.pipeline" title="(i: Int)OneBoundedInterpreter.this.UntypedOp">pipeline</a><span class="delimiter">(</span><a href="#akka.stream.impl.fusing;OneBoundedInterpreter.runDetached.op" title="Int">op</a><span class="delimiter">)</span>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span><a href="../../stage/Stage.scala.html#akka.stream.stage;DetachedStage" title="akka.stream.stage.DetachedStage[_, _]">DetachedStage</a><span class="delimiter">[</span>_, _<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.activeOpIndex_=" title="(x$1: Int)Unit">activeOpIndex</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.runDetached.op" title="Int">op</a>
+        <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.state_=" title="(x$1: OneBoundedInterpreter.this.State)Unit">state</a> = <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.Pulling" title="=&gt; OneBoundedInterpreter.this.State">Pulling</a>
+        <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.execute" title="()Unit">execute</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <a href="#akka.stream.impl.fusing;OneBoundedInterpreter.runDetached.op" title="Int">op</a> <span title="(x: Int)Int">-=</span> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
