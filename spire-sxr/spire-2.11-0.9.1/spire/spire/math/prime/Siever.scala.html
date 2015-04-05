@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>spire/spire/math/prime/Siever.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+package spire.math.prime
+
+import spire.math.<span class="delimiter">{</span>SafeLong, log, max<span class="delimiter">}</span>
+
+import <a href="SieveUtil.scala.html#spire.math.prime.SieveUtil" title="spire.math.prime.SieveUtil.type">SieveUtil</a>._
+
+<span class="comment">/**
+ * Segmented Stream of Eratosthenes implementation
+ * 
+ * This section really needs some good comments.
+ * 
+ * Some future optimizations:
+ * 
+ * 0. Consider an option to use multiple threads
+ * 1. Faster heap/priority queue
+ * 2. Tune chunkSize
+ * 3. Use Long internally until we have to switch to SafeLong.
+ * 4. Compress the amount of space our heaps take up.
+ * 5. Read more efficient segmented sieves to get other ideas.
+ * 6. Try using a delta-encoded prime log
+ * 
+ * Obviously we are trying to be a bit more flexible than a
+ * traditional prime finder that knows ahead of time what range it
+ * will be operating over, which will hurt performance a bit. Also,
+ * it's not written in C/assembly. So it will probably never be truly
+ * competitive, but I'd like us to do as well as possible.
+ */</span>
+
+<span class="comment">/**
+ * The Siever manages the segmented sieve process.
+ *
+ * At any given time, it holds onto a single sieve segment. Thus, the
+ * siever should be used for a single lookup or traversal.
+ *
+ * Sievers are built using 'chunkSize' and 'cutoff' parameters. These
+ * are passed along to any sieve segments they create. When possible,
+ * it's probably better to use methods on the companion object, which
+ * will instantiate a Siever for you with reasonable parameters.
+ */</span>
+case class <a title="class Siever extends AnyRef with Product with Serializable" id="spire.math.prime.Siever.readResolve">Siever</a><a href="#spire.math.prime.Siever.readResolve" title="Product" class="delimiter">(</a><a title="Int" id="spire.math.prime;Siever.chunkSize">chunkSize</a>: <span title="Int">Int</span>, <a title="spire.math.SafeLong" id="spire.math.prime;Siever.cutoff">cutoff</a>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+  <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#spire.math.prime;Siever.chunkSize" title="=&gt; Int">chunkSize</a> <span title="(x: Int)Int">%</span> <span title="Int(480)" class="int">480</span> <span title="(x: Int)Boolean">!=</span> <span title="Int(0)" class="int">0</span>, <span title="String(&quot;chunkSize must be a multiple of 480&quot;)" class="string">&quot;chunkSize must be a multiple of 480&quot;</span><span class="delimiter">)</span>
+
+  val <a title="spire.math.prime.BitSet" id="spire.math.prime;Siever.arr">arr</a> = <a href="BitSet.scala.html#spire.math.prime.BitSet" title="spire.math.prime.BitSet.type">BitSet</a>.<a href="BitSet.scala.html#spire.math.prime.BitSet.alloc" title="(length: Int)spire.math.prime.BitSet">alloc</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.chunkSize" title="=&gt; Int">chunkSize</a><span class="delimiter">)</span>
+  var <a title="spire.math.SafeLong" id="spire.math.prime;Siever.start_=">start</a>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a> = <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong">SafeLong</a><span class="delimiter">(</span><span title="Long(0L)" class="int">0</span><span class="delimiter">)</span>
+  var limit: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a> = <a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.+(8cf326fedb)" title="spire.math.SafeLong" id="spire.math.prime;Siever.limit_=">+</a> <a href="#spire.math.prime;Siever.chunkSize" title="=&gt; Long">chunkSize</a>
+  val <a title="spire.math.prime.SieveUtil.FastFactors" id="spire.math.prime;Siever.fastq">fastq</a>: <a href="SieveUtil.scala.html#spire.math.prime.SieveUtil;FastFactors" title="spire.math.prime.SieveUtil.FastFactors">FastFactors</a> = <a href="SieveUtil.scala.html#spire.math.prime.SieveUtil.FastFactors" title="spire.math.prime.SieveUtil.FastFactors.type">FastFactors</a>.<a href="SieveUtil.scala.html#spire.math.prime.SieveUtil.FastFactors.empty" title="=&gt; spire.math.prime.SieveUtil.FastFactors">empty</a>
+  val <a title="spire.math.prime.FactorHeap" id="spire.math.prime;Siever.slowq">slowq</a>: <a href="FactorHeap.scala.html#spire.math.prime;FactorHeap" title="spire.math.prime.FactorHeap">FactorHeap</a> = new <a href="FactorHeap.scala.html#spire.math.prime;FactorHeap" title="spire.math.prime.FactorHeap">FactorHeap</a>
+  var <a title="spire.math.prime.SieveSegment" id="spire.math.prime;Siever.sieve_=">sieve</a>: <a href="SieveSegment.scala.html#spire.math.prime;SieveSegment" title="spire.math.prime.SieveSegment">SieveSegment</a> = <a href="SieveSegment.scala.html#spire.math.prime;SieveSegment" title="(start: spire.math.SafeLong, primes: spire.math.prime.BitSet, cutoff: spire.math.SafeLong)spire.math.prime.SieveSegment">SieveSegment</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a>, <a href="#spire.math.prime;Siever.arr" title="=&gt; spire.math.prime.BitSet">arr</a>, <a href="#spire.math.prime;Siever.cutoff" title="=&gt; spire.math.SafeLong">cutoff</a><span class="delimiter">)</span>
+  <a href="#spire.math.prime;Siever.sieve_=" title="=&gt; spire.math.prime.SieveSegment">sieve</a>.<a href="SieveSegment.scala.html#spire.math.prime;SieveSegment.init" title="(fastq: spire.math.prime.SieveUtil.FastFactors, slowq: spire.math.prime.FactorHeap)Unit">init</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.fastq" title="=&gt; spire.math.prime.SieveUtil.FastFactors">fastq</a>, <a href="#spire.math.prime;Siever.slowq" title="=&gt; spire.math.prime.FactorHeap">slowq</a><span class="delimiter">)</span>
+
+  def <a title="(n: spire.math.SafeLong)spire.math.SafeLong" id="spire.math.prime;Siever.largestBelow">largestBelow</a><span class="delimiter">(</span><a title="spire.math.SafeLong" id="spire.math.prime;Siever.largestBelow.n">n</a>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a><span class="delimiter">)</span>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#spire.math.prime;Siever.largestBelow.n" title="spire.math.SafeLong">n</a> <span title="(that: spire.math.SafeLong)Boolean">&lt;</span> <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong" class="int">3</a><span class="delimiter">)</span> throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;invalid argument: %s&quot;</span> <span title="(args: Any*)String">format</span> <a href="#spire.math.prime;Siever.largestBelow.n" title="spire.math.SafeLong">n</a><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#spire.math.prime;Siever.largestBelow.n" title="spire.math.SafeLong">n</a> <span title="(x$1: Any)Boolean">==</span> <span title="Int(3)" class="int">3</span><span class="delimiter">)</span> return <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong">SafeLong</a><span class="delimiter">(</span><span title="Long(2L)" class="int">2</span><span class="delimiter">)</span>
+
+    var <span title="Int">i</span> = <span title="Int(3)" class="int">3</span>
+    var k = <a href="#spire.math.prime;Siever.largestBelow.n" title="spire.math.SafeLong">n</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.-(8cf326fedb)" title="spire.math.SafeLong" id="spire.math.prime;Siever.largestBelow.k">-</a> <span title="Long(1L)" class="int">1</span>
+    var <a title="spire.math.SafeLong" id="spire.math.prime;Siever.largestBelow.last">last</a> = <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong">SafeLong</a><span class="delimiter">(</span><span title="Long(2L)" class="int">2</span><span class="delimiter">)</span>
+    while <span class="delimiter">(</span>true<span class="delimiter">)</span> <a href="#spire.math.prime;Siever.largestBelow.while$3" title="()Unit" class="delimiter">{</a>
+      val <a title="spire.math.prime.BitSet" id="spire.math.prime;Siever.largestBelow.primes">primes</a> = <a href="#spire.math.prime;Siever.sieve_=" title="=&gt; spire.math.prime.SieveSegment">sieve</a>.<a href="SieveSegment.scala.html#spire.math.prime;SieveSegment.primes" title="=&gt; spire.math.prime.BitSet">primes</a>
+      val <a title="Int" id="spire.math.prime;Siever.largestBelow.len">len</a> = <a href="#spire.math.prime;Siever.largestBelow.primes" title="spire.math.prime.BitSet">primes</a>.<a href="BitSet.scala.html#spire.math.prime;BitSet.length" title="=&gt; Int">length</a>
+      if <span class="delimiter">(</span><a href="#spire.math.prime;Siever.largestBelow.n" title="spire.math.SafeLong">n</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.-(a361d50555)" title="(rhs: spire.math.SafeLong)spire.math.SafeLong">-</a> <a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a> <span title="(that: spire.math.SafeLong)Boolean">&lt;</span> <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong">len</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        var <span title="Int">i</span> = <span title="Int(1)" class="int">1</span>
+        val <a title="Int" id="spire.math.prime;Siever.largestBelow.goal">goal</a> = <span class="delimiter">(</span><a href="#spire.math.prime;Siever.largestBelow.n" title="spire.math.SafeLong">n</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.-(a361d50555)" title="(rhs: spire.math.SafeLong)spire.math.SafeLong">-</a> <a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a><span class="delimiter">)</span>.<a href="../SafeLong.scala.html#spire.math;SafeLong.toInt" title="=&gt; Int">toInt</a>
+        while <span class="delimiter">(</span><span title="Int">i</span> <span title="(x: Int)Boolean">&lt;</span> <a href="#spire.math.prime;Siever.largestBelow.goal" title="Int">goal</a><span class="delimiter">)</span> <a href="#spire.math.prime;Siever.largestBelow.while$1" title="()Unit" class="delimiter">{</a>
+          if <span class="delimiter">(</span><a href="BitSet.scala.html#spire.math.prime;BitSet.apply" title="(n: Int)Boolean">primes</a><span class="delimiter">(</span><span title="Int">i</span><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#spire.math.prime;Siever.largestBelow.last" title="spire.math.SafeLong">last</a> = <a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.+(8cf326fedb)" title="(rhs: Long)spire.math.SafeLong">+</a> <span title="=&gt; Long">i</span>
+          <span title="Int">i</span> <span title="(x: Int)Int">+=</span> <span title="Int(2)" class="int">2</span>
+        <span class="delimiter">}</span>
+        return <a href="#spire.math.prime;Siever.largestBelow.last" title="spire.math.SafeLong">last</a>
+      <span class="delimiter">}</span> else <span class="delimiter">{</span>
+        var i = <a href="#spire.math.prime;Siever.largestBelow.len" title="Int">len</a> <span title="Int">-</span> <span title="Int(1)" class="int">1</span>
+        while <span class="delimiter">(</span><span title="Int(1)" class="int">1</span> <span title="(x: Int)Boolean">&lt;=</span> <span title="Int">i</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <span title="=&gt; Boolean">!</span><a href="BitSet.scala.html#spire.math.prime;BitSet.apply" title="(n: Int)Boolean">primes</a><span class="delimiter">(</span><span title="Int">i</span><span class="delimiter">)</span><span class="delimiter">)</span> <span title="Int">i</span> <a href="#spire.math.prime;Siever.largestBelow.while$2" title="(x: Int)Int">-=</a> <span title="Int(2)" class="int">2</span>
+        if <span class="delimiter">(</span><span title="Int(1)" class="int">1</span> <span title="(x: Int)Boolean">&lt;=</span> <span title="Int">i</span><span class="delimiter">)</span> <a href="#spire.math.prime;Siever.largestBelow.last" title="spire.math.SafeLong">last</a> = <a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.+(8cf326fedb)" title="(rhs: Long)spire.math.SafeLong">+</a> <span title="=&gt; Long">i</span>
+      <span class="delimiter">}</span>
+      <a href="#spire.math.prime;Siever.initNextSieve" title="()Unit">initNextSieve</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span title="Int">i</span> = <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+    return <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong">SafeLong</a><span class="delimiter">(</span><span title="Long(0L)" class="int">0</span><span class="delimiter">)</span> <span class="comment">// impossible</span>
+  <span class="delimiter">}</span>
+
+  def <a title="(n: Long)spire.math.SafeLong" id="spire.math.prime;Siever.nth">nth</a><span class="delimiter">(</span><a title="Long" id="spire.math.prime;Siever.nth.n">n</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#spire.math.prime;Siever.nth.n" title="Long">n</a> <span title="(x: Int)Boolean">==</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span> return <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong">SafeLong</a><span class="delimiter">(</span><span title="Long(2L)" class="int">2</span><span class="delimiter">)</span>
+    var <a title="Int" id="spire.math.prime;Siever.nth.i">i</a> = <span title="Int(3)" class="int">3</span>
+    var k = <a href="#spire.math.prime;Siever.nth.n" title="Long">n</a> <a title="Long" id="spire.math.prime;Siever.nth.k">-</a> <span title="Int(1)" class="int">1</span>
+    while <span class="delimiter">(</span>true<span class="delimiter">)</span> <a href="#spire.math.prime;Siever.nth.while$5" title="()Unit" class="delimiter">{</a>
+      val <a title="spire.math.prime.BitSet" id="spire.math.prime;Siever.nth.primes">primes</a> = <a href="#spire.math.prime;Siever.sieve_=" title="=&gt; spire.math.prime.SieveSegment">sieve</a>.<a href="SieveSegment.scala.html#spire.math.prime;SieveSegment.primes" title="=&gt; spire.math.prime.BitSet">primes</a>
+      val <a title="Int" id="spire.math.prime;Siever.nth.len">len</a> = <a href="#spire.math.prime;Siever.nth.primes" title="spire.math.prime.BitSet">primes</a>.<a href="BitSet.scala.html#spire.math.prime;BitSet.length" title="=&gt; Int">length</a>
+      while <span class="delimiter">(</span><a href="#spire.math.prime;Siever.nth.i" title="Int">i</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#spire.math.prime;Siever.nth.len" title="Int">len</a><span class="delimiter">)</span> <a href="#spire.math.prime;Siever.nth.while$4" title="()Unit" class="delimiter">{</a>
+        if <span class="delimiter">(</span><a href="BitSet.scala.html#spire.math.prime;BitSet.apply" title="(n: Int)Boolean">primes</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.nth.i" title="Int">i</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#spire.math.prime;Siever.nth.k" title="Long">k</a> <span title="(x: Int)Long">-=</span> <span title="Int(1)" class="int">1</span>
+          if <span class="delimiter">(</span><a href="#spire.math.prime;Siever.nth.k" title="Long">k</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span> return <a href="#spire.math.prime;Siever.sieve_=" title="=&gt; spire.math.prime.SieveSegment">sieve</a>.<a href="SieveSegment.scala.html#spire.math.prime;SieveSegment.start" title="=&gt; spire.math.SafeLong">start</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.+(8cf326fedb)" title="(rhs: Long)spire.math.SafeLong">+</a> <a href="#spire.math.prime;Siever.nth.i" title="=&gt; Long">i</a>
+        <span class="delimiter">}</span>
+        <a href="#spire.math.prime;Siever.nth.i" title="Int">i</a> <span title="(x: Int)Int">+=</span> <span title="Int(2)" class="int">2</span>
+      <span class="delimiter">}</span>
+      <a href="#spire.math.prime;Siever.initNextSieve" title="()Unit">initNextSieve</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#spire.math.prime;Siever.nth.i" title="Int">i</a> = <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+    return <a href="../SafeLong.scala.html#spire.math.SafeLong.apply(88efbd6bde)" title="implicit spire.math.SafeLong.apply : (x: Long)spire.math.SafeLong">SafeLong</a><span class="delimiter">(</span><span title="Long(0L)" class="int">0</span><span class="delimiter">)</span> <span class="comment">// impossible</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="()Unit" id="spire.math.prime;Siever.initNextSieve">initNextSieve</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#spire.math.prime;Siever.start_=" title="(x$1: spire.math.SafeLong)Unit">start</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.+(8cf326fedb)" title="(rhs: Long)spire.math.SafeLong">+=</a> <a href="#spire.math.prime;Siever.chunkSize" title="=&gt; Long">chunkSize</a>
+    <a href="#spire.math.prime;Siever.limit_=" title="(x$1: spire.math.SafeLong)Unit">limit</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.+(8cf326fedb)" title="(rhs: Long)spire.math.SafeLong">+=</a> <a href="#spire.math.prime;Siever.chunkSize" title="=&gt; Long">chunkSize</a>
+    val csq = <a href="#spire.math.prime;Siever.cutoff" title="=&gt; spire.math.SafeLong">cutoff</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.**" title="spire.math.SafeLong" id="spire.math.prime;Siever.initNextSieve.csq">**</a> <span title="Int(2)" class="int">2</span>
+    if <span class="delimiter">(</span><a href="#spire.math.prime;Siever.limit_=" title="=&gt; spire.math.SafeLong">limit</a> <span title="(that: spire.math.SafeLong)Boolean">&gt;=</span> <a href="#spire.math.prime;Siever.initNextSieve.csq" title="spire.math.SafeLong">csq</a><span class="delimiter">)</span> sys.<span title="(message: String)Nothing">error</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;too big: %s &gt; %s (%s)&quot;</span> <span title="(args: Any*)String">format</span> <span class="delimiter">(</span><a href="#spire.math.prime;Siever.limit_=" title="=&gt; spire.math.SafeLong">limit</a>, <a href="#spire.math.prime;Siever.initNextSieve.csq" title="spire.math.SafeLong">csq</a>, <a href="#spire.math.prime;Siever.cutoff" title="=&gt; spire.math.SafeLong">cutoff</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#spire.math.prime;Siever.arr" title="=&gt; spire.math.prime.BitSet">arr</a>.<a href="BitSet.scala.html#spire.math.prime;BitSet.clear" title="()Unit">clear</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#spire.math.prime;Siever.sieve_=" title="(x$1: spire.math.prime.SieveSegment)Unit">sieve</a> = <a href="SieveSegment.scala.html#spire.math.prime;SieveSegment" title="(start: spire.math.SafeLong, primes: spire.math.prime.BitSet, cutoff: spire.math.SafeLong)spire.math.prime.SieveSegment">SieveSegment</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a>, <a href="#spire.math.prime;Siever.arr" title="=&gt; spire.math.prime.BitSet">arr</a>, <a href="#spire.math.prime;Siever.cutoff" title="=&gt; spire.math.SafeLong">cutoff</a><span class="delimiter">)</span>
+    <a href="#spire.math.prime;Siever.sieve_=" title="=&gt; spire.math.prime.SieveSegment">sieve</a>.<a href="SieveSegment.scala.html#spire.math.prime;SieveSegment.init" title="(fastq: spire.math.prime.SieveUtil.FastFactors, slowq: spire.math.prime.FactorHeap)Unit">init</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.fastq" title="=&gt; spire.math.prime.SieveUtil.FastFactors">fastq</a>, <a href="#spire.math.prime;Siever.slowq" title="=&gt; spire.math.prime.FactorHeap">slowq</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  def <a title="(n: spire.math.SafeLong)spire.math.SafeLong" id="spire.math.prime;Siever.nextAfter">nextAfter</a><span class="delimiter">(</span><a title="spire.math.SafeLong" id="spire.math.prime;Siever.nextAfter.n">n</a>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a><span class="delimiter">)</span>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a> = <span class="delimiter">{</span>
+    var <a title="spire.math.SafeLong" id="spire.math.prime;Siever.nextAfter.nn">nn</a> = <a href="#spire.math.prime;Siever.sieve_=" title="=&gt; spire.math.prime.SieveSegment">sieve</a>.<a href="SieveSegment.scala.html#spire.math.prime;SieveSegment.nextAfter" title="(n: spire.math.SafeLong)spire.math.SafeLong">nextAfter</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.nextAfter.n" title="spire.math.SafeLong">n</a><span class="delimiter">)</span>
+    while <span class="delimiter">(</span><a href="#spire.math.prime;Siever.nextAfter.nn" title="spire.math.SafeLong">nn</a> <span title="(x$1: Any)Boolean">==</span> -<span title="Long(-1L)" class="long">1L</span><span class="delimiter">)</span> <a href="#spire.math.prime;Siever.nextAfter.while$6" title="()Unit" class="delimiter">{</a>
+      <a href="#spire.math.prime;Siever.initNextSieve" title="()Unit">initNextSieve</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#spire.math.prime;Siever.nextAfter.nn" title="spire.math.SafeLong">nn</a> = <a href="#spire.math.prime;Siever.sieve_=" title="=&gt; spire.math.prime.SieveSegment">sieve</a>.<a href="SieveSegment.scala.html#spire.math.prime;SieveSegment.nextAfter" title="(n: spire.math.SafeLong)spire.math.SafeLong">nextAfter</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.start_=" title="=&gt; spire.math.SafeLong">start</a> <a href="../SafeLong.scala.html#spire.math;SafeLong.-(8cf326fedb)" title="(rhs: Long)spire.math.SafeLong">-</a> <span title="Long(1L)" class="int">1</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <a href="#spire.math.prime;Siever.nextAfter.nn" title="spire.math.SafeLong">nn</a>
+  <span class="delimiter">}</span>
+
+  def <a title="(p0: spire.math.SafeLong)Stream[spire.math.SafeLong]" id="spire.math.prime;Siever.streamAfter">streamAfter</a><span class="delimiter">(</span><a title="spire.math.SafeLong" id="spire.math.prime;Siever.streamAfter.p0">p0</a>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a><span class="delimiter">)</span>: <span title="Stream[spire.math.SafeLong]">Stream</span><span class="delimiter">[</span>SafeLong<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    val <a title="spire.math.SafeLong" id="spire.math.prime;Siever.streamAfter.p">p</a> = <a href="#spire.math.prime;Siever.nextAfter" title="(n: spire.math.SafeLong)spire.math.SafeLong">nextAfter</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.streamAfter.p0" title="spire.math.SafeLong">p0</a><span class="delimiter">)</span>
+    <a href="#spire.math.prime;Siever.streamAfter.p" title="spire.math.SafeLong">p</a> <a href="#spire.math.prime;Siever.streamAfter.x$1" title="(hd: spire.math.SafeLong)scala.collection.immutable.Stream[spire.math.SafeLong]">#::</a> <a href="#spire.math.prime;Siever.streamAfter" title="(p0: spire.math.SafeLong)Stream[spire.math.SafeLong]">streamAfter</a><span title="(stream: =&gt; scala.collection.immutable.Stream[spire.math.SafeLong])scala.collection.immutable.Stream.ConsWrapper[spire.math.SafeLong]" class="delimiter">(</span><a href="#spire.math.prime;Siever.streamAfter.p" title="spire.math.SafeLong">p</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  def <a title="(p: spire.math.SafeLong, size: Int)Array[spire.math.SafeLong]" id="spire.math.prime;Siever.arrayAt">arrayAt</a><span class="delimiter">(</span><a title="spire.math.SafeLong" id="spire.math.prime;Siever.arrayAt.p">p</a>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a>, <a title="Int" id="spire.math.prime;Siever.arrayAt.size">size</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="Array[spire.math.SafeLong]">Array</span><span class="delimiter">[</span>SafeLong<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    val <a title="Array[spire.math.SafeLong]" id="spire.math.prime;Siever.arrayAt.arr">arr</a> = new <span title="Array[spire.math.SafeLong]">Array</span><span class="delimiter">[</span>SafeLong<span class="delimiter">]</span><span class="delimiter">(</span><a href="#spire.math.prime;Siever.arrayAt.size" title="Int">size</a><span class="delimiter">)</span>
+    def <a title="(i: Int, p: spire.math.SafeLong)Unit" id="spire.math.prime;Siever.arrayAt.loop">loop</a><span class="delimiter">(</span><a title="Int" id="spire.math.prime;Siever.arrayAt.loop.i">i</a>: <span title="Int">Int</span>, <a title="spire.math.SafeLong" id="spire.math.prime;Siever.arrayAt.loop.p">p</a>: <a href="../SafeLong.scala.html#spire.math;SafeLong" title="spire.math.SafeLong">SafeLong</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+      if <span class="delimiter">(</span><a href="#spire.math.prime;Siever.arrayAt.loop.i" title="Int">i</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#spire.math.prime;Siever.arrayAt.arr" title="Array[spire.math.SafeLong]">arr</a>.<span title="=&gt; Int">length</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#spire.math.prime;Siever.arrayAt.arr" title="(i: Int, x: spire.math.SafeLong)Unit">arr</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.arrayAt.loop.i" title="Int">i</a><span class="delimiter">)</span> = <a href="#spire.math.prime;Siever.arrayAt.loop.p" title="spire.math.SafeLong">p</a>
+        <a href="#spire.math.prime;Siever.arrayAt.loop" title="(i: Int, p: spire.math.SafeLong)Unit">loop</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.arrayAt.loop.i" title="Int">i</a> <span title="(x: Int)Int">+</span> <span title="Int(1)" class="int">1</span>, <a href="#spire.math.prime;Siever.nextAfter" title="(n: spire.math.SafeLong)spire.math.SafeLong">nextAfter</a><span class="delimiter">(</span><a href="#spire.math.prime;Siever.arrayAt.loop.p" title="spire.math.SafeLong">p</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <a href="#spire.math.prime;Siever.arrayAt.loop" title="(i: Int, p: spire.math.SafeLong)Unit">loop</a><span class="delimiter">(</span><span title="Int(0)" class="int">0</span>, <a href="#spire.math.prime;Siever.arrayAt.p" title="spire.math.SafeLong">p</a><span class="delimiter">)</span>
+    <a href="#spire.math.prime;Siever.arrayAt.arr" title="Array[spire.math.SafeLong]">arr</a>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>
