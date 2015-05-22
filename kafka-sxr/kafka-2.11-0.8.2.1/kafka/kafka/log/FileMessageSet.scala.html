@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/log/FileMessageSet.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ * 
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+
+package kafka.log
+
+import java.io._
+import java.nio._
+import java.nio.channels._
+import java.util.concurrent.atomic._
+
+import kafka.utils._
+import kafka.message._
+import kafka.common.KafkaException
+import java.util.concurrent.TimeUnit
+import kafka.metrics.<span class="delimiter">{</span>KafkaTimer, KafkaMetricsGroup<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * An on-disk message set. An optional start and end position can be applied to the message set
+ * which will allow slicing a subset of the file.
+ * @param file The file name for the underlying log data
+ * @param channel the underlying file channel used
+ * @param start A lower bound on the absolute position in the file from which the message set begins
+ * @param end The upper bound on the absolute position in the file at which the message set ends
+ * @param isSlice Should the start and end parameters be used for slicing?
+ */</span>
+@nonthreadsafe
+class <a title="class FileMessageSet extends kafka.message.MessageSet with kafka.utils.Logging" id="kafka.log;FileMessageSet">FileMessageSet</a> private<span class="delimiter">[</span>kafka<span class="delimiter">]</span><span class="delimiter">(</span>@volatile var <a title="java.io.File" id="kafka.log;FileMessageSet.file">file</a>: <span title="java.io.File">File</span>,
+                                    private<span class="delimiter">[</span>log<span class="delimiter">]</span> val <a title="java.nio.channels.FileChannel" id="kafka.log;FileMessageSet.channel">channel</a>: <span title="java.nio.channels.FileChannel">FileChannel</span>,
+                                    private<span class="delimiter">[</span>log<span class="delimiter">]</span> val <a title="Int" id="kafka.log;FileMessageSet.start">start</a>: <span title="Int">Int</span>,
+                                    private<span class="delimiter">[</span>log<span class="delimiter">]</span> val <a title="Int" id="kafka.log;FileMessageSet.end">end</a>: <span title="Int">Int</span>,
+                                    <a title="Boolean" id="kafka.log;FileMessageSet.isSlice">isSlice</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> extends <a href="../message/MessageSet.scala.html#kafka.message;MessageSet" title="kafka.message.MessageSet">MessageSet</a> with <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+  
+  <span class="comment">/* the size of the message set in bytes */</span>
+  private val <a title="java.util.concurrent.atomic.AtomicInteger" id="kafka.log;FileMessageSet._size">_size</a> = 
+    if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.isSlice" title="Boolean">isSlice</a><span class="delimiter">)</span>
+      new <span title="java.util.concurrent.atomic.AtomicInteger">AtomicInteger</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.end" title="=&gt; Int">end</a> <span title="(x: Int)Int">-</span> <a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a><span class="delimiter">)</span> <span class="comment">// don't check the file size if this is just a slice view</span>
+    else
+      new <span title="java.util.concurrent.atomic.AtomicInteger">AtomicInteger</span><span class="delimiter">(</span>math.<span title="(x: Int, y: Int)Int">min</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="()Long">size</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="=&gt; Int">toInt</span>, <a href="#kafka.log;FileMessageSet.end" title="=&gt; Int">end</a><span class="delimiter">)</span> <span title="(x: Int)Int">-</span> <a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a><span class="delimiter">)</span>
+
+  <span class="comment">/* if this is not a slice, update the file pointer to the end of the file */</span>
+  if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#kafka.log;FileMessageSet.isSlice" title="Boolean">isSlice</a><span class="delimiter">)</span>
+    <span class="comment">/* set the file position to the last byte in the file */</span>
+    <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: Long)java.nio.channels.FileChannel">position</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="()Long">size</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Create a file message set with no slicing.
+   */</span>
+  def this<span class="delimiter">(</span><a title="java.io.File" id="kafka.log;FileMessageSet.<init>(cce9ef9f06).file">file</a>: <span title="java.io.File">File</span>, <a title="java.nio.channels.FileChannel" id="kafka.log;FileMessageSet.<init>(cce9ef9f06).channel">channel</a>: <span title="java.nio.channels.FileChannel">FileChannel</span><span class="delimiter">)</span> = 
+    this<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.<init>(cce9ef9f06).file" title="java.io.File">file</a>, <a href="#kafka.log;FileMessageSet.<init>(cce9ef9f06).channel" title="java.nio.channels.FileChannel">channel</a>, start = <span title="Int(0)" class="int">0</span>, end = Int.<span title="Int(2147483647)">MaxValue</span>, isSlice = false<span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Create a file message set with no slicing
+   */</span>
+  def this<span class="delimiter">(</span><a title="java.io.File" id="kafka.log;FileMessageSet.<init>(80483a1236).file">file</a>: <span title="java.io.File">File</span><span class="delimiter">)</span> = 
+    this<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.<init>(80483a1236).file" title="java.io.File">file</a>, <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Utils.scala.html#kafka.utils.Utils.openChannel" title="(file: java.io.File, mutable: Boolean)java.nio.channels.FileChannel">openChannel</a><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.<init>(80483a1236).file" title="java.io.File">file</a>, mutable = true<span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Create a file message set with mutable option
+   */</span>
+  def this<span class="delimiter">(</span><a title="java.io.File" id="kafka.log;FileMessageSet.<init>(3dce841e6b).file">file</a>: <span title="java.io.File">File</span>, <a title="Boolean" id="kafka.log;FileMessageSet.<init>(3dce841e6b).mutable">mutable</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> = this<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.<init>(3dce841e6b).file" title="java.io.File">file</a>, <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Utils.scala.html#kafka.utils.Utils.openChannel" title="(file: java.io.File, mutable: Boolean)java.nio.channels.FileChannel">openChannel</a><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.<init>(3dce841e6b).file" title="java.io.File">file</a>, <a href="#kafka.log;FileMessageSet.<init>(3dce841e6b).mutable" title="Boolean">mutable</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Create a slice view of the file message set that begins and ends at the given byte offsets
+   */</span>
+  def this<span class="delimiter">(</span><a title="java.io.File" id="kafka.log;FileMessageSet.<init>(0dc8bdc6ec).file">file</a>: <span title="java.io.File">File</span>, <a title="java.nio.channels.FileChannel" id="kafka.log;FileMessageSet.<init>(0dc8bdc6ec).channel">channel</a>: <span title="java.nio.channels.FileChannel">FileChannel</span>, <a title="Int" id="kafka.log;FileMessageSet.<init>(0dc8bdc6ec).start">start</a>: <span title="Int">Int</span>, <a title="Int" id="kafka.log;FileMessageSet.<init>(0dc8bdc6ec).end">end</a>: <span title="Int">Int</span><span class="delimiter">)</span> = 
+    this<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.<init>(0dc8bdc6ec).file" title="java.io.File">file</a>, <a href="#kafka.log;FileMessageSet.<init>(0dc8bdc6ec).channel" title="java.nio.channels.FileChannel">channel</a>, <a href="#kafka.log;FileMessageSet.<init>(0dc8bdc6ec).start" title="Int">start</a>, <a href="#kafka.log;FileMessageSet.<init>(0dc8bdc6ec).end" title="Int">end</a>, isSlice = true<span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Return a message set which is a view into this set starting from the given position and with the given size limit.
+   * 
+   * If the size is beyond the end of the file, the end will be based on the size of the file at the time of the read.
+   * 
+   * If this message set is already sliced, the position will be taken relative to that slicing.
+   * 
+   * @param position The start position to begin the read from
+   * @param size The number of bytes after the start position to include
+   * 
+   * @return A sliced wrapper on this message set limited based on the given position and size
+   */</span>
+  def <a title="(position: Int, size: Int)kafka.log.FileMessageSet" id="kafka.log;FileMessageSet.read">read</a><span class="delimiter">(</span><a title="Int" id="kafka.log;FileMessageSet.read.position">position</a>: <span title="Int">Int</span>, <a title="Int" id="kafka.log;FileMessageSet.read.size">size</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="#kafka.log;FileMessageSet" title="kafka.log.FileMessageSet">FileMessageSet</a> = <span class="delimiter">{</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.read.position" title="Int">position</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="String(&quot;Invalid position: &quot;)" class="string">&quot;Invalid position: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;FileMessageSet.read.position" title="Int">position</a><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.read.size" title="Int">size</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="String(&quot;Invalid size: &quot;)" class="string">&quot;Invalid size: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;FileMessageSet.read.size" title="Int">size</a><span class="delimiter">)</span>
+    new <a href="#kafka.log;FileMessageSet" title="kafka.log.FileMessageSet">FileMessageSet</a><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>,
+                       <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>,
+                       start = this.<a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a> <span title="(x: Int)Int">+</span> <a href="#kafka.log;FileMessageSet.read.position" title="Int">position</a>,
+                       end = math.<span title="(x: Int, y: Int)Int">min</span><span class="delimiter">(</span>this.<a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a> <span title="(x: Int)Int">+</span> <a href="#kafka.log;FileMessageSet.read.position" title="Int">position</a> <span title="(x: Int)Int">+</span> <a href="#kafka.log;FileMessageSet.read.size" title="Int">size</a>, <a href="#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Search forward for the file position of the last offset that is greater than or equal to the target offset
+   * and return its physical position. If no such offsets are found, return null.
+   * @param targetOffset The offset to search for.
+   * @param startingPosition The starting position in the file to begin searching from.
+   */</span>
+  def <a title="(targetOffset: Long, startingPosition: Int)kafka.log.OffsetPosition" id="kafka.log;FileMessageSet.searchFor">searchFor</a><span class="delimiter">(</span><a title="Long" id="kafka.log;FileMessageSet.searchFor.targetOffset">targetOffset</a>: <span title="Long">Long</span>, <a title="Int" id="kafka.log;FileMessageSet.searchFor.startingPosition">startingPosition</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="kafka.log.OffsetPosition">OffsetPosition</a> = <span class="delimiter">{</span>
+    var <a title="Int" id="kafka.log;FileMessageSet.searchFor.position">position</a> = <a href="#kafka.log;FileMessageSet.searchFor.startingPosition" title="Int">startingPosition</a>
+    val <a title="java.nio.ByteBuffer" id="kafka.log;FileMessageSet.searchFor.buffer">buffer</a> = <span title="java.nio.ByteBuffer.type">ByteBuffer</span>.<span title="(x$1: Int)java.nio.ByteBuffer">allocate</span><span class="delimiter">(</span><a href="../message/MessageSet.scala.html#kafka.message.MessageSet" title="kafka.message.MessageSet.type">MessageSet</a>.<a href="../message/MessageSet.scala.html#kafka.message.MessageSet.LogOverhead" title="=&gt; Int">LogOverhead</a><span class="delimiter">)</span>
+    val <a title="Int" id="kafka.log;FileMessageSet.searchFor.size">size</a> = <a href="#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    while<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.searchFor.position" title="Int">position</a> <span title="(x: Int)Int">+</span> <a href="../message/MessageSet.scala.html#kafka.message.MessageSet" title="kafka.message.MessageSet.type">MessageSet</a>.<a href="../message/MessageSet.scala.html#kafka.message.MessageSet.LogOverhead" title="=&gt; Int">LogOverhead</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#kafka.log;FileMessageSet.searchFor.size" title="Int">size</a><span class="delimiter">)</span> <a href="#kafka.log;FileMessageSet.searchFor.while$1" title="()Unit" class="delimiter">{</a>
+      <a href="#kafka.log;FileMessageSet.searchFor.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()java.nio.Buffer">rewind</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: java.nio.ByteBuffer, x$2: Long)Int">read</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.searchFor.buffer" title="java.nio.ByteBuffer">buffer</a>, <a href="#kafka.log;FileMessageSet.searchFor.position" title="=&gt; Long">position</a><span class="delimiter">)</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.searchFor.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()Boolean">hasRemaining</span><span class="delimiter">)</span>
+        throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Failed to read complete buffer for targetOffset %d startPosition %d in %s&quot;</span>
+                                        .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.searchFor.targetOffset" title="Long">targetOffset</a>, <a href="#kafka.log;FileMessageSet.searchFor.startingPosition" title="Int">startingPosition</a>, <a href="#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="#kafka.log;FileMessageSet.searchFor.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()java.nio.Buffer">rewind</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      val <a title="Long" id="kafka.log;FileMessageSet.searchFor.offset">offset</a> = <a href="#kafka.log;FileMessageSet.searchFor.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()Long">getLong</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.searchFor.offset" title="Long">offset</a> <span title="(x: Long)Boolean">&gt;=</span> <a href="#kafka.log;FileMessageSet.searchFor.targetOffset" title="Long">targetOffset</a><span class="delimiter">)</span>
+        return <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="(offset: Long, position: Int)kafka.log.OffsetPosition">OffsetPosition</a><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.searchFor.offset" title="Long">offset</a>, <a href="#kafka.log;FileMessageSet.searchFor.position" title="Int">position</a><span class="delimiter">)</span>
+      val <a title="Int" id="kafka.log;FileMessageSet.searchFor.messageSize">messageSize</a> = <a href="#kafka.log;FileMessageSet.searchFor.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()Int">getInt</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.searchFor.messageSize" title="Int">messageSize</a> <span title="(x: Int)Boolean">&lt;</span> <a href="../message/Message.scala.html#kafka.message.Message" title="kafka.message.Message.type">Message</a>.<a href="../message/Message.scala.html#kafka.message.Message.MessageOverhead" title="=&gt; Int">MessageOverhead</a><span class="delimiter">)</span>
+        throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Invalid message size: &quot;)" class="string">&quot;Invalid message size: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;FileMessageSet.searchFor.messageSize" title="Int">messageSize</a><span class="delimiter">)</span>
+      <a href="#kafka.log;FileMessageSet.searchFor.position" title="Int">position</a> <span title="(x: Int)Int">+=</span> <a href="../message/MessageSet.scala.html#kafka.message.MessageSet" title="kafka.message.MessageSet.type">MessageSet</a>.<a href="../message/MessageSet.scala.html#kafka.message.MessageSet.LogOverhead" title="=&gt; Int">LogOverhead</a> <span title="(x: Int)Int">+</span> <a href="#kafka.log;FileMessageSet.searchFor.messageSize" title="Int">messageSize</a>
+    <span class="delimiter">}</span>
+    null
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Write some of this set to the given channel.
+   * @param destChannel The channel to write to.
+   * @param writePosition The position in the message set to begin writing from.
+   * @param size The maximum number of bytes to write
+   * @return The number of bytes actually written.
+   */</span>
+  def <a title="(destChannel: java.nio.channels.GatheringByteChannel, writePosition: Long, size: Int)Int" id="kafka.log;FileMessageSet.writeTo">writeTo</a><span class="delimiter">(</span><a title="java.nio.channels.GatheringByteChannel" id="kafka.log;FileMessageSet.writeTo.destChannel">destChannel</a>: <span title="java.nio.channels.GatheringByteChannel">GatheringByteChannel</span>, <a title="Long" id="kafka.log;FileMessageSet.writeTo.writePosition">writePosition</a>: <span title="Long">Long</span>, <a title="Int" id="kafka.log;FileMessageSet.writeTo.size">size</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+    <span class="comment">// Ensure that the underlying size has not changed.</span>
+    val newSize = math.<span title="(x: Int, y: Int)Int">min</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="()Long">size</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="=&gt; Int">toInt</span>, <a href="#kafka.log;FileMessageSet.end" title="=&gt; Int">end</a><span class="delimiter">)</span> <a title="Int" id="kafka.log;FileMessageSet.writeTo.newSize">-</a> <a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a>
+    if <span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.writeTo.newSize" title="Int">newSize</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#kafka.log;FileMessageSet._size" title="=&gt; java.util.concurrent.atomic.AtomicInteger">_size</a>.<span title="()Int">get</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      throw new <a href="../common/KafkaException.scala.html#kafka.common;KafkaException" title="kafka.common.KafkaException">KafkaException</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Size of FileMessageSet %s has been truncated during write: old size %d, new size %d&quot;</span>
+        .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span>, <a href="#kafka.log;FileMessageSet._size" title="=&gt; java.util.concurrent.atomic.AtomicInteger">_size</a>.<span title="()Int">get</span><span class="delimiter">(</span><span class="delimiter">)</span>, <a href="#kafka.log;FileMessageSet.writeTo.newSize" title="Int">newSize</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    val <a title="Int" id="kafka.log;FileMessageSet.writeTo.bytesTransferred">bytesTransferred</a> = <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: Long, x$2: Long, x$3: java.nio.channels.WritableByteChannel)Long">transferTo</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a> <span title="(x: Long)Long">+</span> <a href="#kafka.log;FileMessageSet.writeTo.writePosition" title="Long">writePosition</a>, math.<span title="(x: Int, y: Int)Int">min</span><span title="=&gt; Long" class="delimiter">(</span><a href="#kafka.log;FileMessageSet.writeTo.size" title="Int">size</a>, <a href="#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span class="delimiter">)</span>, <a href="#kafka.log;FileMessageSet.writeTo.destChannel" title="java.nio.channels.GatheringByteChannel">destChannel</a><span class="delimiter">)</span>.<span title="=&gt; Int">toInt</span>
+    <a href="../utils/Logging.scala.html#kafka.utils;Logging.trace(1729dbc42f)" title="(msg: =&gt; String)Unit">trace</a><span class="delimiter">(</span><span title="String(&quot;FileMessageSet &quot;)" class="string">&quot;FileMessageSet &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot; : bytes transferred : &quot;)" class="string">&quot; : bytes transferred : &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;FileMessageSet.writeTo.bytesTransferred" title="Int">bytesTransferred</a>
+      <span title="(x$1: Any)String">+</span> <span title="String(&quot; bytes requested for transfer : &quot;)" class="string">&quot; bytes requested for transfer : &quot;</span> <span title="(x$1: Any)String">+</span> math.<span title="(x: Int, y: Int)Int">min</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.writeTo.size" title="Int">size</a>, <a href="#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.writeTo.bytesTransferred" title="Int">bytesTransferred</a>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Get a shallow iterator over the messages in the set.
+   */</span>
+  override def <a title="()Iterator[kafka.message.MessageAndOffset]" id="kafka.log;FileMessageSet.iterator(df10222544)">iterator</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09)" title="(maxMessageSize: Int)Iterator[kafka.message.MessageAndOffset]">iterator</a><span class="delimiter">(</span>Int.<span title="Int(2147483647)">MaxValue</span><span class="delimiter">)</span>
+    
+  <span class="comment">/**
+   * Get an iterator over the messages in the set. We only do shallow iteration here.
+   * @param maxMessageSize A limit on allowable message size to avoid allocating unbounded memory. 
+   * If we encounter a message larger than this we throw an InvalidMessageException.
+   * @return The iterator.
+   */</span>
+  def <a title="(maxMessageSize: Int)Iterator[kafka.message.MessageAndOffset]" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09)">iterator</a><span class="delimiter">(</span><a title="Int" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09).maxMessageSize">maxMessageSize</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="Iterator[kafka.message.MessageAndOffset]">Iterator</span><span class="delimiter">[</span>MessageAndOffset<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    new <a title="&lt;$anon: kafka.utils.IteratorTemplate[kafka.message.MessageAndOffset]&gt; extends kafka.utils.IteratorTemplate[kafka.message.MessageAndOffset]" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon">IteratorTemplate</a><span class="delimiter">[</span>MessageAndOffset<span class="delimiter">]</span> <span class="delimiter">{</span>
+      var <a title="Int" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.location_=">location</a> = <a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a>
+      val <a title="java.nio.ByteBuffer" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.sizeOffsetBuffer">sizeOffsetBuffer</a> = <span title="java.nio.ByteBuffer.type">ByteBuffer</span>.<span title="(x$1: Int)java.nio.ByteBuffer">allocate</span><span class="delimiter">(</span><span title="Int(12)" class="int">12</span><span class="delimiter">)</span>
+      
+      override def <a title="()kafka.message.MessageAndOffset" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext">makeNext</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset" title="kafka.message.MessageAndOffset">MessageAndOffset</a> = <span class="delimiter">{</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.location_=" title="=&gt; Int">location</a> <span title="(x: Int)Boolean">&gt;=</span> <a href="#kafka.log;FileMessageSet.end" title="=&gt; Int">end</a><span class="delimiter">)</span>
+          return <a href="../utils/IteratorTemplate.scala.html#kafka.utils;IteratorTemplate.allDone" title="()kafka.message.MessageAndOffset">allDone</a><span class="delimiter">(</span><span class="delimiter">)</span>
+          
+        <span class="comment">// read the size of the item</span>
+        <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.sizeOffsetBuffer" title="=&gt; java.nio.ByteBuffer">sizeOffsetBuffer</a>.<span title="()java.nio.Buffer">rewind</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: java.nio.ByteBuffer, x$2: Long)Int">read</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.sizeOffsetBuffer" title="=&gt; java.nio.ByteBuffer">sizeOffsetBuffer</a>, <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.location_=" title="=&gt; Long">location</a><span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.sizeOffsetBuffer" title="=&gt; java.nio.ByteBuffer">sizeOffsetBuffer</a>.<span title="()Boolean">hasRemaining</span><span class="delimiter">)</span>
+          return <a href="../utils/IteratorTemplate.scala.html#kafka.utils;IteratorTemplate.allDone" title="()kafka.message.MessageAndOffset">allDone</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        
+        <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.sizeOffsetBuffer" title="=&gt; java.nio.ByteBuffer">sizeOffsetBuffer</a>.<span title="()java.nio.Buffer">rewind</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        val <a title="Long" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.offset">offset</a> = <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.sizeOffsetBuffer" title="=&gt; java.nio.ByteBuffer">sizeOffsetBuffer</a>.<span title="()Long">getLong</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        val <a title="Int" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.size">size</a> = <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.sizeOffsetBuffer" title="=&gt; java.nio.ByteBuffer">sizeOffsetBuffer</a>.<span title="()Int">getInt</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.size" title="Int">size</a> <span title="(x: Int)Boolean">&lt;</span> <a href="../message/Message.scala.html#kafka.message.Message" title="kafka.message.Message.type">Message</a>.<a href="../message/Message.scala.html#kafka.message.Message.MinHeaderSize" title="=&gt; Int">MinHeaderSize</a><span class="delimiter">)</span>
+          return <a href="../utils/IteratorTemplate.scala.html#kafka.utils;IteratorTemplate.allDone" title="()kafka.message.MessageAndOffset">allDone</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.size" title="Int">size</a> <span title="(x: Int)Boolean">&gt;</span> <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09).maxMessageSize" title="Int">maxMessageSize</a><span class="delimiter">)</span>
+          throw new <a href="../message/InvalidMessageException.scala.html#kafka.message;InvalidMessageException" title="kafka.message.InvalidMessageException">InvalidMessageException</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Message size exceeds the largest allowable message size (%d).&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09).maxMessageSize" title="Int">maxMessageSize</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        
+        <span class="comment">// read the item itself</span>
+        val <a title="java.nio.ByteBuffer" id="kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.buffer">buffer</a> = <span title="java.nio.ByteBuffer.type">ByteBuffer</span>.<span title="(x$1: Int)java.nio.ByteBuffer">allocate</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.size" title="Int">size</a><span class="delimiter">)</span>
+        <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: java.nio.ByteBuffer, x$2: Long)Int">read</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.buffer" title="java.nio.ByteBuffer">buffer</a>, <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.location_=" title="=&gt; Int">location</a> <span title="=&gt; Long">+</span> <span title="Int(12)" class="int">12</span><span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()Boolean">hasRemaining</span><span class="delimiter">)</span>
+          return <a href="../utils/IteratorTemplate.scala.html#kafka.utils;IteratorTemplate.allDone" title="()kafka.message.MessageAndOffset">allDone</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()java.nio.Buffer">rewind</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        
+        <span class="comment">// increment the location and return the item</span>
+        <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.location_=" title="(x$1: Int)Unit">location</a> <span title="(x: Int)Int">+=</span> <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.size" title="Int">size</a> <span title="(x: Int)Int">+</span> <span title="Int(12)" class="int">12</span>
+        new <a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset" title="kafka.message.MessageAndOffset">MessageAndOffset</a><span class="delimiter">(</span>new <a href="../message/Message.scala.html#kafka.message;Message" title="kafka.message.Message">Message</a><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.buffer" title="java.nio.ByteBuffer">buffer</a><span class="delimiter">)</span>, <a href="#kafka.log;FileMessageSet.iterator(ebd7e0ba09);$anon.makeNext.offset" title="Long">offset</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * The number of bytes taken up by this file set
+   */</span>
+  def <a title="()Int" id="kafka.log;FileMessageSet.sizeInBytes">sizeInBytes</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <a href="#kafka.log;FileMessageSet._size" title="=&gt; java.util.concurrent.atomic.AtomicInteger">_size</a>.<span title="()Int">get</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Append these messages to the message set
+   */</span>
+  def <a title="(messages: kafka.message.ByteBufferMessageSet)Unit" id="kafka.log;FileMessageSet.append">append</a><span class="delimiter">(</span><a title="kafka.message.ByteBufferMessageSet" id="kafka.log;FileMessageSet.append.messages">messages</a>: <a href="../message/ByteBufferMessageSet.scala.html#kafka.message;ByteBufferMessageSet" title="kafka.message.ByteBufferMessageSet">ByteBufferMessageSet</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val <a title="Int" id="kafka.log;FileMessageSet.append.written">written</a> = <a href="#kafka.log;FileMessageSet.append.messages" title="kafka.message.ByteBufferMessageSet">messages</a>.<a href="../message/ByteBufferMessageSet.scala.html#kafka.message;ByteBufferMessageSet.writeTo" title="(channel: java.nio.channels.GatheringByteChannel, offset: Long, size: Int)Int">writeTo</a><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>, <span title="Long(0L)" class="int">0</span>, <a href="#kafka.log;FileMessageSet.append.messages" title="kafka.message.ByteBufferMessageSet">messages</a>.<a href="../message/ByteBufferMessageSet.scala.html#kafka.message;ByteBufferMessageSet.sizeInBytes" title="=&gt; Int">sizeInBytes</a><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet._size" title="=&gt; java.util.concurrent.atomic.AtomicInteger">_size</a>.<span title="(x$1: Int)Int">getAndAdd</span><span title="Unit" class="delimiter">(</span><a href="#kafka.log;FileMessageSet.append.written" title="Int">written</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+ 
+  <span class="comment">/**
+   * Commit all written data to the physical disk
+   */</span>
+  def <a title="()Unit" id="kafka.log;FileMessageSet.flush">flush</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: Boolean)Unit">force</span><span class="delimiter">(</span>true<span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Close this message set
+   */</span>
+  def <a title="()Unit" id="kafka.log;FileMessageSet.close">close</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#kafka.log;FileMessageSet.flush" title="()Unit">flush</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Delete this message set from the filesystem
+   * @return True iff this message set was deleted.
+   */</span>
+  def <a title="()Boolean" id="kafka.log;FileMessageSet.delete">delete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Logging.scala.html#kafka.utils;Logging.swallow" title="(action: =&gt; Unit)Unit">swallow</a><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()Boolean">delete</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Truncate this file message set to the given size in bytes. Note that this API does no checking that the 
+   * given size falls on a valid message boundary.
+   * @param targetSize The size to truncate to.
+   * @return The number of bytes truncated off
+   */</span>
+  def <a title="(targetSize: Int)Int" id="kafka.log;FileMessageSet.truncateTo">truncateTo</a><span class="delimiter">(</span><a title="Int" id="kafka.log;FileMessageSet.truncateTo.targetSize">targetSize</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+    val <a title="Int" id="kafka.log;FileMessageSet.truncateTo.originalSize">originalSize</a> = <a href="#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a>
+    if<span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.truncateTo.targetSize" title="Int">targetSize</a> <span title="(x: Int)Boolean">&gt;</span> <a href="#kafka.log;FileMessageSet.truncateTo.originalSize" title="Int">originalSize</a> <span title="(x: Boolean)Boolean">||</span> <a href="#kafka.log;FileMessageSet.truncateTo.targetSize" title="Int">targetSize</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      throw new <a href="../common/KafkaException.scala.html#kafka.common;KafkaException" title="kafka.common.KafkaException">KafkaException</a><span class="delimiter">(</span><span title="String(&quot;Attempt to truncate log segment to &quot;)" class="string">&quot;Attempt to truncate log segment to &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;FileMessageSet.truncateTo.targetSize" title="Int">targetSize</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; bytes failed, &quot;)" class="string">&quot; bytes failed, &quot;</span> <span title="(x$1: Any)String">+</span>
+                               <span title="String(&quot; size of this log segment is &quot;)" class="string">&quot; size of this log segment is &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;FileMessageSet.truncateTo.originalSize" title="Int">originalSize</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; bytes.&quot;)" class="string">&quot; bytes.&quot;</span><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: Long)java.nio.channels.FileChannel">truncate</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.truncateTo.targetSize" title="=&gt; Long">targetSize</a><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: Long)java.nio.channels.FileChannel">position</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.truncateTo.targetSize" title="=&gt; Long">targetSize</a><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet._size" title="=&gt; java.util.concurrent.atomic.AtomicInteger">_size</a>.<span title="(x$1: Int)Unit">set</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.truncateTo.targetSize" title="Int">targetSize</a><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.truncateTo.originalSize" title="Int">originalSize</a> <span title="(x: Int)Int">-</span> <a href="#kafka.log;FileMessageSet.truncateTo.targetSize" title="Int">targetSize</a>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Read from the underlying file into the buffer starting at the given position
+   */</span>
+  def <a title="(buffer: java.nio.ByteBuffer, relativePosition: Int)java.nio.ByteBuffer" id="kafka.log;FileMessageSet.readInto">readInto</a><span class="delimiter">(</span><a title="java.nio.ByteBuffer" id="kafka.log;FileMessageSet.readInto.buffer">buffer</a>: <span title="java.nio.ByteBuffer">ByteBuffer</span>, <a title="Int" id="kafka.log;FileMessageSet.readInto.relativePosition">relativePosition</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="java.nio.ByteBuffer">ByteBuffer</span> = <span class="delimiter">{</span>
+    <a href="#kafka.log;FileMessageSet.channel" title="=&gt; java.nio.channels.FileChannel">channel</a>.<span title="(x$1: java.nio.ByteBuffer, x$2: Long)Int">read</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.readInto.buffer" title="java.nio.ByteBuffer">buffer</a>, <a href="#kafka.log;FileMessageSet.readInto.relativePosition" title="Int">relativePosition</a> <span title="=&gt; Long">+</span> this.<a href="#kafka.log;FileMessageSet.start" title="=&gt; Int">start</a><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.readInto.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="()java.nio.Buffer">flip</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#kafka.log;FileMessageSet.readInto.buffer" title="java.nio.ByteBuffer">buffer</a>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Rename the file that backs this message set
+   * @return true iff the rename was successful
+   */</span>
+  def <a title="(f: java.io.File)Boolean" id="kafka.log;FileMessageSet.renameTo">renameTo</a><span class="delimiter">(</span><a title="java.io.File" id="kafka.log;FileMessageSet.renameTo.f">f</a>: <span title="java.io.File">File</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    val <a title="Boolean" id="kafka.log;FileMessageSet.renameTo.success">success</a> = this.<a href="#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="(x$1: java.io.File)Boolean">renameTo</span><span class="delimiter">(</span><a href="#kafka.log;FileMessageSet.renameTo.f" title="java.io.File">f</a><span class="delimiter">)</span>
+    this.<a href="#kafka.log;FileMessageSet.file" title="(x$1: java.io.File)Unit">file</a> = <a href="#kafka.log;FileMessageSet.renameTo.f" title="java.io.File">f</a>
+    <a href="#kafka.log;FileMessageSet.renameTo.success" title="Boolean">success</a>
+  <span class="delimiter">}</span>
+  
+<span class="delimiter">}</span>
+
+object <a title="kafka.log.LogFlushStats.type" id="kafka.log.LogFlushStats">LogFlushStats</a> extends <a href="../metrics/KafkaMetricsGroup.scala.html#kafka.metrics;KafkaMetricsGroup" title="kafka.metrics.KafkaMetricsGroup">KafkaMetricsGroup</a> <span class="delimiter">{</span>
+  val <a title="kafka.metrics.KafkaTimer" id="kafka.log.LogFlushStats.logFlushTimer">logFlushTimer</a> = new <a href="../metrics/KafkaTimer.scala.html#kafka.metrics;KafkaTimer" title="kafka.metrics.KafkaTimer">KafkaTimer</a><span class="delimiter">(</span><a href="../metrics/KafkaMetricsGroup.scala.html#kafka.metrics;KafkaMetricsGroup.newTimer" title="(name: String, durationUnit: java.util.concurrent.TimeUnit, rateUnit: java.util.concurrent.TimeUnit, tags: scala.collection.Map[String,String])com.yammer.metrics.core.Timer">newTimer</a><span class="delimiter">(</span><span title="String(&quot;LogFlushRateAndTimeMs&quot;)" class="string">&quot;LogFlushRateAndTimeMs&quot;</span>, TimeUnit.<span title="java.util.concurrent.TimeUnit(MILLISECONDS)">MILLISECONDS</span>, TimeUnit.<span title="java.util.concurrent.TimeUnit(SECONDS)">SECONDS</span><span class="delimiter">)</span><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

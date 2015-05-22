@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/utils/KafkaScheduler.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ * 
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+
+package kafka.utils
+
+import java.util.concurrent._
+import atomic._
+import collection.mutable.HashMap
+
+<span class="comment">/**
+ * A scheduler for running jobs
+ * 
+ * This interface controls a job scheduler that allows scheduling either repeating background jobs 
+ * that execute periodically or delayed one-time actions that are scheduled in the future.
+ */</span>
+trait <a title="trait Scheduler extends AnyRef" id="kafka.utils;Scheduler">Scheduler</a> <span class="delimiter">{</span>
+  
+  <span class="comment">/**
+   * Initialize this scheduler so it is ready to accept scheduling of tasks
+   */</span>
+  def <a title="()Unit" id="kafka.utils;Scheduler.startup">startup</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Shutdown this scheduler. When this method is complete no more executions of background tasks will occur. 
+   * This includes tasks scheduled with a delayed execution.
+   */</span>
+  def <a title="()Unit" id="kafka.utils;Scheduler.shutdown">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Schedule a task
+   * @param name The name of this task
+   * @param delay The amount of time to wait before the first execution
+   * @param period The period with which to execute the task. If &lt; 0 the task will execute only once.
+   * @param unit The unit for the preceding times.
+   */</span>
+  def <a title="(name: String, fun: () =&gt; Unit, delay: Long, period: Long, unit: java.util.concurrent.TimeUnit)Unit" id="kafka.utils;Scheduler.schedule">schedule</a><span class="delimiter">(</span><a title="String" id="kafka.utils;Scheduler.schedule.name">name</a>: <span title="String">String</span>, <a title="() =&gt; Unit" id="kafka.utils;Scheduler.schedule.fun">fun</a>: <span class="delimiter">(</span><span class="delimiter">)</span>=&gt;Unit, <a title="Long" id="kafka.utils;Scheduler.schedule$default$3">delay</a>: <span title="Long">Long</span> = <span title="Long(0L)" class="int">0</span>, <a title="Long" id="kafka.utils;Scheduler.schedule$default$4">period</a>: <span title="Long">Long</span> = -<span title="Long(-1L)" class="int">1</span>, <a title="java.util.concurrent.TimeUnit" id="kafka.utils;Scheduler.schedule$default$5">unit</a>: <span title="java.util.concurrent.TimeUnit">TimeUnit</span> = TimeUnit.<span title="java.util.concurrent.TimeUnit(MILLISECONDS)">MILLISECONDS</span><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * A scheduler based on java.util.concurrent.ScheduledThreadPoolExecutor
+ * 
+ * It has a pool of kafka-scheduler- threads that do the actual work.
+ * 
+ * @param threads The number of threads in the thread pool
+ * @param threadNamePrefix The name to use for scheduler threads. This prefix will have a number appended to it.
+ * @param daemon If true the scheduler threads will be &quot;daemon&quot; threads and will not block jvm shutdown.
+ */</span>
+@threadsafe
+class <a title="class KafkaScheduler extends AnyRef with kafka.utils.Scheduler with kafka.utils.Logging" id="kafka.utils.KafkaScheduler">KafkaScheduler</a><a href="#kafka.utils.KafkaScheduler" title="kafka.utils.KafkaScheduler" class="delimiter">(</a>val <a title="Int" id="kafka.utils;KafkaScheduler.threads">threads</a>: <span title="Int">Int</span>, 
+                     val <a title="String" id="kafka.utils.KafkaScheduler.<init>$default$2">threadNamePrefix</a>: <span title="String">String</span> = <span title="String(&quot;kafka-scheduler-&quot;)" class="string">&quot;kafka-scheduler-&quot;</span>, 
+                     <a title="Boolean" id="kafka.utils.KafkaScheduler.<init>$default$3">daemon</a>: <span title="Boolean">Boolean</span> = true<span class="delimiter">)</span> extends <a href="#kafka.utils;Scheduler" title="kafka.utils.Scheduler">Scheduler</a> with <a href="Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+  @volatile private var <a title="java.util.concurrent.ScheduledThreadPoolExecutor" id="kafka.utils;KafkaScheduler.executor_=">executor</a>: <span title="java.util.concurrent.ScheduledThreadPoolExecutor">ScheduledThreadPoolExecutor</span> = null
+  private val <a title="java.util.concurrent.atomic.AtomicInteger" id="kafka.utils;KafkaScheduler.schedulerThreadId">schedulerThreadId</a> = new <span title="java.util.concurrent.atomic.AtomicInteger">AtomicInteger</span><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+  
+  override def <a title="()Unit" id="kafka.utils;KafkaScheduler.startup">startup</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Initializing task scheduler.&quot;)" class="string">&quot;Initializing task scheduler.&quot;</span><span class="delimiter">)</span>
+    this <span title="(x$1: Unit)Unit">synchronized</span> <span class="delimiter">{</span>
+      if<span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a> <span title="(x$1: Any)Boolean">!=</span> null<span class="delimiter">)</span>
+        throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;This scheduler has already been started!&quot;)" class="string">&quot;This scheduler has already been started!&quot;</span><span class="delimiter">)</span>
+      <a href="#kafka.utils;KafkaScheduler.executor_=" title="(x$1: java.util.concurrent.ScheduledThreadPoolExecutor)Unit">executor</a> = new <span title="java.util.concurrent.ScheduledThreadPoolExecutor">ScheduledThreadPoolExecutor</span><span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.threads" title="=&gt; Int">threads</a><span class="delimiter">)</span>
+      <a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a>.<span title="(x$1: Boolean)Unit">setContinueExistingPeriodicTasksAfterShutdownPolicy</span><span class="delimiter">(</span>false<span class="delimiter">)</span>
+      <a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a>.<span title="(x$1: Boolean)Unit">setExecuteExistingDelayedTasksAfterShutdownPolicy</span><span class="delimiter">(</span>false<span class="delimiter">)</span>
+      <a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a>.<span title="(x$1: java.util.concurrent.ThreadFactory)Unit">setThreadFactory</span><span class="delimiter">(</span>new <a title="&lt;$anon: java.util.concurrent.ThreadFactory&gt; extends Object with java.util.concurrent.ThreadFactory" id="kafka.utils;KafkaScheduler.startup;$anon">ThreadFactory</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+                                  def <a title="(runnable: Runnable)Thread" id="kafka.utils;KafkaScheduler.startup;$anon.newThread">newThread</a><span class="delimiter">(</span><a title="Runnable" id="kafka.utils;KafkaScheduler.startup;$anon.newThread.runnable">runnable</a>: <span title="Runnable">Runnable</span><span class="delimiter">)</span>: <span title="Thread">Thread</span> = 
+                                    <a href="Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="Utils.scala.html#kafka.utils.Utils.newThread(dc18ba96a6)" title="(name: String, runnable: Runnable, daemon: Boolean)Thread">newThread</a><span class="delimiter">(</span><a href="#kafka.utils.KafkaScheduler.<init>$default$2" title="=&gt; String">threadNamePrefix</a> <span title="(x$1: Any)String">+</span> <a href="#kafka.utils;KafkaScheduler.schedulerThreadId" title="=&gt; java.util.concurrent.atomic.AtomicInteger">schedulerThreadId</a>.<span title="()Int">getAndIncrement</span><span class="delimiter">(</span><span class="delimiter">)</span>, <a href="#kafka.utils;KafkaScheduler.startup;$anon.newThread.runnable" title="Runnable">runnable</a>, <a href="#kafka.utils.KafkaScheduler.<init>$default$3" title="Boolean">daemon</a><span class="delimiter">)</span>
+                                <span class="delimiter">}</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  override def <a title="()Unit" id="kafka.utils;KafkaScheduler.shutdown">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Shutting down task scheduler.&quot;)" class="string">&quot;Shutting down task scheduler.&quot;</span><span class="delimiter">)</span>
+    <a href="#kafka.utils;KafkaScheduler.ensureStarted" title="=&gt; Unit">ensureStarted</a>
+    <a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a>.<span title="()Unit">shutdown</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a>.<span title="(x$1: Long, x$2: java.util.concurrent.TimeUnit)Boolean">awaitTermination</span><span class="delimiter">(</span><span title="Long(1L)" class="int">1</span>, TimeUnit.<span title="java.util.concurrent.TimeUnit(DAYS)">DAYS</span><span class="delimiter">)</span>
+    this.<a href="#kafka.utils;KafkaScheduler.executor_=" title="(x$1: java.util.concurrent.ScheduledThreadPoolExecutor)Unit">executor</a> = null
+  <span class="delimiter">}</span>
+
+  def <a title="(name: String, fun: () =&gt; Unit, delay: Long, period: Long, unit: java.util.concurrent.TimeUnit)Unit" id="kafka.utils;KafkaScheduler.schedule">schedule</a><span class="delimiter">(</span><a title="String" id="kafka.utils;KafkaScheduler.schedule.name">name</a>: <span title="String">String</span>, <a title="() =&gt; Unit" id="kafka.utils;KafkaScheduler.schedule.fun">fun</a>: <span class="delimiter">(</span><span class="delimiter">)</span>=&gt;Unit, <a title="Long" id="kafka.utils;KafkaScheduler.schedule.delay">delay</a>: <span title="Long">Long</span>, <a title="Long" id="kafka.utils;KafkaScheduler.schedule.period">period</a>: <span title="Long">Long</span>, <a title="java.util.concurrent.TimeUnit" id="kafka.utils;KafkaScheduler.schedule.unit">unit</a>: <span title="java.util.concurrent.TimeUnit">TimeUnit</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Scheduling task %s with initial delay %d ms and period %d ms.&quot;</span>
+        .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.name" title="String">name</a>, TimeUnit.<span title="java.util.concurrent.TimeUnit(MILLISECONDS)">MILLISECONDS</span>.<span title="(x$1: Long, x$2: java.util.concurrent.TimeUnit)Long">convert</span><span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.delay" title="Long">delay</a>, <a href="#kafka.utils;KafkaScheduler.schedule.unit" title="java.util.concurrent.TimeUnit">unit</a><span class="delimiter">)</span>, TimeUnit.<span title="java.util.concurrent.TimeUnit(MILLISECONDS)">MILLISECONDS</span>.<span title="(x$1: Long, x$2: java.util.concurrent.TimeUnit)Long">convert</span><span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.period" title="Long">period</a>, <a href="#kafka.utils;KafkaScheduler.schedule.unit" title="java.util.concurrent.TimeUnit">unit</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="#kafka.utils;KafkaScheduler.ensureStarted" title="=&gt; Unit">ensureStarted</a>
+    val <a title="Runnable" id="kafka.utils;KafkaScheduler.schedule.runnable">runnable</a> = <a href="Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="Utils.scala.html#kafka.utils.Utils.runnable" title="(fun: =&gt; Unit)Runnable">runnable</a> <span class="delimiter">{</span>
+      try <span class="delimiter">{</span>
+        <a href="Logging.scala.html#kafka.utils;Logging.trace(1729dbc42f)" title="(msg: =&gt; String)Unit">trace</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Begining execution of scheduled task '%s'.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.name" title="String">name</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <a href="#kafka.utils;KafkaScheduler.schedule.fun" title="()Unit">fun</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+        case <a title="Throwable" id="kafka.utils;KafkaScheduler.schedule.runnable.t">t</a>: <span title="Throwable">Throwable</span> =&gt; <a href="Logging.scala.html#kafka.utils;Logging.error(cfd112d89b)" title="(msg: =&gt; String, e: =&gt; Throwable)Unit">error</a><span class="delimiter">(</span><span title="String(&quot;Uncaught exception in scheduled task \'&quot;)" class="string">&quot;Uncaught exception in scheduled task '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.utils;KafkaScheduler.schedule.name" title="String">name</a> <span title="(x$1: Any)String">+</span><span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span>, <a href="#kafka.utils;KafkaScheduler.schedule.runnable.t" title="Throwable">t</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span> finally <span class="delimiter">{</span>
+        <a href="Logging.scala.html#kafka.utils;Logging.trace(1729dbc42f)" title="(msg: =&gt; String)Unit">trace</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Completed execution of scheduled task '%s'.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.name" title="String">name</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    if<span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.period" title="Long">period</a> <span title="(x: Int)Boolean">&gt;=</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a>.<span title="(x$1: Runnable, x$2: Long, x$3: Long, x$4: java.util.concurrent.TimeUnit)java.util.concurrent.ScheduledFuture[_]">scheduleAtFixedRate</span><span title="Unit" class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.runnable" title="Runnable">runnable</a>, <a href="#kafka.utils;KafkaScheduler.schedule.delay" title="Long">delay</a>, <a href="#kafka.utils;KafkaScheduler.schedule.period" title="Long">period</a>, <a href="#kafka.utils;KafkaScheduler.schedule.unit" title="java.util.concurrent.TimeUnit">unit</a><span class="delimiter">)</span>
+    else
+      <a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a>.<span title="(x$1: Runnable, x$2: Long, x$3: java.util.concurrent.TimeUnit)java.util.concurrent.ScheduledFuture[_]">schedule</span><span title="Unit" class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.schedule.runnable" title="Runnable">runnable</a>, <a href="#kafka.utils;KafkaScheduler.schedule.delay" title="Long">delay</a>, <a href="#kafka.utils;KafkaScheduler.schedule.unit" title="java.util.concurrent.TimeUnit">unit</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  private def <a title="=&gt; Unit" id="kafka.utils;KafkaScheduler.ensureStarted">ensureStarted</a> = <span class="delimiter">{</span>
+    if<span class="delimiter">(</span><a href="#kafka.utils;KafkaScheduler.executor_=" title="=&gt; java.util.concurrent.ScheduledThreadPoolExecutor">executor</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span>
+      throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Kafka scheduler has not been started&quot;)" class="string">&quot;Kafka scheduler has not been started&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

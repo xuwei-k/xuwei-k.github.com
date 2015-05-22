@@ -1,0 +1,502 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/tools/KafkaMigrationTool.java</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package kafka.tools;
+
+import joptsimple.*;
+import kafka.javaapi.producer.Producer;
+import kafka.producer.KeyedMessage;
+import kafka.producer.ProducerConfig;
+import kafka.utils.Utils;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+
+/**
+ * This is a  kafka 0.7 to 0.8 online migration tool used for migrating data from 0.7 to 0.8 cluster. Internally,
+ * it's composed of a kafka 0.7 consumer and kafka 0.8 producer. The kafka 0.7 consumer consumes data from the
+ * 0.7 cluster, and the kafka 0.8 producer produces data to the 0.8 cluster.
+ *
+ * The 0.7 consumer is loaded from kafka 0.7 jar using a &quot;parent last, child first&quot; java class loader.
+ * Ordinary class loader is &quot;parent first, child last&quot;, and kafka 0.8 and 0.7 both have classes for a lot of
+ * class names like &quot;kafka.consumer.Consumer&quot;, etc., so ordinary java URLClassLoader with kafka 0.7 jar will
+ * will still load the 0.8 version class.
+ *
+ * As kafka 0.7 and kafka 0.8 used different version of zkClient, the zkClient jar used by kafka 0.7 should
+ * also be used by the class loader.
+ *
+ * The user need to provide the configuration file for 0.7 consumer and 0.8 producer. For 0.8 producer,
+ * the &quot;serializer.class&quot; config is set to &quot;kafka.serializer.DefaultEncoder&quot; by the code.
+ */
+@SuppressWarnings({&quot;unchecked&quot;, &quot;rawtypes&quot;})
+public class KafkaMigrationTool
+{
+  private static final org.apache.log4j.Logger logger = org.apache.log4j.Logger.getLogger(KafkaMigrationTool.class.getName());
+  private static final String KAFKA_07_STATIC_CONSUMER_CLASS_NAME = &quot;kafka.consumer.Consumer&quot;;
+  private static final String KAFKA_07_CONSUMER_CONFIG_CLASS_NAME = &quot;kafka.consumer.ConsumerConfig&quot;;
+  private static final String KAFKA_07_CONSUMER_STREAM_CLASS_NAME = &quot;kafka.consumer.KafkaStream&quot;;
+  private static final String KAFKA_07_CONSUMER_ITERATOR_CLASS_NAME = &quot;kafka.consumer.ConsumerIterator&quot;;
+  private static final String KAFKA_07_CONSUMER_CONNECTOR_CLASS_NAME = &quot;kafka.javaapi.consumer.ConsumerConnector&quot;;
+  private static final String KAFKA_07_MESSAGE_AND_METADATA_CLASS_NAME = &quot;kafka.message.MessageAndMetadata&quot;;
+  private static final String KAFKA_07_MESSAGE_CLASS_NAME = &quot;kafka.message.Message&quot;;
+  private static final String KAFKA_07_WHITE_LIST_CLASS_NAME = &quot;kafka.consumer.Whitelist&quot;;
+  private static final String KAFKA_07_TOPIC_FILTER_CLASS_NAME = &quot;kafka.consumer.TopicFilter&quot;;
+  private static final String KAFKA_07_BLACK_LIST_CLASS_NAME = &quot;kafka.consumer.Blacklist&quot;;
+
+  private static Class&lt;?&gt; KafkaStaticConsumer_07 = null;
+  private static Class&lt;?&gt; ConsumerConfig_07 = null;
+  private static Class&lt;?&gt; ConsumerConnector_07 = null;
+  private static Class&lt;?&gt; KafkaStream_07 = null;
+  private static Class&lt;?&gt; TopicFilter_07 = null;
+  private static Class&lt;?&gt; WhiteList_07 = null;
+  private static Class&lt;?&gt; BlackList_07 = null;
+  private static Class&lt;?&gt; KafkaConsumerIteratorClass_07 = null;
+  private static Class&lt;?&gt; KafkaMessageAndMetatDataClass_07 = null;
+  private static Class&lt;?&gt; KafkaMessageClass_07 = null;
+
+  public static void main(String[] args) throws InterruptedException, IOException {
+    OptionParser parser = new OptionParser();
+    ArgumentAcceptingOptionSpec&lt;String&gt; consumerConfigOpt
+      = parser.accepts(&quot;consumer.config&quot;, &quot;Kafka 0.7 consumer config to consume from the source 0.7 cluster. &quot; + &quot;You man specify multiple of these.&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;config file&quot;)
+      .ofType(String.class);
+
+    ArgumentAcceptingOptionSpec&lt;String&gt; producerConfigOpt
+      =  parser.accepts(&quot;producer.config&quot;, &quot;Producer config.&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;config file&quot;)
+      .ofType(String.class);
+
+    ArgumentAcceptingOptionSpec&lt;Integer&gt; numProducersOpt
+      =  parser.accepts(&quot;num.producers&quot;, &quot;Number of producer instances&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;Number of producers&quot;)
+      .ofType(Integer.class)
+      .defaultsTo(1);
+
+    ArgumentAcceptingOptionSpec&lt;String&gt; zkClient01JarOpt
+      = parser.accepts(&quot;zkclient.01.jar&quot;, &quot;zkClient 0.1 jar file&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;zkClient 0.1 jar file required by Kafka 0.7&quot;)
+      .ofType(String.class);
+
+    ArgumentAcceptingOptionSpec&lt;String&gt; kafka07JarOpt
+      = parser.accepts(&quot;kafka.07.jar&quot;, &quot;Kafka 0.7 jar file&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;kafka 0.7 jar&quot;)
+      .ofType(String.class);
+
+    ArgumentAcceptingOptionSpec&lt;Integer&gt; numStreamsOpt
+      = parser.accepts(&quot;num.streams&quot;, &quot;Number of consumer streams&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;Number of consumer threads&quot;)
+      .ofType(Integer.class)
+      .defaultsTo(1);
+
+    ArgumentAcceptingOptionSpec&lt;String&gt; whitelistOpt
+      = parser.accepts(&quot;whitelist&quot;, &quot;Whitelist of topics to migrate from the 0.7 cluster&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;Java regex (String)&quot;)
+      .ofType(String.class);
+
+    ArgumentAcceptingOptionSpec&lt;String&gt; blacklistOpt
+      = parser.accepts(&quot;blacklist&quot;, &quot;Blacklist of topics to migrate from the 0.7 cluster&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;Java regex (String)&quot;)
+      .ofType(String.class);
+
+    ArgumentAcceptingOptionSpec&lt;Integer&gt; queueSizeOpt
+      =  parser.accepts(&quot;queue.size&quot;, &quot;Number of messages that are buffered between the 0.7 consumer and 0.8 producer&quot;)
+      .withRequiredArg()
+      .describedAs(&quot;Queue size in terms of number of messages&quot;)
+      .ofType(Integer.class)
+      .defaultsTo(10000);
+
+    OptionSpecBuilder helpOpt
+      = parser.accepts(&quot;help&quot;, &quot;Print this message.&quot;);
+
+    OptionSet options = parser.parse(args);
+
+    if (options.has(helpOpt)) {
+      parser.printHelpOn(System.out);
+      System.exit(0);
+    }
+
+    checkRequiredArgs(parser, options, new OptionSpec[]{consumerConfigOpt, producerConfigOpt, zkClient01JarOpt, kafka07JarOpt});
+    int whiteListCount = options.has(whitelistOpt) ? 1 : 0;
+    int blackListCount = options.has(blacklistOpt) ? 1 : 0;
+    if(whiteListCount + blackListCount != 1) {
+      System.err.println(&quot;Exactly one of whitelist or blacklist is required.&quot;);
+      System.exit(1);
+    }
+
+    String kafkaJarFile_07 = options.valueOf(kafka07JarOpt);
+    String zkClientJarFile = options.valueOf(zkClient01JarOpt);
+    String consumerConfigFile_07 = options.valueOf(consumerConfigOpt);
+    int numConsumers = options.valueOf(numStreamsOpt);
+    String producerConfigFile_08 = options.valueOf(producerConfigOpt);
+    int numProducers = options.valueOf(numProducersOpt);
+    final List&lt;MigrationThread&gt; migrationThreads = new ArrayList&lt;MigrationThread&gt;(numConsumers);
+    final List&lt;ProducerThread&gt; producerThreads = new ArrayList&lt;ProducerThread&gt;(numProducers);
+
+    try {
+      File kafkaJar_07 = new File(kafkaJarFile_07);
+      File zkClientJar = new File(zkClientJarFile);
+      ParentLastURLClassLoader c1 = new ParentLastURLClassLoader(new URL[] {
+        kafkaJar_07.toURI().toURL(),
+        zkClientJar.toURI().toURL()
+      });
+
+      /** Construct the 07 consumer config **/
+      ConsumerConfig_07 = c1.loadClass(KAFKA_07_CONSUMER_CONFIG_CLASS_NAME);
+      KafkaStaticConsumer_07 = c1.loadClass(KAFKA_07_STATIC_CONSUMER_CLASS_NAME);
+      ConsumerConnector_07 = c1.loadClass(KAFKA_07_CONSUMER_CONNECTOR_CLASS_NAME);
+      KafkaStream_07 = c1.loadClass(KAFKA_07_CONSUMER_STREAM_CLASS_NAME);
+      TopicFilter_07 = c1.loadClass(KAFKA_07_TOPIC_FILTER_CLASS_NAME);
+      WhiteList_07 = c1.loadClass(KAFKA_07_WHITE_LIST_CLASS_NAME);
+      BlackList_07 = c1.loadClass(KAFKA_07_BLACK_LIST_CLASS_NAME);
+      KafkaMessageClass_07 = c1.loadClass(KAFKA_07_MESSAGE_CLASS_NAME);
+      KafkaConsumerIteratorClass_07 = c1.loadClass(KAFKA_07_CONSUMER_ITERATOR_CLASS_NAME);
+      KafkaMessageAndMetatDataClass_07 = c1.loadClass(KAFKA_07_MESSAGE_AND_METADATA_CLASS_NAME);
+
+      Constructor ConsumerConfigConstructor_07 = ConsumerConfig_07.getConstructor(Properties.class);
+      Properties kafkaConsumerProperties_07 = new Properties();
+      kafkaConsumerProperties_07.load(new FileInputStream(consumerConfigFile_07));
+      /** Disable shallow iteration because the message format is different between 07 and 08, we have to get each individual message **/
+      if(kafkaConsumerProperties_07.getProperty(&quot;shallow.iterator.enable&quot;, &quot;&quot;).equals(&quot;true&quot;)) {
+        logger.warn(&quot;Shallow iterator should not be used in the migration tool&quot;);
+        kafkaConsumerProperties_07.setProperty(&quot;shallow.iterator.enable&quot;, &quot;false&quot;);
+      }
+      Object consumerConfig_07 = ConsumerConfigConstructor_07.newInstance(kafkaConsumerProperties_07);
+
+      /** Construct the 07 consumer connector **/
+      Method ConsumerConnectorCreationMethod_07 = KafkaStaticConsumer_07.getMethod(&quot;createJavaConsumerConnector&quot;, ConsumerConfig_07);
+      final Object consumerConnector_07 = ConsumerConnectorCreationMethod_07.invoke(null, consumerConfig_07);
+      Method ConsumerConnectorCreateMessageStreamsMethod_07 = ConsumerConnector_07.getMethod(
+        &quot;createMessageStreamsByFilter&quot;,
+        TopicFilter_07, int.class);
+      final Method ConsumerConnectorShutdownMethod_07 = ConsumerConnector_07.getMethod(&quot;shutdown&quot;);
+      Constructor WhiteListConstructor_07 = WhiteList_07.getConstructor(String.class);
+      Constructor BlackListConstructor_07 = BlackList_07.getConstructor(String.class);
+      Object filterSpec = null;
+      if(options.has(whitelistOpt))
+        filterSpec = WhiteListConstructor_07.newInstance(options.valueOf(whitelistOpt));
+      else
+        filterSpec = BlackListConstructor_07.newInstance(options.valueOf(blacklistOpt));
+
+      Object retKafkaStreams = ConsumerConnectorCreateMessageStreamsMethod_07.invoke(consumerConnector_07, filterSpec, numConsumers);
+
+      Properties kafkaProducerProperties_08 = new Properties();
+      kafkaProducerProperties_08.load(new FileInputStream(producerConfigFile_08));
+      kafkaProducerProperties_08.setProperty(&quot;serializer.class&quot;, &quot;kafka.serializer.DefaultEncoder&quot;);
+      // create a producer channel instead
+      int queueSize = options.valueOf(queueSizeOpt);
+      ProducerDataChannel&lt;KeyedMessage&lt;byte[], byte[]&gt;&gt; producerDataChannel = new ProducerDataChannel&lt;KeyedMessage&lt;byte[], byte[]&gt;&gt;(queueSize);
+      int threadId = 0;
+
+      Runtime.getRuntime().addShutdownHook(new Thread() {
+        @Override
+        public void run() {
+          try {
+            ConsumerConnectorShutdownMethod_07.invoke(consumerConnector_07);
+          } catch(Exception e) {
+            logger.error(&quot;Error while shutting down Kafka consumer&quot;, e);
+          }
+          for(MigrationThread migrationThread : migrationThreads) {
+            migrationThread.shutdown();
+          }
+          for(ProducerThread producerThread : producerThreads) {
+            producerThread.shutdown();
+          }
+          for(ProducerThread producerThread : producerThreads) {
+            producerThread.awaitShutdown();
+          }
+          logger.info(&quot;Kafka migration tool shutdown successfully&quot;);
+        }
+      });
+
+      // start consumer threads
+      for(Object stream: (List)retKafkaStreams) {
+        MigrationThread thread = new MigrationThread(stream, producerDataChannel, threadId);
+        threadId ++;
+        thread.start();
+        migrationThreads.add(thread);
+      }
+
+      String clientId = kafkaProducerProperties_08.getProperty(&quot;client.id&quot;);
+      // start producer threads
+      for (int i = 0; i &lt; numProducers; i++) {
+        kafkaProducerProperties_08.put(&quot;client.id&quot;, clientId + &quot;-&quot; + i);
+        ProducerConfig producerConfig_08 = new ProducerConfig(kafkaProducerProperties_08);
+        Producer producer = new Producer(producerConfig_08);
+        ProducerThread producerThread = new ProducerThread(producerDataChannel, producer, i);
+        producerThread.start();
+        producerThreads.add(producerThread);
+      }
+    }
+    catch (Throwable e){
+      System.out.println(&quot;Kafka migration tool failed due to: &quot; + Utils.stackTrace(e));
+      logger.error(&quot;Kafka migration tool failed: &quot;, e);
+    }
+  }
+
+  private static void checkRequiredArgs(OptionParser parser, OptionSet options, OptionSpec[] required) throws IOException {
+    for(OptionSpec arg : required) {
+      if(!options.has(arg)) {
+        System.err.println(&quot;Missing required argument \&quot;&quot; + arg + &quot;\&quot;&quot;);
+        parser.printHelpOn(System.err);
+        System.exit(1);
+      }
+    }
+  }
+
+  static class ProducerDataChannel&lt;T&gt; {
+    private final int producerQueueSize;
+    private final BlockingQueue&lt;T&gt; producerRequestQueue;
+
+    public ProducerDataChannel(int queueSize) {
+      producerQueueSize = queueSize;
+      producerRequestQueue = new ArrayBlockingQueue&lt;T&gt;(producerQueueSize);
+    }
+
+    public void sendRequest(T data) throws InterruptedException {
+      producerRequestQueue.put(data);
+    }
+
+    public T receiveRequest() throws InterruptedException {
+      return producerRequestQueue.take();
+    }
+  }
+
+  private static class MigrationThread extends Thread {
+    private final Object stream;
+    private final ProducerDataChannel&lt;KeyedMessage&lt;byte[], byte[]&gt;&gt; producerDataChannel;
+    private final int threadId;
+    private final String threadName;
+    private final org.apache.log4j.Logger logger;
+    private CountDownLatch shutdownComplete = new CountDownLatch(1);
+    private final AtomicBoolean isRunning = new AtomicBoolean(true);
+
+    MigrationThread(Object _stream, ProducerDataChannel&lt;KeyedMessage&lt;byte[], byte[]&gt;&gt; _producerDataChannel, int _threadId) {
+      stream = _stream;
+      producerDataChannel = _producerDataChannel;
+      threadId = _threadId;
+      threadName = &quot;MigrationThread-&quot; + threadId;
+      logger = org.apache.log4j.Logger.getLogger(MigrationThread.class.getName());
+      this.setName(threadName);
+    }
+
+    public void run() {
+      try {
+        Method MessageGetPayloadMethod_07 = KafkaMessageClass_07.getMethod(&quot;payload&quot;);
+        Method KafkaGetMessageMethod_07 = KafkaMessageAndMetatDataClass_07.getMethod(&quot;message&quot;);
+        Method KafkaGetTopicMethod_07 = KafkaMessageAndMetatDataClass_07.getMethod(&quot;topic&quot;);
+        Method ConsumerIteratorMethod = KafkaStream_07.getMethod(&quot;iterator&quot;);
+        Method KafkaStreamHasNextMethod_07 = KafkaConsumerIteratorClass_07.getMethod(&quot;hasNext&quot;);
+        Method KafkaStreamNextMethod_07 = KafkaConsumerIteratorClass_07.getMethod(&quot;next&quot;);
+        Object iterator = ConsumerIteratorMethod.invoke(stream);
+
+        while (((Boolean) KafkaStreamHasNextMethod_07.invoke(iterator)).booleanValue()) {
+          Object messageAndMetaData_07 = KafkaStreamNextMethod_07.invoke(iterator);
+          Object message_07 = KafkaGetMessageMethod_07.invoke(messageAndMetaData_07);
+          Object topic = KafkaGetTopicMethod_07.invoke(messageAndMetaData_07);
+          Object payload_07 = MessageGetPayloadMethod_07.invoke(message_07);
+          int size = ((ByteBuffer)payload_07).remaining();
+          byte[] bytes = new byte[size];
+          ((ByteBuffer)payload_07).get(bytes);
+          if(logger.isDebugEnabled())
+            logger.debug(&quot;Migration thread &quot; + threadId + &quot; sending message of size &quot; + bytes.length + &quot; to topic &quot;+ topic);
+          KeyedMessage&lt;byte[], byte[]&gt; producerData = new KeyedMessage((String)topic, null, bytes);
+          producerDataChannel.sendRequest(producerData);
+        }
+        logger.info(&quot;Migration thread &quot; + threadName + &quot; finished running&quot;);
+      } catch (InvocationTargetException t){
+        logger.fatal(&quot;Migration thread failure due to root cause &quot;, t.getCause());
+      } catch (Throwable t){
+        logger.fatal(&quot;Migration thread failure due to &quot;, t);
+      } finally {
+        shutdownComplete.countDown();
+      }
+    }
+
+    public void shutdown() {
+      logger.info(&quot;Migration thread &quot; + threadName + &quot; shutting down&quot;);
+      isRunning.set(false);
+      interrupt();
+      try {
+        shutdownComplete.await();
+      } catch(InterruptedException ie) {
+        logger.warn(&quot;Interrupt during shutdown of MigrationThread&quot;, ie);
+      }
+      logger.info(&quot;Migration thread &quot; + threadName + &quot; shutdown complete&quot;);
+    }
+  }
+
+  static class ProducerThread extends Thread {
+    private final ProducerDataChannel&lt;KeyedMessage&lt;byte[], byte[]&gt;&gt; producerDataChannel;
+    private final Producer&lt;byte[], byte[]&gt; producer;
+    private final int threadId;
+    private String threadName;
+    private org.apache.log4j.Logger logger;
+    private CountDownLatch shutdownComplete = new CountDownLatch(1);
+    private KeyedMessage&lt;byte[], byte[]&gt; shutdownMessage = new KeyedMessage(&quot;shutdown&quot;, null, null);
+
+    public ProducerThread(ProducerDataChannel&lt;KeyedMessage&lt;byte[], byte[]&gt;&gt; _producerDataChannel,
+                          Producer&lt;byte[], byte[]&gt; _producer,
+                          int _threadId) {
+      producerDataChannel = _producerDataChannel;
+      producer = _producer;
+      threadId = _threadId;
+      threadName = &quot;ProducerThread-&quot; + threadId;
+      logger = org.apache.log4j.Logger.getLogger(ProducerThread.class.getName());
+      this.setName(threadName);
+    }
+
+    public void run() {
+      try{
+        while(true) {
+          KeyedMessage&lt;byte[], byte[]&gt; data = producerDataChannel.receiveRequest();
+          if(!data.equals(shutdownMessage)) {
+            producer.send(data);
+            if(logger.isDebugEnabled()) logger.debug(&quot;Sending message %s&quot;.format(new String(data.message())));
+          }
+          else
+            break;
+        }
+        logger.info(&quot;Producer thread &quot; + threadName + &quot; finished running&quot;);
+      } catch (Throwable t){
+        logger.fatal(&quot;Producer thread failure due to &quot;, t);
+      } finally {
+        shutdownComplete.countDown();
+      }
+    }
+
+    public void shutdown() {
+      try {
+        logger.info(&quot;Producer thread &quot; + threadName + &quot; shutting down&quot;);
+        producerDataChannel.sendRequest(shutdownMessage);
+      } catch(InterruptedException ie) {
+        logger.warn(&quot;Interrupt during shutdown of ProducerThread&quot;, ie);
+      }
+    }
+
+    public void awaitShutdown() {
+      try {
+        shutdownComplete.await();
+        producer.close();
+        logger.info(&quot;Producer thread &quot; + threadName + &quot; shutdown complete&quot;);
+      } catch(InterruptedException ie) {
+        logger.warn(&quot;Interrupt during shutdown of ProducerThread&quot;, ie);
+      }
+    }
+  }
+
+  /**
+   * A parent-last class loader that will try the child class loader first and then the parent.
+   * This takes a fair bit of doing because java really prefers parent-first.
+   */
+  private static class ParentLastURLClassLoader extends ClassLoader {
+    private ChildURLClassLoader childClassLoader;
+
+    /**
+     * This class allows me to call findClass on a class loader
+     */
+    private static class FindClassClassLoader extends ClassLoader {
+      public FindClassClassLoader(ClassLoader parent) {
+        super(parent);
+      }
+      @Override
+      public Class&lt;?&gt; findClass(String name) throws ClassNotFoundException {
+        return super.findClass(name);
+      }
+    }
+
+    /**
+     * This class delegates (child then parent) for the findClass method for a URLClassLoader.
+     * We need this because findClass is protected in URLClassLoader
+     */
+    private static class ChildURLClassLoader extends URLClassLoader {
+      private FindClassClassLoader realParent;
+      public ChildURLClassLoader( URL[] urls, FindClassClassLoader realParent) {
+        super(urls, null);
+        this.realParent = realParent;
+      }
+
+      @Override
+      public Class&lt;?&gt; findClass(String name) throws ClassNotFoundException {
+        try{
+          // first try to use the URLClassLoader findClass
+          return super.findClass(name);
+        }
+        catch( ClassNotFoundException e ) {
+          // if that fails, we ask our real parent class loader to load the class (we give up)
+          return realParent.loadClass(name);
+        }
+      }
+    }
+
+    public ParentLastURLClassLoader(URL[] urls) {
+      super(Thread.currentThread().getContextClassLoader());
+      childClassLoader = new ChildURLClassLoader(urls, new FindClassClassLoader(this.getParent()));
+    }
+
+    @Override
+    protected synchronized Class&lt;?&gt; loadClass(String name, boolean resolve) throws ClassNotFoundException {
+      try {
+        // first we try to find a class inside the child class loader
+        return childClassLoader.findClass(name);
+      }
+      catch( ClassNotFoundException e ) {
+        // didn't find it, try the parent
+        return super.loadClass(name, resolve);
+      }
+    }
+  }
+}
+
+
+        </pre>
+    </body>
+</html>

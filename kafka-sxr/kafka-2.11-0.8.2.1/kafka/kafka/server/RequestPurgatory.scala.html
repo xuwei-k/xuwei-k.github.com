@@ -1,0 +1,364 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/server/RequestPurgatory.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+
+package kafka.server
+
+import kafka.network._
+import kafka.utils._
+import kafka.metrics.KafkaMetricsGroup
+
+import java.util
+import java.util.concurrent._
+import java.util.concurrent.atomic._
+import scala.collection._
+
+import com.yammer.metrics.core.Gauge
+
+
+<span class="comment">/**
+ * A request whose processing needs to be delayed for at most the given delayMs
+ * The associated keys are used for bookeeping, and represent the &quot;trigger&quot; that causes this request to check if it is satisfied,
+ * for example a key could be a (topic, partition) pair.
+ */</span>
+class <a title="class DelayedRequest extends kafka.utils.DelayedItem[kafka.network.RequestChannel.Request]" id="kafka.server;DelayedRequest">DelayedRequest</a><a href="#kafka.server;DelayedRequest" title="kafka.server.DelayedRequest" class="delimiter">(</a>val <a title="Seq[Any]" id="kafka.server;DelayedRequest.keys">keys</a>: <span title="Seq[Any]">Seq</span><span class="delimiter">[</span>Any<span class="delimiter">]</span>, val <a title="kafka.network.RequestChannel.Request" id="kafka.server;DelayedRequest.request">request</a>: RequestChannel.<a href="../network/RequestChannel.scala.html#kafka.network.RequestChannel;Request" title="kafka.network.RequestChannel.Request">Request</a>, <a title="Long" id="kafka.server;DelayedRequest.delayMs">delayMs</a>: <span title="Long">Long</span><span class="delimiter">)</span> extends <a href="../utils/DelayedItem.scala.html#kafka.utils;DelayedItem" title="kafka.utils.DelayedItem[kafka.network.RequestChannel.Request]">DelayedItem</a><span class="delimiter">[</span>RequestChannel.Request<span class="delimiter">]</span><span class="delimiter">(</span><a href="#kafka.server;DelayedRequest.request" title="kafka.network.RequestChannel.Request">request</a>, <a href="#kafka.server;DelayedRequest.delayMs" title="Long">delayMs</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+  val <a title="java.util.concurrent.atomic.AtomicBoolean" id="kafka.server;DelayedRequest.satisfied">satisfied</a> = new <span title="java.util.concurrent.atomic.AtomicBoolean">AtomicBoolean</span><span class="delimiter">(</span>false<span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * A helper class for dealing with asynchronous requests with a timeout. A DelayedRequest has a request to delay
+ * and also a list of keys that can trigger the action. Implementations can add customized logic to control what it means for a given
+ * request to be satisfied. For example it could be that we are waiting for user-specified number of acks on a given (topic, partition)
+ * to be able to respond to a request or it could be that we are waiting for a given number of bytes to accumulate on a given request
+ * to be able to respond to that request (in the simple case we might wait for at least one byte to avoid busy waiting).
+ *
+ * For us the key is generally a (topic, partition) pair.
+ * By calling 
+ *   val isSatisfiedByMe = checkAndMaybeWatch(delayedRequest)
+ * we will check if a request is satisfied already, and if not add the request for watch on all its keys.
+ *
+ * It is up to the user to then call
+ *   val satisfied = update(key, request) 
+ * when a request relevant to the given key occurs. This triggers bookeeping logic and returns back any requests satisfied by this
+ * new request.
+ *
+ * An implementation provides extends two helper functions
+ *   def checkSatisfied(request: R, delayed: T): Boolean
+ * this function returns true if the given request (in combination with whatever previous requests have happened) satisfies the delayed
+ * request delayed. This method will likely also need to do whatever bookkeeping is necessary.
+ *
+ * The second function is
+ *   def expire(delayed: T)
+ * this function handles delayed requests that have hit their time limit without being satisfied.
+ *
+ */</span>
+abstract class <a title="class RequestPurgatory[T &lt;: kafka.server.DelayedRequest] extends AnyRef with kafka.utils.Logging with kafka.metrics.KafkaMetricsGroup" id="kafka.server.RequestPurgatory">RequestPurgatory</a><span class="delimiter">[</span><a title=" &lt;: kafka.server.DelayedRequest" id="kafka.server.RequestPurgatory.<init>$default$2;T">T</a> &lt;: DelayedRequest<span class="delimiter">]</span><a href="#kafka.server.RequestPurgatory" title="kafka.server.RequestPurgatory[T]" class="delimiter">(</a><a title="Int" id="kafka.server.RequestPurgatory.<init>$default$1">brokerId</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span>, <a title="Int" id="kafka.server.RequestPurgatory.<init>$default$2">purgeInterval</a>: <span title="Int">Int</span> = <span title="Int(1000)" class="int">1000</span><span class="delimiter">)</span>
+        extends <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> with <a href="../metrics/KafkaMetricsGroup.scala.html#kafka.metrics;KafkaMetricsGroup" title="kafka.metrics.KafkaMetricsGroup">KafkaMetricsGroup</a> <span class="delimiter">{</span>
+
+  <span class="comment">/* a list of requests watching each key */</span>
+  private val <a title="kafka.utils.Pool[Any,RequestPurgatory.this.Watchers]" id="kafka.server;RequestPurgatory.watchersForKey">watchersForKey</a> = new <a href="../utils/Pool.scala.html#kafka.utils;Pool" title="kafka.utils.Pool[Any,RequestPurgatory.this.Watchers]">Pool</a><span class="delimiter">[</span>Any, Watchers<span class="delimiter">]</span><span class="delimiter">(</span><span title="(x: Any =&gt; RequestPurgatory.this.Watchers)Some[Any =&gt; RequestPurgatory.this.Watchers]">Some</span><span class="delimiter">(</span><span class="delimiter">(</span>key: <span title="Any">Any</span><span class="delimiter">)</span> =&gt; new <a href="#kafka.server;RequestPurgatory;Watchers" title="RequestPurgatory.this.Watchers">Watchers</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/* background thread expiring requests that have been waiting too long */</span>
+  private val <a title="RequestPurgatory.this.ExpiredRequestReaper" id="kafka.server;RequestPurgatory.expiredRequestReaper">expiredRequestReaper</a> = new <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper" title="RequestPurgatory.this.ExpiredRequestReaper">ExpiredRequestReaper</a>
+  private val <a title="Thread" id="kafka.server;RequestPurgatory.expirationThread">expirationThread</a> = <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Utils.scala.html#kafka.utils.Utils.newThread(dc18ba96a6)" title="(name: String, runnable: Runnable, daemon: Boolean)Thread">newThread</a><span class="delimiter">(</span>name=<span title="String(&quot;request-expiration-task&quot;)" class="string">&quot;request-expiration-task&quot;</span>, runnable=<a href="#kafka.server;RequestPurgatory.expiredRequestReaper" title="=&gt; RequestPurgatory.this.ExpiredRequestReaper">expiredRequestReaper</a>, daemon=false<span class="delimiter">)</span>
+
+  <a href="../metrics/KafkaMetricsGroup.scala.html#kafka.metrics;KafkaMetricsGroup.newGauge" title="(name: String, metric: com.yammer.metrics.core.Gauge[Int], tags: scala.collection.Map[String,String])com.yammer.metrics.core.Gauge[Int]">newGauge</a><span class="delimiter">(</span>
+    <span title="String(&quot;PurgatorySize&quot;)" class="string">&quot;PurgatorySize&quot;</span>,
+    new <span title="&lt;$anon: com.yammer.metrics.core.Gauge[Int]&gt; extends com.yammer.metrics.core.Gauge[Int]">Gauge</span><span class="delimiter">[</span>Int<span class="delimiter">]</span> <span class="delimiter">{</span>
+      def <span title="()Int">value</span> = <a href="#kafka.server;RequestPurgatory.watched" title="()Int">watched</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">)</span>
+
+  <a href="../metrics/KafkaMetricsGroup.scala.html#kafka.metrics;KafkaMetricsGroup.newGauge" title="(name: String, metric: com.yammer.metrics.core.Gauge[Int], tags: scala.collection.Map[String,String])com.yammer.metrics.core.Gauge[Int]">newGauge</a><span class="delimiter">(</span>
+    <span title="String(&quot;NumDelayedRequests&quot;)" class="string">&quot;NumDelayedRequests&quot;</span>,
+    new <span title="&lt;$anon: com.yammer.metrics.core.Gauge[Int]&gt; extends com.yammer.metrics.core.Gauge[Int]">Gauge</span><span class="delimiter">[</span>Int<span class="delimiter">]</span> <span class="delimiter">{</span>
+      def <span title="()Int">value</span> = <a href="#kafka.server;RequestPurgatory.delayed" title="()Int">delayed</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">)</span>
+
+  <a href="#kafka.server;RequestPurgatory.expirationThread" title="=&gt; Thread">expirationThread</a>.<span title="()Unit">start</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Is this request satisfied by the caller thread?
+   */</span>
+  private def <a title="(delayedRequest: T)Boolean" id="kafka.server;RequestPurgatory.isSatisfiedByMe">isSatisfiedByMe</a><span class="delimiter">(</span><a title="T" id="kafka.server;RequestPurgatory.isSatisfiedByMe.delayedRequest">delayedRequest</a>: <a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.isSatisfiedByMe.delayedRequest" title="T">delayedRequest</a>.<a href="#kafka.server;DelayedRequest.satisfied" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">satisfied</a>.<span title="(x$1: Boolean, x$2: Boolean)Boolean">compareAndSet</span><span class="delimiter">(</span>false, true<span class="delimiter">)</span><span class="delimiter">)</span>
+      return true
+    else
+      return false
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Try to add the request for watch on all keys. Return true iff the request is
+   * satisfied and the satisfaction is done by the caller.
+   */</span>
+  def <a title="(delayedRequest: T)Boolean" id="kafka.server;RequestPurgatory.checkAndMaybeWatch">checkAndMaybeWatch</a><span class="delimiter">(</span><a title="T" id="kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest">delayedRequest</a>: <a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a>.<a href="#kafka.server;DelayedRequest.keys" title="=&gt; Seq[Any]">keys</a>.<span title="=&gt; Int">size</span> <span title="(x: Int)Boolean">&lt;=</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      return <a href="#kafka.server;RequestPurgatory.isSatisfiedByMe" title="(delayedRequest: T)Boolean">isSatisfiedByMe</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a><span class="delimiter">)</span>
+
+    <span class="comment">// The cost of checkSatisfied() is typically proportional to the number of keys. Calling</span>
+    <span class="comment">// checkSatisfied() for each key is going to be expensive if there are many keys. Instead,</span>
+    <span class="comment">// we do the check in the following way. Call checkSatisfied(). If the request is not satisfied,</span>
+    <span class="comment">// we just add the request to all keys. Then we call checkSatisfied() again. At this time, if</span>
+    <span class="comment">// the request is still not satisfied, we are guaranteed that it won't miss any future triggering</span>
+    <span class="comment">// events since the request is already on the watcher list for all keys. This does mean that</span>
+    <span class="comment">// if the request is satisfied (by another thread) between the two checkSatisfied() calls, the</span>
+    <span class="comment">// request is unnecessarily added for watch. However, this is a less severe issue since the</span>
+    <span class="comment">// expire reaper will clean it up periodically.</span>
+
+    var isSatisfied = <a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a> <a title="Boolean" id="kafka.server;RequestPurgatory.checkAndMaybeWatch.isSatisfied">synchronized</a> <a href="#kafka.server;RequestPurgatory.checkSatisfied" title="(request: T)Boolean">checkSatisfied</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.isSatisfied" title="Boolean">isSatisfied</a><span class="delimiter">)</span>
+      return <a href="#kafka.server;RequestPurgatory.isSatisfiedByMe" title="(delayedRequest: T)Boolean">isSatisfiedByMe</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a><span class="delimiter">)</span>
+
+    for<span class="delimiter">(</span><a title="Any" id="kafka.server;RequestPurgatory.checkAndMaybeWatch.$anonfun.key">key</a> &lt;- <a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a>.<a href="#kafka.server;DelayedRequest.keys" title="(f: Any =&gt; Unit)Unit">keys</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a title="RequestPurgatory.this.Watchers" id="kafka.server;RequestPurgatory.checkAndMaybeWatch.$anonfun.lst">lst</a> = <a href="#kafka.server;RequestPurgatory.watchersFor" title="(key: Any)RequestPurgatory.this.Watchers">watchersFor</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.$anonfun.key" title="Any">key</a><span class="delimiter">)</span>
+      if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.$anonfun.lst" title="RequestPurgatory.this.Watchers">lst</a>.<a href="#kafka.server;RequestPurgatory;Watchers.addIfNotSatisfied" title="(t: T)Boolean">addIfNotSatisfied</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <span class="comment">// The request is already satisfied by another thread. No need to watch for the rest of</span>
+        <span class="comment">// the keys.</span>
+        return false
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.isSatisfied" title="Boolean">isSatisfied</a> = <a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a> <span title="(x$1: Boolean)Boolean">synchronized</span> <a href="#kafka.server;RequestPurgatory.checkSatisfied" title="(request: T)Boolean">checkSatisfied</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.isSatisfied" title="Boolean">isSatisfied</a><span class="delimiter">)</span>
+      return <a href="#kafka.server;RequestPurgatory.isSatisfiedByMe" title="(delayedRequest: T)Boolean">isSatisfiedByMe</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a><span class="delimiter">)</span>
+    else <span class="delimiter">{</span>
+      <span class="comment">// If the request is still not satisfied, add to the expire queue also.</span>
+      <a href="#kafka.server;RequestPurgatory.expiredRequestReaper" title="=&gt; RequestPurgatory.this.ExpiredRequestReaper">expiredRequestReaper</a>.<a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.enqueue" title="(t: T)Unit">enqueue</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.checkAndMaybeWatch.delayedRequest" title="T">delayedRequest</a><span class="delimiter">)</span>
+
+      return false
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Update any watchers and return a list of newly satisfied requests.
+   */</span>
+  def <a title="(key: Any)Seq[T]" id="kafka.server;RequestPurgatory.update">update</a><span class="delimiter">(</span><a title="Any" id="kafka.server;RequestPurgatory.update.key">key</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Seq[T]">Seq</span><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    val <a title="RequestPurgatory.this.Watchers" id="kafka.server;RequestPurgatory.update.w">w</a> = <a href="#kafka.server;RequestPurgatory.watchersForKey" title="=&gt; kafka.utils.Pool[Any,RequestPurgatory.this.Watchers]">watchersForKey</a>.<a href="../utils/Pool.scala.html#kafka.utils;Pool.get" title="(key: Any)RequestPurgatory.this.Watchers">get</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.update.key" title="Any">key</a><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.update.w" title="RequestPurgatory.this.Watchers">w</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span>
+      <span title="scala.collection.Seq.type">Seq</span>.<span title="Seq[Nothing]">empty</span>
+    else
+      <a href="#kafka.server;RequestPurgatory.update.w" title="RequestPurgatory.this.Watchers">w</a>.<a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests" title="()Seq[T]">collectSatisfiedRequests</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/*
+   * Return the size of the watched lists in the purgatory, which is the size of watch lists.
+   * Since an operation may still be in the watch lists even when it has been completed,
+   * this number may be larger than the number of real operations watched
+   */</span>
+  def <a title="()Int" id="kafka.server;RequestPurgatory.watched">watched</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#kafka.server;RequestPurgatory.watchersForKey" title="=&gt; kafka.utils.Pool[Any,RequestPurgatory.this.Watchers]">watchersForKey</a>.<a href="../utils/Pool.scala.html#kafka.utils;Pool.values" title="=&gt; Iterable[RequestPurgatory.this.Watchers]">values</a>.<span title="(f: RequestPurgatory.this.Watchers =&gt; Int)(implicit bf: scala.collection.generic.CanBuildFrom[Iterable[RequestPurgatory.this.Watchers],Int,Iterable[Int]])Iterable[Int]">map</span><span title="scala.collection.generic.CanBuildFrom[scala.collection.Iterable.Coll,Int,Iterable[Int]]" class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.watched.$anonfun.x$1" title="RequestPurgatory.this.Watchers">_</a>.<a href="#kafka.server;RequestPurgatory;Watchers.watched" title="()Int">watched</a><span class="delimiter">)</span>.<span title="(implicit num: Numeric[Int])Int">sum</span>
+
+  <span class="comment">/*
+   * Return the number of requests in the expiry reaper's queue
+   */</span>
+  def <a title="()Int" id="kafka.server;RequestPurgatory.delayed">delayed</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#kafka.server;RequestPurgatory.expiredRequestReaper" title="=&gt; RequestPurgatory.this.ExpiredRequestReaper">expiredRequestReaper</a>.<a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.delayed" title="()Int">delayed</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">/*
+   * Return the watch list for the given watch key
+   */</span>
+  private def <a title="(key: Any)RequestPurgatory.this.Watchers" id="kafka.server;RequestPurgatory.watchersFor">watchersFor</a><span class="delimiter">(</span><a title="Any" id="kafka.server;RequestPurgatory.watchersFor.key">key</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#kafka.server;RequestPurgatory.watchersForKey" title="=&gt; kafka.utils.Pool[Any,RequestPurgatory.this.Watchers]">watchersForKey</a>.<a href="../utils/Pool.scala.html#kafka.utils;Pool.getAndMaybePut" title="(key: Any)RequestPurgatory.this.Watchers">getAndMaybePut</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory.watchersFor.key" title="Any">key</a><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Check if this delayed request is already satisfied
+   */</span>
+  protected def <a title="(request: T)Boolean" id="kafka.server;RequestPurgatory.checkSatisfied">checkSatisfied</a><span class="delimiter">(</span><a title="T" id="kafka.server;RequestPurgatory.checkSatisfied.request">request</a>: <a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span>
+
+  <span class="comment">/**
+   * Handle an expired delayed request
+   */</span>
+  protected def <a title="(delayed: T)Unit" id="kafka.server;RequestPurgatory.expire">expire</a><span class="delimiter">(</span><a title="T" id="kafka.server;RequestPurgatory.expire.delayed">delayed</a>: <a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Shutdown the expire reaper thread
+   */</span>
+  def <a title="()Unit" id="kafka.server;RequestPurgatory.shutdown">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#kafka.server;RequestPurgatory.expiredRequestReaper" title="=&gt; RequestPurgatory.this.ExpiredRequestReaper">expiredRequestReaper</a>.<a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.shutdown" title="()Unit">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * A linked list of DelayedRequests watching some key with some associated
+   * bookkeeping logic.
+   */</span>
+  private class <a title="class Watchers extends AnyRef" id="kafka.server;RequestPurgatory;Watchers">Watchers</a> <a href="#kafka.server;RequestPurgatory;Watchers" title="RequestPurgatory.this.Watchers" class="delimiter">{</a>
+    private val <a title="java.util.LinkedList[T]" id="kafka.server;RequestPurgatory;Watchers.requests">requests</a> = new util.<span title="java.util.LinkedList[T]">LinkedList</span><span class="delimiter">[</span>T<span class="delimiter">]</span>
+
+    <span class="comment">// return the size of the watch list</span>
+    def <a title="()Int" id="kafka.server;RequestPurgatory;Watchers.watched">watched</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#kafka.server;RequestPurgatory;Watchers.requests" title="=&gt; java.util.LinkedList[T]">requests</a>.<span title="()Int">size</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+    <span class="comment">// add the element to the watcher list if it's not already satisfied</span>
+    def <a title="(t: T)Boolean" id="kafka.server;RequestPurgatory;Watchers.addIfNotSatisfied">addIfNotSatisfied</a><span class="delimiter">(</span><a title="T" id="kafka.server;RequestPurgatory;Watchers.addIfNotSatisfied.t">t</a>: <a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.addIfNotSatisfied.t" title="T">t</a>.<a href="#kafka.server;DelayedRequest.satisfied" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">satisfied</a>.<span title="()Boolean">get</span><span class="delimiter">)</span>
+        return false
+
+      <a href="#kafka.server;RequestPurgatory;Watchers" title="(x$1: Boolean)Boolean">synchronized</a> <span class="delimiter">{</span>
+        <a href="#kafka.server;RequestPurgatory;Watchers.requests" title="=&gt; java.util.LinkedList[T]">requests</a>.<span title="(x$1: T)Boolean">add</span><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.addIfNotSatisfied.t" title="T">t</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      return true
+    <span class="delimiter">}</span>
+
+    <span class="comment">// traverse the list and purge satisfied elements</span>
+    def <a title="()Int" id="kafka.server;RequestPurgatory;Watchers.purgeSatisfied">purgeSatisfied</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+      <a href="#kafka.server;RequestPurgatory;Watchers" title="(x$1: Int)Int">synchronized</a> <span class="delimiter">{</span>
+        val <a title="java.util.Iterator[T]" id="kafka.server;RequestPurgatory;Watchers.purgeSatisfied.iter">iter</a> = <a href="#kafka.server;RequestPurgatory;Watchers.requests" title="=&gt; java.util.LinkedList[T]">requests</a>.<span title="()java.util.Iterator[T]">iterator</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        var <a title="Int" id="kafka.server;RequestPurgatory;Watchers.purgeSatisfied.purged">purged</a> = <span title="Int(0)" class="int">0</span>
+        while<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied.iter" title="java.util.Iterator[T]">iter</a>.<span title="()Boolean">hasNext</span><span class="delimiter">)</span> <a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied.while$1" title="()Unit" class="delimiter">{</a>
+          val <a title="T" id="kafka.server;RequestPurgatory;Watchers.purgeSatisfied.curr">curr</a> = <a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied.iter" title="java.util.Iterator[T]">iter</a>.<span title="()T">next</span>
+          if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied.curr" title="T">curr</a>.<a href="#kafka.server;DelayedRequest.satisfied" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">satisfied</a>.<span title="()Boolean">get</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied.iter" title="java.util.Iterator[T]">iter</a>.<span title="()Unit">remove</span><span class="delimiter">(</span><span class="delimiter">)</span>
+            <a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied.purged" title="Int">purged</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied.purged" title="Int">purged</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">// traverse the list and try to satisfy watched elements</span>
+    def <a title="()Seq[T]" id="kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests">collectSatisfiedRequests</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Seq[T]">Seq</span><span class="delimiter">[</span>T<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      val <a title="scala.collection.mutable.ArrayBuffer[T]" id="kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.response">response</a> = new mutable.<span title="scala.collection.mutable.ArrayBuffer[T]">ArrayBuffer</span><span class="delimiter">[</span>T<span class="delimiter">]</span>
+      <a href="#kafka.server;RequestPurgatory;Watchers" title="(x$1: Unit)Unit">synchronized</a> <span class="delimiter">{</span>
+        val <a title="java.util.Iterator[T]" id="kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.iter">iter</a> = <a href="#kafka.server;RequestPurgatory;Watchers.requests" title="=&gt; java.util.LinkedList[T]">requests</a>.<span title="()java.util.Iterator[T]">iterator</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        while<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.iter" title="java.util.Iterator[T]">iter</a>.<span title="()Boolean">hasNext</span><span class="delimiter">)</span> <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.while$2" title="()Unit" class="delimiter">{</a>
+          val <a title="T" id="kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.curr">curr</a> = <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.iter" title="java.util.Iterator[T]">iter</a>.<span title="()T">next</span>
+          if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.curr" title="T">curr</a>.<a href="#kafka.server;DelayedRequest.satisfied" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">satisfied</a>.<span title="()Boolean">get</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <span class="comment">// another thread has satisfied this request, remove it</span>
+            <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.iter" title="java.util.Iterator[T]">iter</a>.<span title="()Unit">remove</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span> else <span class="delimiter">{</span>
+            <span class="comment">// synchronize on curr to avoid any race condition with expire</span>
+            <span class="comment">// on client-side.</span>
+            val satisfied = <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.curr" title="T">curr</a> <a title="Boolean" id="kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.satisfied">synchronized</a> <a href="#kafka.server;RequestPurgatory.checkSatisfied" title="(request: T)Boolean">checkSatisfied</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.curr" title="T">curr</a><span class="delimiter">)</span>
+            if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.satisfied" title="Boolean">satisfied</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+              <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.iter" title="java.util.Iterator[T]">iter</a>.<span title="()Unit">remove</span><span class="delimiter">(</span><span class="delimiter">)</span>
+              val <a title="Boolean" id="kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.updated">updated</a> = <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.curr" title="T">curr</a>.<a href="#kafka.server;DelayedRequest.satisfied" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">satisfied</a>.<span title="(x$1: Boolean, x$2: Boolean)Boolean">compareAndSet</span><span class="delimiter">(</span>false, true<span class="delimiter">)</span>
+              if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.updated" title="Boolean">updated</a> <span title="(x: Boolean)Boolean">==</span> true<span class="delimiter">)</span> <span class="delimiter">{</span>
+                <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.response" title="scala.collection.mutable.ArrayBuffer[T]">response</a> <span title="(elem: T)response.type">+=</span> <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.curr" title="T">curr</a>
+              <span class="delimiter">}</span>
+            <span class="delimiter">}</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      <a href="#kafka.server;RequestPurgatory;Watchers.collectSatisfiedRequests.response" title="scala.collection.mutable.ArrayBuffer[T]">response</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Runnable to expire requests that have sat unfullfilled past their deadline
+   */</span>
+  private class <a title="class ExpiredRequestReaper extends Object with Runnable with kafka.utils.Logging" id="kafka.server;RequestPurgatory;ExpiredRequestReaper">ExpiredRequestReaper</a> extends <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper" title="Runnable">Runnable</a> with <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+    this.<a href="../utils/Logging.scala.html#kafka.utils;Logging.logIdent_=" title="(x$1: String)Unit">logIdent</a> = <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;ExpiredRequestReaper-%d &quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server.RequestPurgatory.<init>$default$1" title="Int">brokerId</a><span class="delimiter">)</span>
+    private val <a title="java.util.concurrent.atomic.AtomicBoolean" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.running">running</a> = new <span title="java.util.concurrent.atomic.AtomicBoolean">AtomicBoolean</span><span class="delimiter">(</span>true<span class="delimiter">)</span>
+    private val <a title="java.util.concurrent.CountDownLatch" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.shutdownLatch">shutdownLatch</a> = new <span title="java.util.concurrent.CountDownLatch">CountDownLatch</span><span class="delimiter">(</span><span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+
+    private val <a title="java.util.concurrent.DelayQueue[T]" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.delayedQueue">delayedQueue</a> = new <span title="java.util.concurrent.DelayQueue[T]">DelayQueue</span><span class="delimiter">[</span>T<span class="delimiter">]</span>
+
+    def <a title="()Int" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.delayed">delayed</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.delayedQueue" title="=&gt; java.util.concurrent.DelayQueue[T]">delayedQueue</a>.<span title="()Int">size</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    
+    <span class="comment">/** Main loop for the expiry thread */</span>
+    def <a title="()Unit" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.run">run</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      while<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.running" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">running</a>.<span title="()Boolean">get</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        try <span class="delimiter">{</span>
+          val <a title="T" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.run.curr">curr</a> = <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired" title="()T">pollExpired</a><span class="delimiter">(</span><span class="delimiter">)</span>
+          if <span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.run.curr" title="T">curr</a> <span title="(x$1: Any)Boolean">!=</span> null<span class="delimiter">)</span> <span class="delimiter">{</span>
+            <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.run.curr" title="T">curr</a> <span title="(x$1: Unit)Unit">synchronized</span> <span class="delimiter">{</span>
+              <a href="#kafka.server;RequestPurgatory.expire" title="(delayed: T)Unit">expire</a><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.run.curr" title="T">curr</a><span class="delimiter">)</span>
+            <span class="delimiter">}</span>
+          <span class="delimiter">}</span>
+          <span class="comment">// see if we need to purge the watch lists</span>
+          if <span class="delimiter">(</span><a href="#kafka.server.RequestPurgatory" title="RequestPurgatory.this.type">RequestPurgatory</a>.this.<a href="#kafka.server;RequestPurgatory.watched" title="()Int">watched</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(x: Int)Boolean">&gt;=</span> <a href="#kafka.server.RequestPurgatory.<init>$default$2" title="Int">purgeInterval</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Begin purging watch lists&quot;)" class="string">&quot;Begin purging watch lists&quot;</span><span class="delimiter">)</span>
+            val <a title="Int" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.run.numPurgedFromWatchers">numPurgedFromWatchers</a> = <a href="#kafka.server;RequestPurgatory.watchersForKey" title="=&gt; kafka.utils.Pool[Any,RequestPurgatory.this.Watchers]">watchersForKey</a>.<a href="../utils/Pool.scala.html#kafka.utils;Pool.values" title="=&gt; Iterable[RequestPurgatory.this.Watchers]">values</a>.<span title="(f: RequestPurgatory.this.Watchers =&gt; Int)(implicit bf: scala.collection.generic.CanBuildFrom[Iterable[RequestPurgatory.this.Watchers],Int,Iterable[Int]])Iterable[Int]">map</span><span title="scala.collection.generic.CanBuildFrom[scala.collection.Iterable.Coll,Int,Iterable[Int]]" class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.run.numPurgedFromWatchers.$anonfun.x$2" title="RequestPurgatory.this.Watchers">_</a>.<a href="#kafka.server;RequestPurgatory;Watchers.purgeSatisfied" title="()Int">purgeSatisfied</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>.<span title="(implicit num: Numeric[Int])Int">sum</span>
+            <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Purged %d elements from watch lists.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.run.numPurgedFromWatchers" title="Int">numPurgedFromWatchers</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span>
+          <span class="comment">// see if we need to purge the delayed request queue</span>
+          if <span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.delayed" title="()Int">delayed</a><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(x: Int)Boolean">&gt;=</span> <a href="#kafka.server.RequestPurgatory.<init>$default$2" title="Int">purgeInterval</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+            <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Begin purging delayed queue&quot;)" class="string">&quot;Begin purging delayed queue&quot;</span><span class="delimiter">)</span>
+            val <a title="Int" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.run.purged">purged</a> = <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied" title="()Int">purgeSatisfied</a><span class="delimiter">(</span><span class="delimiter">)</span>
+            <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Purged %d requests from delayed queue.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.run.purged" title="Int">purged</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+          case <a title="Exception" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.run.e">e</a>: <span title="Exception">Exception</span> =&gt;
+            <a href="../utils/Logging.scala.html#kafka.utils;Logging.error(cfd112d89b)" title="(msg: =&gt; String, e: =&gt; Throwable)Unit">error</a><span class="delimiter">(</span><span title="String(&quot;Error in long poll expiry thread: &quot;)" class="string">&quot;Error in long poll expiry thread: &quot;</span>, <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.run.e" title="Exception">e</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.shutdownLatch" title="=&gt; java.util.concurrent.CountDownLatch">shutdownLatch</a>.<span title="()Unit">countDown</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Add a request to be expired */</span>
+    def <a title="(t: T)Unit" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.enqueue">enqueue</a><span class="delimiter">(</span><a title="T" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.enqueue.t">t</a>: <a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.delayedQueue" title="=&gt; java.util.concurrent.DelayQueue[T]">delayedQueue</a>.<span title="(x$1: T)Boolean">add</span><span title="Unit" class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.enqueue.t" title="T">t</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/** Shutdown the expiry thread*/</span>
+    def <a title="()Unit" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.shutdown">shutdown</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Shutting down.&quot;)" class="string">&quot;Shutting down.&quot;</span><span class="delimiter">)</span>
+      <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.running" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">running</a>.<span title="(x$1: Boolean)Unit">set</span><span class="delimiter">(</span>false<span class="delimiter">)</span>
+      <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.shutdownLatch" title="=&gt; java.util.concurrent.CountDownLatch">shutdownLatch</a>.<span title="()Unit">await</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Shut down complete.&quot;)" class="string">&quot;Shut down complete.&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Get the next expired event
+     */</span>
+    private def <a title="()T" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired">pollExpired</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a> = <span class="delimiter">{</span>
+      while<span class="delimiter">(</span>true<span class="delimiter">)</span> <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired.while$4" title="()Unit" class="delimiter">{</a>
+        val <a title="T" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired.curr">curr</a> = <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.delayedQueue" title="=&gt; java.util.concurrent.DelayQueue[T]">delayedQueue</a>.<span title="(x$1: Long, x$2: java.util.concurrent.TimeUnit)T">poll</span><span class="delimiter">(</span><span title="Long(200L)" class="long">200L</span>, TimeUnit.<span title="java.util.concurrent.TimeUnit(MILLISECONDS)">MILLISECONDS</span><span class="delimiter">)</span>
+        if <span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired.curr" title="T">curr</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span>
+          return null.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="T" class="delimiter">[</span><a href="#kafka.server.RequestPurgatory.<init>$default$2;T" title="T">T</a><span class="delimiter">]</span>
+        val <a title="Boolean" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired.updated">updated</a> = <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired.curr" title="T">curr</a>.<a href="#kafka.server;DelayedRequest.satisfied" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">satisfied</a>.<span title="(x$1: Boolean, x$2: Boolean)Boolean">compareAndSet</span><span class="delimiter">(</span>false, true<span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired.updated" title="Boolean">updated</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          return <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.pollExpired.curr" title="T">curr</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+      throw new <span title="RuntimeException">RuntimeException</span><span class="delimiter">(</span><span title="String(&quot;This should not happen&quot;)" class="string">&quot;This should not happen&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Delete all satisfied events from the delay queue and the watcher lists
+     */</span>
+    private def <a title="()Int" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied">purgeSatisfied</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+      var <a title="Int" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.purged">purged</a> = <span title="Int(0)" class="int">0</span>
+
+      <span class="comment">// purge the delayed queue</span>
+      val <a title="java.util.Iterator[T]" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.iter">iter</a> = <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.delayedQueue" title="=&gt; java.util.concurrent.DelayQueue[T]">delayedQueue</a>.<span title="()java.util.Iterator[T]">iterator</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      while<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.iter" title="java.util.Iterator[T]">iter</a>.<span title="()Boolean">hasNext</span><span class="delimiter">)</span> <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.while$5" title="()Unit" class="delimiter">{</a>
+        val <a title="T" id="kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.curr">curr</a> = <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.iter" title="java.util.Iterator[T]">iter</a>.<span title="()T">next</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.curr" title="T">curr</a>.<a href="#kafka.server;DelayedRequest.satisfied" title="=&gt; java.util.concurrent.atomic.AtomicBoolean">satisfied</a>.<span title="()Boolean">get</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.iter" title="java.util.Iterator[T]">iter</a>.<span title="()Unit">remove</span><span class="delimiter">(</span><span class="delimiter">)</span>
+          <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.purged" title="Int">purged</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+
+      <a href="#kafka.server;RequestPurgatory;ExpiredRequestReaper.purgeSatisfied.purged" title="Int">purged</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,313 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/log/LogSegment.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ * 
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+package kafka.log
+
+import kafka.message._
+import kafka.common._
+import kafka.utils._
+import kafka.server.<span class="delimiter">{</span>LogOffsetMetadata, FetchDataInfo<span class="delimiter">}</span>
+
+import scala.math._
+import java.io.File
+
+
+ <span class="comment">/**
+ * A segment of the log. Each segment has two components: a log and an index. The log is a FileMessageSet containing
+ * the actual messages. The index is an OffsetIndex that maps from logical offsets to physical file positions. Each 
+ * segment has a base offset which is an offset &lt;= the least offset of any message in this segment and &gt; any offset in
+ * any previous segment.
+ * 
+ * A segment with a base offset of [base_offset] would be stored in two files, a [base_offset].index and a [base_offset].log file. 
+ * 
+ * @param log The message set containing log entries
+ * @param index The offset index
+ * @param baseOffset A lower bound on the offsets in this segment
+ * @param indexIntervalBytes The approximate number of bytes between entries in the index
+ * @param time The time instance
+ */</span>
+@nonthreadsafe
+class <a title="class LogSegment extends AnyRef with kafka.utils.Logging" id="kafka.log;LogSegment">LogSegment</a><a href="#kafka.log;LogSegment" title="kafka.log.LogSegment" class="delimiter">(</a>val <a title="kafka.log.FileMessageSet" id="kafka.log;LogSegment.log">log</a>: <a href="FileMessageSet.scala.html#kafka.log;FileMessageSet" title="kafka.log.FileMessageSet">FileMessageSet</a>, 
+                 val <a title="kafka.log.OffsetIndex" id="kafka.log;LogSegment.index">index</a>: <a href="OffsetIndex.scala.html#kafka.log;OffsetIndex" title="kafka.log.OffsetIndex">OffsetIndex</a>, 
+                 val <a title="Long" id="kafka.log;LogSegment.baseOffset">baseOffset</a>: <span title="Long">Long</span>, 
+                 val <a title="Int" id="kafka.log;LogSegment.indexIntervalBytes">indexIntervalBytes</a>: <span title="Int">Int</span>,
+                 val <a title="Long" id="kafka.log;LogSegment.rollJitterMs">rollJitterMs</a>: <span title="Long">Long</span>,
+                 <a title="kafka.utils.Time" id="kafka.log;LogSegment.time">time</a>: <a href="../utils/Time.scala.html#kafka.utils;Time" title="kafka.utils.Time">Time</a><span class="delimiter">)</span> extends <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+  
+  var <a title="Long" id="kafka.log;LogSegment.created_=">created</a> = <a href="#kafka.log;LogSegment.time" title="kafka.utils.Time">time</a>.<a href="../utils/Time.scala.html#kafka.utils;Time.milliseconds" title="=&gt; Long">milliseconds</a>
+
+  <span class="comment">/* the number of bytes since we last added an entry in the offset index */</span>
+  private var <a title="Int" id="kafka.log;LogSegment.bytesSinceLastIndexEntry_=">bytesSinceLastIndexEntry</a> = <span title="Int(0)" class="int">0</span>
+  
+  def this<span class="delimiter">(</span><a title="java.io.File" id="kafka.log;LogSegment.<init>(77159a0564).dir">dir</a>: <span title="java.io.File">File</span>, <a title="Long" id="kafka.log;LogSegment.<init>(77159a0564).startOffset">startOffset</a>: <span title="Long">Long</span>, <a title="Int" id="kafka.log;LogSegment.<init>(77159a0564).indexIntervalBytes">indexIntervalBytes</a>: <span title="Int">Int</span>, <a title="Int" id="kafka.log;LogSegment.<init>(77159a0564).maxIndexSize">maxIndexSize</a>: <span title="Int">Int</span>, <a title="Long" id="kafka.log;LogSegment.<init>(77159a0564).rollJitterMs">rollJitterMs</a>: <span title="Long">Long</span>, <a title="kafka.utils.Time" id="kafka.log;LogSegment.<init>(77159a0564).time">time</a>: <a href="../utils/Time.scala.html#kafka.utils;Time" title="kafka.utils.Time">Time</a><span class="delimiter">)</span> =
+    this<span class="delimiter">(</span>new <a href="FileMessageSet.scala.html#kafka.log;FileMessageSet" title="kafka.log.FileMessageSet">FileMessageSet</a><span class="delimiter">(</span>file = <a href="Log.scala.html#kafka.log.Log" title="kafka.log.Log.type">Log</a>.<a href="Log.scala.html#kafka.log.Log.logFilename" title="(dir: java.io.File, offset: Long)java.io.File">logFilename</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.<init>(77159a0564).dir" title="java.io.File">dir</a>, <a href="#kafka.log;LogSegment.<init>(77159a0564).startOffset" title="Long">startOffset</a><span class="delimiter">)</span><span class="delimiter">)</span>, 
+         new <a href="OffsetIndex.scala.html#kafka.log;OffsetIndex" title="kafka.log.OffsetIndex">OffsetIndex</a><span class="delimiter">(</span>file = <a href="Log.scala.html#kafka.log.Log" title="kafka.log.Log.type">Log</a>.<a href="Log.scala.html#kafka.log.Log.indexFilename" title="(dir: java.io.File, offset: Long)java.io.File">indexFilename</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.<init>(77159a0564).dir" title="java.io.File">dir</a>, <a href="#kafka.log;LogSegment.<init>(77159a0564).startOffset" title="Long">startOffset</a><span class="delimiter">)</span>, baseOffset = <a href="#kafka.log;LogSegment.<init>(77159a0564).startOffset" title="Long">startOffset</a>, maxIndexSize = <a href="#kafka.log;LogSegment.<init>(77159a0564).maxIndexSize" title="Int">maxIndexSize</a><span class="delimiter">)</span>,
+         <a href="#kafka.log;LogSegment.<init>(77159a0564).startOffset" title="Long">startOffset</a>,
+         <a href="#kafka.log;LogSegment.<init>(77159a0564).indexIntervalBytes" title="Int">indexIntervalBytes</a>,
+         <a href="#kafka.log;LogSegment.<init>(77159a0564).rollJitterMs" title="Long">rollJitterMs</a>,
+         <a href="#kafka.log;LogSegment.<init>(77159a0564).time" title="kafka.utils.Time">time</a><span class="delimiter">)</span>
+    
+  <span class="comment">/* Return the size in bytes of this log segment */</span>
+  def <a title="=&gt; Long" id="kafka.log;LogSegment.size">size</a>: <span title="Long">Long</span> = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span title="=&gt; Long" class="delimiter">(</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Append the given messages starting with the given offset. Add
+   * an entry to the index if needed.
+   * 
+   * It is assumed this method is being called from within a lock.
+   * 
+   * @param offset The first offset in the message set.
+   * @param messages The messages to append.
+   */</span>
+  @nonthreadsafe
+  def <a title="(offset: Long, messages: kafka.message.ByteBufferMessageSet)Unit" id="kafka.log;LogSegment.append">append</a><span class="delimiter">(</span><a title="Long" id="kafka.log;LogSegment.append.offset">offset</a>: <span title="Long">Long</span>, <a title="kafka.message.ByteBufferMessageSet" id="kafka.log;LogSegment.append.messages">messages</a>: <a href="../message/ByteBufferMessageSet.scala.html#kafka.message;ByteBufferMessageSet" title="kafka.message.ByteBufferMessageSet">ByteBufferMessageSet</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#kafka.log;LogSegment.append.messages" title="kafka.message.ByteBufferMessageSet">messages</a>.<a href="../message/ByteBufferMessageSet.scala.html#kafka.message;ByteBufferMessageSet.sizeInBytes" title="=&gt; Int">sizeInBytes</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../utils/Logging.scala.html#kafka.utils;Logging.trace(1729dbc42f)" title="(msg: =&gt; String)Unit">trace</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Inserting %d bytes at offset %d at position %d&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.append.messages" title="kafka.message.ByteBufferMessageSet">messages</a>.<a href="../message/ByteBufferMessageSet.scala.html#kafka.message;ByteBufferMessageSet.sizeInBytes" title="=&gt; Int">sizeInBytes</a>, <a href="#kafka.log;LogSegment.append.offset" title="Long">offset</a>, <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="comment">// append an entry to the index (if needed)</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.bytesSinceLastIndexEntry_=" title="=&gt; Int">bytesSinceLastIndexEntry</a> <span title="(x: Int)Boolean">&gt;</span> <a href="#kafka.log;LogSegment.indexIntervalBytes" title="=&gt; Int">indexIntervalBytes</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.append" title="(offset: Long, position: Int)Unit">append</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.append.offset" title="Long">offset</a>, <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        this.<a href="#kafka.log;LogSegment.bytesSinceLastIndexEntry_=" title="(x$1: Int)Unit">bytesSinceLastIndexEntry</a> = <span title="Int(0)" class="int">0</span>
+      <span class="delimiter">}</span>
+      <span class="comment">// append the messages</span>
+      <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.append" title="(messages: kafka.message.ByteBufferMessageSet)Unit">append</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.append.messages" title="kafka.message.ByteBufferMessageSet">messages</a><span class="delimiter">)</span>
+      this.<a href="#kafka.log;LogSegment.bytesSinceLastIndexEntry_=" title="(x$1: Int)Unit">bytesSinceLastIndexEntry</a> <span title="(x: Int)Int">+=</span> <a href="#kafka.log;LogSegment.append.messages" title="kafka.message.ByteBufferMessageSet">messages</a>.<a href="../message/ByteBufferMessageSet.scala.html#kafka.message;ByteBufferMessageSet.sizeInBytes" title="=&gt; Int">sizeInBytes</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Find the physical file position for the first message with offset &gt;= the requested offset.
+   * 
+   * The lowerBound argument is an optimization that can be used if we already know a valid starting position
+   * in the file higher than the greatest-lower-bound from the index.
+   * 
+   * @param offset The offset we want to translate
+   * @param startingFilePosition A lower bound on the file position from which to begin the search. This is purely an optimization and
+   * when omitted, the search will begin at the position in the offset index.
+   * 
+   * @return The position in the log storing the message with the least offset &gt;= the requested offset or null if no message meets this criteria.
+   */</span>
+  @threadsafe
+  private<span class="delimiter">[</span>log<span class="delimiter">]</span> def <a title="(offset: Long, startingFilePosition: Int)kafka.log.OffsetPosition" id="kafka.log;LogSegment.translateOffset">translateOffset</a><span class="delimiter">(</span><a title="Long" id="kafka.log;LogSegment.translateOffset.offset">offset</a>: <span title="Long">Long</span>, <a title="Int" id="kafka.log;LogSegment.translateOffset$default$2">startingFilePosition</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>: <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="kafka.log.OffsetPosition">OffsetPosition</a> = <span class="delimiter">{</span>
+    val <a title="kafka.log.OffsetPosition" id="kafka.log;LogSegment.translateOffset.mapping">mapping</a> = <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.lookup" title="(targetOffset: Long)kafka.log.OffsetPosition">lookup</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.translateOffset.offset" title="Long">offset</a><span class="delimiter">)</span>
+    <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.searchFor" title="(targetOffset: Long, startingPosition: Int)kafka.log.OffsetPosition">searchFor</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.translateOffset.offset" title="Long">offset</a>, <span title="(x: Int, y: Int)Int">max</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.translateOffset.mapping" title="kafka.log.OffsetPosition">mapping</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.position" title="=&gt; Int">position</a>, <a href="#kafka.log;LogSegment.translateOffset$default$2" title="Int">startingFilePosition</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Read a message set from this segment beginning with the first offset &gt;= startOffset. The message set will include
+   * no more than maxSize bytes and will end before maxOffset if a maxOffset is specified.
+   * 
+   * @param startOffset A lower bound on the first offset to include in the message set we read
+   * @param maxSize The maximum number of bytes to include in the message set we read
+   * @param maxOffset An optional maximum offset for the message set we read
+   * 
+   * @return The fetched data and the offset metadata of the first message whose offset is &gt;= startOffset,
+   *         or null if the startOffset is larger than the largest offset in this log
+   */</span>
+  @threadsafe
+  def <a title="(startOffset: Long, maxOffset: Option[Long], maxSize: Int)kafka.server.FetchDataInfo" id="kafka.log;LogSegment.read">read</a><span class="delimiter">(</span><a title="Long" id="kafka.log;LogSegment.read.startOffset">startOffset</a>: <span title="Long">Long</span>, <a title="Option[Long]" id="kafka.log;LogSegment.read.maxOffset">maxOffset</a>: <span title="Option[Long]">Option</span><span class="delimiter">[</span>Long<span class="delimiter">]</span>, <a title="Int" id="kafka.log;LogSegment.read.maxSize">maxSize</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="../server/FetchDataInfo.scala.html#kafka.server;FetchDataInfo" title="kafka.server.FetchDataInfo">FetchDataInfo</a> = <span class="delimiter">{</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.maxSize" title="Int">maxSize</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Invalid max size for log read (%d)&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.maxSize" title="Int">maxSize</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+    val <a title="Int" id="kafka.log;LogSegment.read.logSize">logSize</a> = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a> <span class="comment">// this may change, need to save a consistent copy</span>
+    val <a title="kafka.log.OffsetPosition" id="kafka.log;LogSegment.read.startPosition">startPosition</a> = <a href="#kafka.log;LogSegment.translateOffset" title="(offset: Long, startingFilePosition: Int)kafka.log.OffsetPosition">translateOffset</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.startOffset" title="Long">startOffset</a><span class="delimiter">)</span>
+
+    <span class="comment">// if the start position is already off the end of the log, return null</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.startPosition" title="kafka.log.OffsetPosition">startPosition</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span>
+      return null
+
+    val <a title="kafka.server.LogOffsetMetadata" id="kafka.log;LogSegment.read.offsetMetadata">offsetMetadata</a> = new <a href="../server/LogOffsetMetadata.scala.html#kafka.server;LogOffsetMetadata" title="kafka.server.LogOffsetMetadata">LogOffsetMetadata</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.startOffset" title="Long">startOffset</a>, this.<a href="#kafka.log;LogSegment.baseOffset" title="=&gt; Long">baseOffset</a>, <a href="#kafka.log;LogSegment.read.startPosition" title="kafka.log.OffsetPosition">startPosition</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.position" title="=&gt; Int">position</a><span class="delimiter">)</span>
+
+    <span class="comment">// if the size is zero, still return a log segment but with zero size</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.maxSize" title="Int">maxSize</a> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      return <a href="../server/FetchDataInfo.scala.html#kafka.server;FetchDataInfo" title="(fetchOffset: kafka.server.LogOffsetMetadata, messageSet: kafka.message.MessageSet)kafka.server.FetchDataInfo">FetchDataInfo</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.offsetMetadata" title="kafka.server.LogOffsetMetadata">offsetMetadata</a>, <a href="../message/MessageSet.scala.html#kafka.message.MessageSet" title="kafka.message.MessageSet.type">MessageSet</a>.<a href="../message/MessageSet.scala.html#kafka.message.MessageSet.Empty" title="=&gt; kafka.message.ByteBufferMessageSet">Empty</a><span class="delimiter">)</span>
+
+    <span class="comment">// calculate the length of the message set to read based on whether or not they gave us a maxOffset</span>
+    val <a title="Int" id="kafka.log;LogSegment.read.length">length</a> = 
+      <a href="#kafka.log;LogSegment.read.maxOffset" title="Option[Long]">maxOffset</a> match <span class="delimiter">{</span>
+        case <span title="None.type">None</span> =&gt;
+          <span class="comment">// no max offset, just use the max size they gave unmolested</span>
+          <a href="#kafka.log;LogSegment.read.maxSize" title="Int">maxSize</a>
+        case Some<span class="delimiter">(</span><a title="Long" id="kafka.log;LogSegment.read.length.offset">offset</a><span class="delimiter">)</span> =&gt; <span class="delimiter">{</span>
+          <span class="comment">// there is a max offset, translate it to a file position and use that to calculate the max read size</span>
+          if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.length.offset" title="Long">offset</a> <span title="(x: Long)Boolean">&lt;</span> <a href="#kafka.log;LogSegment.read.startOffset" title="Long">startOffset</a><span class="delimiter">)</span>
+            throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Attempt to read with a maximum offset (%d) less than the start offset (%d).&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.length.offset" title="Long">offset</a>, <a href="#kafka.log;LogSegment.read.startOffset" title="Long">startOffset</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          val <a title="kafka.log.OffsetPosition" id="kafka.log;LogSegment.read.length.mapping">mapping</a> = <a href="#kafka.log;LogSegment.translateOffset" title="(offset: Long, startingFilePosition: Int)kafka.log.OffsetPosition">translateOffset</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.length.offset" title="Long">offset</a>, <a href="#kafka.log;LogSegment.read.startPosition" title="kafka.log.OffsetPosition">startPosition</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.position" title="=&gt; Int">position</a><span class="delimiter">)</span>
+          val <a title="Int" id="kafka.log;LogSegment.read.length.endPosition">endPosition</a> = 
+            if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.length.mapping" title="kafka.log.OffsetPosition">mapping</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span>
+              <a href="#kafka.log;LogSegment.read.logSize" title="Int">logSize</a> <span class="comment">// the max offset is off the end of the log, use the end of the file</span>
+            else
+              <a href="#kafka.log;LogSegment.read.length.mapping" title="kafka.log.OffsetPosition">mapping</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.position" title="=&gt; Int">position</a>
+          <span title="(x: Int, y: Int)Int">min</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.length.endPosition" title="Int">endPosition</a> <span title="(x: Int)Int">-</span> <a href="#kafka.log;LogSegment.read.startPosition" title="kafka.log.OffsetPosition">startPosition</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.position" title="=&gt; Int">position</a>, <a href="#kafka.log;LogSegment.read.maxSize" title="Int">maxSize</a><span class="delimiter">)</span> 
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <a href="../server/FetchDataInfo.scala.html#kafka.server;FetchDataInfo" title="(fetchOffset: kafka.server.LogOffsetMetadata, messageSet: kafka.message.MessageSet)kafka.server.FetchDataInfo">FetchDataInfo</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.offsetMetadata" title="kafka.server.LogOffsetMetadata">offsetMetadata</a>, <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.read" title="(position: Int, size: Int)kafka.log.FileMessageSet">read</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.read.startPosition" title="kafka.log.OffsetPosition">startPosition</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.position" title="=&gt; Int">position</a>, <a href="#kafka.log;LogSegment.read.length" title="Int">length</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Run recovery on the given segment. This will rebuild the index from the log file and lop off any invalid bytes from the end of the log and index.
+   * 
+   * @param maxMessageSize A bound the memory allocation in the case of a corrupt message size--we will assume any message larger than this
+   * is corrupt.
+   * 
+   * @return The number of bytes truncated from the log
+   */</span>
+  @nonthreadsafe
+  def <a title="(maxMessageSize: Int)Int" id="kafka.log;LogSegment.recover">recover</a><span class="delimiter">(</span><a title="Int" id="kafka.log;LogSegment.recover.maxMessageSize">maxMessageSize</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+    <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.truncate" title="()Unit">truncate</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.resize" title="(newSize: Int)Unit">resize</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.maxIndexSize" title="=&gt; Int">maxIndexSize</a><span class="delimiter">)</span>
+    var <a title="Int" id="kafka.log;LogSegment.recover.validBytes">validBytes</a> = <span title="Int(0)" class="int">0</span>
+    var <a title="Int" id="kafka.log;LogSegment.recover.lastIndexEntry">lastIndexEntry</a> = <span title="Int(0)" class="int">0</span>
+    val <a title="Iterator[kafka.message.MessageAndOffset]" id="kafka.log;LogSegment.recover.iter">iter</a> = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.iterator(ebd7e0ba09)" title="(maxMessageSize: Int)Iterator[kafka.message.MessageAndOffset]">iterator</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.recover.maxMessageSize" title="Int">maxMessageSize</a><span class="delimiter">)</span>
+    try <span class="delimiter">{</span>
+      while<span class="delimiter">(</span><a href="#kafka.log;LogSegment.recover.iter" title="Iterator[kafka.message.MessageAndOffset]">iter</a>.<span title="=&gt; Boolean">hasNext</span><span class="delimiter">)</span> <a href="#kafka.log;LogSegment.recover.while$1" title="()Unit" class="delimiter">{</a>
+        val <a title="kafka.message.MessageAndOffset" id="kafka.log;LogSegment.recover.entry">entry</a> = <a href="#kafka.log;LogSegment.recover.iter" title="Iterator[kafka.message.MessageAndOffset]">iter</a>.<span title="()kafka.message.MessageAndOffset">next</span>
+        <a href="#kafka.log;LogSegment.recover.entry" title="kafka.message.MessageAndOffset">entry</a>.<a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset.message" title="=&gt; kafka.message.Message">message</a>.<a href="../message/Message.scala.html#kafka.message;Message.ensureValid" title="()Unit">ensureValid</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.recover.validBytes" title="Int">validBytes</a> <span title="(x: Int)Int">-</span> <a href="#kafka.log;LogSegment.recover.lastIndexEntry" title="Int">lastIndexEntry</a> <span title="(x: Int)Boolean">&gt;</span> <a href="#kafka.log;LogSegment.indexIntervalBytes" title="=&gt; Int">indexIntervalBytes</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <span class="comment">// we need to decompress the message, if required, to get the offset of the first uncompressed message</span>
+          val <a title="Long" id="kafka.log;LogSegment.recover.startOffset">startOffset</a> =
+            <a href="#kafka.log;LogSegment.recover.entry" title="kafka.message.MessageAndOffset">entry</a>.<a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset.message" title="=&gt; kafka.message.Message">message</a>.<a href="../message/Message.scala.html#kafka.message;Message.compressionCodec" title="=&gt; kafka.message.CompressionCodec">compressionCodec</a> match <span class="delimiter">{</span>
+              case <a href="../message/CompressionCodec.scala.html#kafka.message.NoCompressionCodec" title="kafka.message.NoCompressionCodec.type">NoCompressionCodec</a> =&gt;
+                <a href="#kafka.log;LogSegment.recover.entry" title="kafka.message.MessageAndOffset">entry</a>.<a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset.offset" title="=&gt; Long">offset</a>
+              case _ =&gt;
+                <a href="../message/ByteBufferMessageSet.scala.html#kafka.message.ByteBufferMessageSet" title="kafka.message.ByteBufferMessageSet.type">ByteBufferMessageSet</a>.<a href="../message/ByteBufferMessageSet.scala.html#kafka.message.ByteBufferMessageSet.decompress" title="(message: kafka.message.Message)kafka.message.ByteBufferMessageSet">decompress</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.recover.entry" title="kafka.message.MessageAndOffset">entry</a>.<a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset.message" title="=&gt; kafka.message.Message">message</a><span class="delimiter">)</span>.<span title="=&gt; kafka.message.MessageAndOffset">head</span>.<a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset.offset" title="=&gt; Long">offset</a>
+          <span class="delimiter">}</span>
+          <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.append" title="(offset: Long, position: Int)Unit">append</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.recover.startOffset" title="Long">startOffset</a>, <a href="#kafka.log;LogSegment.recover.validBytes" title="Int">validBytes</a><span class="delimiter">)</span>
+          <a href="#kafka.log;LogSegment.recover.lastIndexEntry" title="Int">lastIndexEntry</a> = <a href="#kafka.log;LogSegment.recover.validBytes" title="Int">validBytes</a>
+        <span class="delimiter">}</span>
+        <a href="#kafka.log;LogSegment.recover.validBytes" title="Int">validBytes</a> <span title="(x: Int)Int">+=</span> <a href="../message/MessageSet.scala.html#kafka.message.MessageSet" title="kafka.message.MessageSet.type">MessageSet</a>.<a href="../message/MessageSet.scala.html#kafka.message.MessageSet.entrySize" title="(message: kafka.message.Message)Int">entrySize</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.recover.entry" title="kafka.message.MessageAndOffset">entry</a>.<a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset.message" title="=&gt; kafka.message.Message">message</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+      case <a title="kafka.message.InvalidMessageException" id="kafka.log;LogSegment.recover.e">e</a>: <a href="../message/InvalidMessageException.scala.html#kafka.message;InvalidMessageException" title="kafka.message.InvalidMessageException">InvalidMessageException</a> =&gt; 
+        <a href="../utils/Logging.scala.html#kafka.utils;Logging.logger" title="=&gt; org.apache.log4j.Logger">logger</a>.<span title="(x$1: Any)Unit">warn</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Found invalid messages in log segment %s at byte offset %d: %s.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span>, <a href="#kafka.log;LogSegment.recover.validBytes" title="Int">validBytes</a>, <a href="#kafka.log;LogSegment.recover.e" title="kafka.message.InvalidMessageException">e</a>.<span title="()String">getMessage</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    val truncated = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a> <a title="Int" id="kafka.log;LogSegment.recover.truncated">-</a> <a href="#kafka.log;LogSegment.recover.validBytes" title="Int">validBytes</a>
+    <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.truncateTo" title="(targetSize: Int)Int">truncateTo</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.recover.validBytes" title="Int">validBytes</a><span class="delimiter">)</span>
+    <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.trimToValidSize" title="()Unit">trimToValidSize</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <a href="#kafka.log;LogSegment.recover.truncated" title="Int">truncated</a>
+  <span class="delimiter">}</span>
+
+  override def <a title="()String" id="kafka.log;LogSegment.toString">toString</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span title="String(&quot;LogSegment(baseOffset=&quot;)" class="string">&quot;LogSegment(baseOffset=&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;LogSegment.baseOffset" title="=&gt; Long">baseOffset</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;, size=&quot;)" class="string">&quot;, size=&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;LogSegment.size" title="=&gt; Long">size</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span>
+
+  <span class="comment">/**
+   * Truncate off all index and log entries with offsets &gt;= the given offset.
+   * If the given offset is larger than the largest message in this segment, do nothing.
+   * @param offset The offset to truncate to
+   * @return The number of log bytes truncated
+   */</span>
+  @nonthreadsafe
+  def <a title="(offset: Long)Int" id="kafka.log;LogSegment.truncateTo">truncateTo</a><span class="delimiter">(</span><a title="Long" id="kafka.log;LogSegment.truncateTo.offset">offset</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+    val <a title="kafka.log.OffsetPosition" id="kafka.log;LogSegment.truncateTo.mapping">mapping</a> = <a href="#kafka.log;LogSegment.translateOffset" title="(offset: Long, startingFilePosition: Int)kafka.log.OffsetPosition">translateOffset</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.truncateTo.offset" title="Long">offset</a><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.truncateTo.mapping" title="kafka.log.OffsetPosition">mapping</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span>
+      return <span title="Int(0)" class="int">0</span>
+    <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.truncateTo" title="(offset: Long)Unit">truncateTo</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.truncateTo.offset" title="Long">offset</a><span class="delimiter">)</span>
+    <span class="comment">// after truncation, reset and allocate more space for the (new currently  active) index</span>
+    <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.resize" title="(newSize: Int)Unit">resize</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.maxIndexSize" title="=&gt; Int">maxIndexSize</a><span class="delimiter">)</span>
+    val <a title="Int" id="kafka.log;LogSegment.truncateTo.bytesTruncated">bytesTruncated</a> = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.truncateTo" title="(targetSize: Int)Int">truncateTo</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.truncateTo.mapping" title="kafka.log.OffsetPosition">mapping</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.position" title="=&gt; Int">position</a><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      <a href="#kafka.log;LogSegment.created_=" title="(x$1: Long)Unit">created</a> = <a href="#kafka.log;LogSegment.time" title="kafka.utils.Time">time</a>.<a href="../utils/Time.scala.html#kafka.utils;Time.milliseconds" title="=&gt; Long">milliseconds</a>
+    <a href="#kafka.log;LogSegment.bytesSinceLastIndexEntry_=" title="(x$1: Int)Unit">bytesSinceLastIndexEntry</a> = <span title="Int(0)" class="int">0</span>
+    <a href="#kafka.log;LogSegment.truncateTo.bytesTruncated" title="Int">bytesTruncated</a>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Calculate the offset that would be used for the next message to be append to this segment.
+   * Note that this is expensive.
+   */</span>
+  @threadsafe
+  def <a title="()Long" id="kafka.log;LogSegment.nextOffset">nextOffset</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Long">Long</span> = <span class="delimiter">{</span>
+    val <a title="kafka.server.FetchDataInfo" id="kafka.log;LogSegment.nextOffset.ms">ms</a> = <a href="#kafka.log;LogSegment.read" title="(startOffset: Long, maxOffset: Option[Long], maxSize: Int)kafka.server.FetchDataInfo">read</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.lastOffset" title="=&gt; Long">lastOffset</a>, <span title="None.type">None</span>, <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.sizeInBytes" title="()Int">sizeInBytes</a><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;LogSegment.nextOffset.ms" title="kafka.server.FetchDataInfo">ms</a> <span title="(x$1: Any)Boolean">==</span> null<span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#kafka.log;LogSegment.baseOffset" title="=&gt; Long">baseOffset</a>
+    <span class="delimiter">}</span> else <span class="delimiter">{</span>
+      <a href="#kafka.log;LogSegment.nextOffset.ms" title="kafka.server.FetchDataInfo">ms</a>.<a href="../server/FetchDataInfo.scala.html#kafka.server;FetchDataInfo.messageSet" title="=&gt; kafka.message.MessageSet">messageSet</a>.<span title="=&gt; Option[kafka.message.MessageAndOffset]">lastOption</span> match <span class="delimiter">{</span>
+        case <span title="None.type">None</span> =&gt; <a href="#kafka.log;LogSegment.baseOffset" title="=&gt; Long">baseOffset</a>
+        case Some<span class="delimiter">(</span><a title="kafka.message.MessageAndOffset" id="kafka.log;LogSegment.nextOffset.last">last</a><span class="delimiter">)</span> =&gt; <a href="#kafka.log;LogSegment.nextOffset.last" title="kafka.message.MessageAndOffset">last</a>.<a href="../message/MessageAndOffset.scala.html#kafka.message;MessageAndOffset.nextOffset" title="=&gt; Long">nextOffset</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Flush this log segment to disk
+   */</span>
+  @threadsafe
+  def <a title="()Unit" id="kafka.log;LogSegment.flush">flush</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="FileMessageSet.scala.html#kafka.log.LogFlushStats" title="kafka.log.LogFlushStats.type">LogFlushStats</a>.<a href="FileMessageSet.scala.html#kafka.log.LogFlushStats.logFlushTimer" title="=&gt; kafka.metrics.KafkaTimer">logFlushTimer</a>.<a href="../metrics/KafkaTimer.scala.html#kafka.metrics;KafkaTimer.time" title="(f: =&gt; Unit)Unit">time</a> <span class="delimiter">{</span>
+      <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.flush" title="()Unit">flush</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.flush" title="()Unit">flush</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Change the suffix for the index and log file for this log segment
+   */</span>
+  def <a title="(oldSuffix: String, newSuffix: String)Unit" id="kafka.log;LogSegment.changeFileSuffixes">changeFileSuffixes</a><span class="delimiter">(</span><a title="String" id="kafka.log;LogSegment.changeFileSuffixes.oldSuffix">oldSuffix</a>: <span title="String">String</span>, <a title="String" id="kafka.log;LogSegment.changeFileSuffixes.newSuffix">newSuffix</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val <a title="Boolean" id="kafka.log;LogSegment.changeFileSuffixes.logRenamed">logRenamed</a> = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.renameTo" title="(f: java.io.File)Boolean">renameTo</a><span class="delimiter">(</span>new <span title="java.io.File">File</span><span class="delimiter">(</span><a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Utils.scala.html#kafka.utils.Utils.replaceSuffix" title="(s: String, oldSuffix: String, newSuffix: String)String">replaceSuffix</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()String">getPath</span>, <a href="#kafka.log;LogSegment.changeFileSuffixes.oldSuffix" title="String">oldSuffix</a>, <a href="#kafka.log;LogSegment.changeFileSuffixes.newSuffix" title="String">newSuffix</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#kafka.log;LogSegment.changeFileSuffixes.logRenamed" title="Boolean">logRenamed</a><span class="delimiter">)</span>
+      throw new <a href="../common/KafkaStorageException.scala.html#kafka.common;KafkaStorageException" title="kafka.common.KafkaStorageException">KafkaStorageException</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Failed to change the log file suffix from %s to %s for log segment %d&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.changeFileSuffixes.oldSuffix" title="String">oldSuffix</a>, <a href="#kafka.log;LogSegment.changeFileSuffixes.newSuffix" title="String">newSuffix</a>, <a href="#kafka.log;LogSegment.baseOffset" title="=&gt; Long">baseOffset</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    val <a title="Boolean" id="kafka.log;LogSegment.changeFileSuffixes.indexRenamed">indexRenamed</a> = <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.renameTo" title="(f: java.io.File)Boolean">renameTo</a><span class="delimiter">(</span>new <span title="java.io.File">File</span><span class="delimiter">(</span><a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Utils.scala.html#kafka.utils.Utils.replaceSuffix" title="(s: String, oldSuffix: String, newSuffix: String)String">replaceSuffix</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getPath</span>, <a href="#kafka.log;LogSegment.changeFileSuffixes.oldSuffix" title="String">oldSuffix</a>, <a href="#kafka.log;LogSegment.changeFileSuffixes.newSuffix" title="String">newSuffix</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#kafka.log;LogSegment.changeFileSuffixes.indexRenamed" title="Boolean">indexRenamed</a><span class="delimiter">)</span>
+      throw new <a href="../common/KafkaStorageException.scala.html#kafka.common;KafkaStorageException" title="kafka.common.KafkaStorageException">KafkaStorageException</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Failed to change the index file suffix from %s to %s for log segment %d&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.changeFileSuffixes.oldSuffix" title="String">oldSuffix</a>, <a href="#kafka.log;LogSegment.changeFileSuffixes.newSuffix" title="String">newSuffix</a>, <a href="#kafka.log;LogSegment.baseOffset" title="=&gt; Long">baseOffset</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Close this log segment
+   */</span>
+  def <a title="()Unit" id="kafka.log;LogSegment.close">close</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Logging.scala.html#kafka.utils;Logging.swallow" title="(action: =&gt; Unit)Unit">swallow</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.close" title="()Unit">close</a><span class="delimiter">)</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Logging.scala.html#kafka.utils;Logging.swallow" title="(action: =&gt; Unit)Unit">swallow</a><span class="delimiter">(</span><a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.close" title="()Unit">close</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Delete this log segment from the filesystem.
+   * @throws KafkaStorageException if the delete fails.
+   */</span>
+  def <a title="()Unit" id="kafka.log;LogSegment.delete">delete</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val <a title="Boolean" id="kafka.log;LogSegment.delete.deletedLog">deletedLog</a> = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.delete" title="()Boolean">delete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    val <a title="Boolean" id="kafka.log;LogSegment.delete.deletedIndex">deletedIndex</a> = <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.delete" title="()Boolean">delete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#kafka.log;LogSegment.delete.deletedLog" title="Boolean">deletedLog</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()Boolean">exists</span><span class="delimiter">)</span>
+      throw new <a href="../common/KafkaStorageException.scala.html#kafka.common;KafkaStorageException" title="kafka.common.KafkaStorageException">KafkaStorageException</a><span class="delimiter">(</span><span title="String(&quot;Delete of log &quot;)" class="string">&quot;Delete of log &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()String">getName</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot; failed.&quot;)" class="string">&quot; failed.&quot;</span><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#kafka.log;LogSegment.delete.deletedIndex" title="Boolean">deletedIndex</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()Boolean">exists</span><span class="delimiter">)</span>
+      throw new <a href="../common/KafkaStorageException.scala.html#kafka.common;KafkaStorageException" title="kafka.common.KafkaStorageException">KafkaStorageException</a><span class="delimiter">(</span><span title="String(&quot;Delete of index &quot;)" class="string">&quot;Delete of index &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getName</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot; failed.&quot;)" class="string">&quot; failed.&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * The last modified time of this log segment as a unix time stamp
+   */</span>
+  def <a title="=&gt; Long" id="kafka.log;LogSegment.lastModified">lastModified</a> = <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="()Long">lastModified</span>
+  
+  <span class="comment">/**
+   * Change the last modified time for this log segment
+   */</span>
+  def <a title="(ms: Long)Boolean" id="kafka.log;LogSegment.lastModified_=">lastModified_=</a><span class="delimiter">(</span><a title="Long" id="kafka.log;LogSegment.lastModified_=.ms">ms</a>: <span title="Long">Long</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#kafka.log;LogSegment.log" title="=&gt; kafka.log.FileMessageSet">log</a>.<a href="FileMessageSet.scala.html#kafka.log;FileMessageSet.file" title="=&gt; java.io.File">file</a>.<span title="(x$1: Long)Boolean">setLastModified</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.lastModified_=.ms" title="Long">ms</a><span class="delimiter">)</span>
+    <a href="#kafka.log;LogSegment.index" title="=&gt; kafka.log.OffsetIndex">index</a>.<a href="OffsetIndex.scala.html#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="(x$1: Long)Boolean">setLastModified</span><span class="delimiter">(</span><a href="#kafka.log;LogSegment.lastModified_=.ms" title="Long">ms</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+        </pre>
+    </body>
+</html>

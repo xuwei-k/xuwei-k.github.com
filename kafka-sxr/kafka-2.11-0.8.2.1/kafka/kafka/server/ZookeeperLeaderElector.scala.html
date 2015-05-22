@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/server/ZookeeperLeaderElector.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+package kafka.server
+
+import kafka.utils.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>._
+import kafka.utils.<a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>._
+import kafka.utils.<span class="delimiter">{</span>Json, SystemTime, Logging<span class="delimiter">}</span>
+import org.I0Itec.zkclient.exception.ZkNodeExistsException
+import org.I0Itec.zkclient.IZkDataListener
+import kafka.controller.ControllerContext
+import kafka.controller.KafkaController
+
+<span class="comment">/**
+ * This class handles zookeeper based leader election based on an ephemeral path. The election module does not handle
+ * session expiration, instead it assumes the caller will handle it by probably try to re-elect again. If the existing
+ * leader is dead, this class will handle automatic re-election and if it succeeds, it invokes the leader state change
+ * callback
+ */</span>
+class <a title="class ZookeeperLeaderElector extends AnyRef with kafka.server.LeaderElector with kafka.utils.Logging" id="kafka.server;ZookeeperLeaderElector">ZookeeperLeaderElector</a><a href="#kafka.server;ZookeeperLeaderElector" title="kafka.server.ZookeeperLeaderElector" class="delimiter">(</a><a title="kafka.controller.ControllerContext" id="kafka.server;ZookeeperLeaderElector.controllerContext">controllerContext</a>: <a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext" title="kafka.controller.ControllerContext">ControllerContext</a>,
+                             <a title="String" id="kafka.server;ZookeeperLeaderElector.electionPath">electionPath</a>: <span title="String">String</span>,
+                             <a title="() =&gt; Unit" id="kafka.server;ZookeeperLeaderElector.onBecomingLeader">onBecomingLeader</a>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Unit,
+                             <a title="() =&gt; Unit" id="kafka.server;ZookeeperLeaderElector.onResigningAsLeader">onResigningAsLeader</a>: <span class="delimiter">(</span><span class="delimiter">)</span> =&gt; Unit,
+                             <a title="Int" id="kafka.server;ZookeeperLeaderElector.brokerId">brokerId</a>: <span title="Int">Int</span><span class="delimiter">)</span>
+  extends <a href="LeaderElector.scala.html#kafka.server;LeaderElector" title="kafka.server.LeaderElector">LeaderElector</a> with <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+  var <a title="Int" id="kafka.server;ZookeeperLeaderElector.leaderId_=">leaderId</a> = -<span title="Int(-1)" class="int">1</span>
+  <span class="comment">// create the election path in ZK, if one does not exist</span>
+  val <a title="Int" id="kafka.server;ZookeeperLeaderElector.index">index</a> = <a href="#kafka.server;ZookeeperLeaderElector.electionPath" title="String">electionPath</a>.<span title="(x$1: String)Int">lastIndexOf</span><span class="delimiter">(</span><span title="String(&quot;/&quot;)" class="string">&quot;/&quot;</span><span class="delimiter">)</span>
+  if <span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.index" title="=&gt; Int">index</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+    <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.makeSurePersistentPathExists" title="(client: org.I0Itec.zkclient.ZkClient, path: String)Unit">makeSurePersistentPathExists</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="#kafka.server;ZookeeperLeaderElector.electionPath" title="String">electionPath</a>.<span title="(x$1: Int, x$2: Int)String">substring</span><span class="delimiter">(</span><span title="Int(0)" class="int">0</span>, <a href="#kafka.server;ZookeeperLeaderElector.index" title="=&gt; Int">index</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  val <a title="ZookeeperLeaderElector.this.LeaderChangeListener" id="kafka.server;ZookeeperLeaderElector.leaderChangeListener">leaderChangeListener</a> = new <a href="#kafka.server;ZookeeperLeaderElector;LeaderChangeListener" title="ZookeeperLeaderElector.this.LeaderChangeListener">LeaderChangeListener</a>
+
+  def <a title="=&gt; Unit" id="kafka.server;ZookeeperLeaderElector.startup">startup</a> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; Boolean)Boolean">inLock</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.controllerLock" title="=&gt; java.util.concurrent.locks.ReentrantLock">controllerLock</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+      <a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>.<span title="(x$1: String, x$2: org.I0Itec.zkclient.IZkDataListener)Unit">subscribeDataChanges</span><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.electionPath" title="String">electionPath</a>, <a href="#kafka.server;ZookeeperLeaderElector.leaderChangeListener" title="=&gt; ZookeeperLeaderElector.this.LeaderChangeListener">leaderChangeListener</a><span class="delimiter">)</span>
+      <a href="#kafka.server;ZookeeperLeaderElector.elect" title="=&gt; Boolean">elect</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="()Int" id="kafka.server;ZookeeperLeaderElector.getControllerID">getControllerID</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+    <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.readDataMaybeNull" title="(client: org.I0Itec.zkclient.ZkClient, path: String)(Option[String], org.apache.zookeeper.data.Stat)">readDataMaybeNull</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="#kafka.server;ZookeeperLeaderElector.electionPath" title="String">electionPath</a><span class="delimiter">)</span>.<span title="=&gt; Option[String]">_1</span> match <span class="delimiter">{</span>
+       case Some<span class="delimiter">(</span><a title="String" id="kafka.server;ZookeeperLeaderElector.getControllerID.controller">controller</a><span class="delimiter">)</span> =&gt; <a href="../controller/KafkaController.scala.html#kafka.controller.KafkaController" title="kafka.controller.KafkaController.type">KafkaController</a>.<a href="../controller/KafkaController.scala.html#kafka.controller.KafkaController.parseControllerId" title="(controllerInfoString: String)Int">parseControllerId</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.getControllerID.controller" title="String">controller</a><span class="delimiter">)</span>
+       case <span title="None.type">None</span> =&gt; -<span title="Int(-1)" class="int">1</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+    
+  def <a title="=&gt; Boolean" id="kafka.server;ZookeeperLeaderElector.elect">elect</a>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    val <a title="String" id="kafka.server;ZookeeperLeaderElector.elect.timestamp">timestamp</a> = <a href="../utils/Time.scala.html#kafka.utils.SystemTime" title="kafka.utils.SystemTime.type">SystemTime</a>.<a href="../utils/Time.scala.html#kafka.utils.SystemTime.milliseconds" title="=&gt; Long">milliseconds</a>.<span title="()String">toString</span>
+    val <a title="String" id="kafka.server;ZookeeperLeaderElector.elect.electString">electString</a> = <a href="../utils/Json.scala.html#kafka.utils.Json" title="kafka.utils.Json.type">Json</a>.<a href="../utils/Json.scala.html#kafka.utils.Json.encode" title="(obj: Any)String">encode</a><span class="delimiter">(</span><span title="(elems: (String, Any)*)scala.collection.immutable.Map[String,Any]">Map</span><span class="delimiter">(</span><span title="(self: String)ArrowAssoc[String]" class="string">&quot;version&quot;</span> <span title="(y: Int)(String, Int)">-&gt;</span> <span title="Int(1)" class="int">1</span>, <span title="(self: String)ArrowAssoc[String]" class="string">&quot;brokerid&quot;</span> <span title="(y: Int)(String, Int)">-&gt;</span> <a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a>, <span title="(self: String)ArrowAssoc[String]" class="string">&quot;timestamp&quot;</span> <span title="(y: String)(String, String)">-&gt;</span> <a href="#kafka.server;ZookeeperLeaderElector.elect.timestamp" title="String">timestamp</a><span class="delimiter">)</span><span class="delimiter">)</span>
+   
+   <a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="(x$1: Int)Unit">leaderId</a> = <a href="#kafka.server;ZookeeperLeaderElector.getControllerID" title="()Int">getControllerID</a> 
+    <span class="comment">/* 
+     * We can get here during the initial startup and the handleDeleted ZK callback. Because of the potential race condition, 
+     * it's possible that the controller has already been elected when we get here. This check will prevent the following 
+     * createEphemeralPath method from getting into an infinite loop if this broker is already the controller.
+     */</span>
+    if<span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="=&gt; Int">leaderId</a> <span title="(x: Int)Boolean">!=</span> -<span title="Int(-1)" class="int">1</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+       <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Broker %d has been elected as leader, so stopping the election process.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="=&gt; Int">leaderId</a><span class="delimiter">)</span><span class="delimiter">)</span>
+       return <a href="#kafka.server;ZookeeperLeaderElector.amILeader" title="=&gt; Boolean">amILeader</a>
+    <span class="delimiter">}</span>
+
+    try <span class="delimiter">{</span>
+      <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.createEphemeralPathExpectConflictHandleZKBug" title="(zkClient: org.I0Itec.zkclient.ZkClient, path: String, data: String, expectedCallerData: Any, checker: (String, Any) =&gt; Boolean, backoffTime: Int)Unit">createEphemeralPathExpectConflictHandleZKBug</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="#kafka.server;ZookeeperLeaderElector.electionPath" title="String">electionPath</a>, <a href="#kafka.server;ZookeeperLeaderElector.elect.electString" title="String">electString</a>, <a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a>,
+        <span class="delimiter">(</span>controllerString : <span title="String">String</span>, leaderId : <span title="Any">Any</span><span class="delimiter">)</span> =&gt; <a href="../controller/KafkaController.scala.html#kafka.controller.KafkaController" title="kafka.controller.KafkaController.type">KafkaController</a>.<a href="../controller/KafkaController.scala.html#kafka.controller.KafkaController.parseControllerId" title="(controllerInfoString: String)Int">parseControllerId</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.elect.$anonfun.controllerString" title="String">controllerString</a><span class="delimiter">)</span> <span title="(x: Int)Boolean">==</span> <a href="#kafka.server;ZookeeperLeaderElector.elect.$anonfun.leaderId" title="Any">leaderId</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Int" class="delimiter">[</span><span title="Int">Int</span><span class="delimiter">]</span>,
+        <a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.zkSessionTimeout" title="=&gt; Int">zkSessionTimeout</a><span class="delimiter">)</span>
+      <a href="../utils/Logging.scala.html#kafka.utils;Logging.info(1729dbc42f)" title="(msg: =&gt; String)Unit">info</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a> <span title="(x: String)String">+</span> <span title="String(&quot; successfully elected as leader&quot;)" class="string">&quot; successfully elected as leader&quot;</span><span class="delimiter">)</span>
+      <a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="(x$1: Int)Unit">leaderId</a> = <a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a>
+      <a href="#kafka.server;ZookeeperLeaderElector.onBecomingLeader" title="()Unit">onBecomingLeader</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+      case <a title="org.I0Itec.zkclient.exception.ZkNodeExistsException" id="kafka.server;ZookeeperLeaderElector.elect.e">e</a>: <span title="org.I0Itec.zkclient.exception.ZkNodeExistsException">ZkNodeExistsException</span> =&gt;
+        <span class="comment">// If someone else has written the path, then</span>
+        <a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="(x$1: Int)Unit">leaderId</a> = <a href="#kafka.server;ZookeeperLeaderElector.getControllerID" title="()Int">getControllerID</a> 
+
+        if <span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="=&gt; Int">leaderId</a> <span title="(x: Int)Boolean">!=</span> -<span title="Int(-1)" class="int">1</span><span class="delimiter">)</span>
+          <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Broker %d was elected as leader instead of broker %d&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="=&gt; Int">leaderId</a>, <a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        else
+          <a href="../utils/Logging.scala.html#kafka.utils;Logging.warn(1729dbc42f)" title="(msg: =&gt; String)Unit">warn</a><span class="delimiter">(</span><span title="String(&quot;A leader has been elected but just resigned, this will result in another round of election&quot;)" class="string">&quot;A leader has been elected but just resigned, this will result in another round of election&quot;</span><span class="delimiter">)</span>
+
+      case <a title="Throwable" id="kafka.server;ZookeeperLeaderElector.elect.e2">e2</a>: <span title="Throwable">Throwable</span> =&gt;
+        <a href="../utils/Logging.scala.html#kafka.utils;Logging.error(cfd112d89b)" title="(msg: =&gt; String, e: =&gt; Throwable)Unit">error</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Error while electing or becoming leader on broker %d&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a><span class="delimiter">)</span>, <a href="#kafka.server;ZookeeperLeaderElector.elect.e2" title="Throwable">e2</a><span class="delimiter">)</span>
+        <a href="#kafka.server;ZookeeperLeaderElector.resign" title="()Boolean">resign</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <a href="#kafka.server;ZookeeperLeaderElector.amILeader" title="=&gt; Boolean">amILeader</a>
+  <span class="delimiter">}</span>
+
+  def <a title="=&gt; Unit" id="kafka.server;ZookeeperLeaderElector.close">close</a> = <span class="delimiter">{</span>
+    <a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="(x$1: Int)Unit">leaderId</a> = -<span title="Int(-1)" class="int">1</span>
+  <span class="delimiter">}</span>
+
+  def <a title="=&gt; Boolean" id="kafka.server;ZookeeperLeaderElector.amILeader">amILeader</a> : <span title="Boolean">Boolean</span> = <a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="=&gt; Int">leaderId</a> <span title="(x: Int)Boolean">==</span> <a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a>
+
+  def <a title="()Boolean" id="kafka.server;ZookeeperLeaderElector.resign">resign</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+    <a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="(x$1: Int)Unit">leaderId</a> = -<span title="Int(-1)" class="int">1</span>
+    <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.deletePath" title="(client: org.I0Itec.zkclient.ZkClient, path: String)Boolean">deletePath</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="#kafka.server;ZookeeperLeaderElector.electionPath" title="String">electionPath</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * We do not have session expiration listen in the ZkElection, but assuming the caller who uses this module will
+   * have its own session expiration listener and handler
+   */</span>
+  class <a title="class LeaderChangeListener extends Object with org.I0Itec.zkclient.IZkDataListener with kafka.utils.Logging" id="kafka.server;ZookeeperLeaderElector;LeaderChangeListener">LeaderChangeListener</a> extends <a href="#kafka.server;ZookeeperLeaderElector;LeaderChangeListener" title="org.I0Itec.zkclient.IZkDataListener">IZkDataListener</a> with <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+    <span class="comment">/**
+     * Called when the leader information stored in zookeeper has changed. Record the new leader in memory
+     * @throws Exception On any error.
+     */</span>
+    @throws<span class="delimiter">(</span>classOf<span class="delimiter">[</span>Exception<span class="delimiter">]</span><span class="delimiter">)</span>
+    def <a title="(dataPath: String, data: Object)Unit" id="kafka.server;ZookeeperLeaderElector;LeaderChangeListener.handleDataChange">handleDataChange</a><span class="delimiter">(</span><a title="String" id="kafka.server;ZookeeperLeaderElector;LeaderChangeListener.handleDataChange.dataPath">dataPath</a>: <span title="String">String</span>, <a title="Object" id="kafka.server;ZookeeperLeaderElector;LeaderChangeListener.handleDataChange.data">data</a>: <span title="Object">Object</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; Unit)Unit">inLock</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.controllerLock" title="=&gt; java.util.concurrent.locks.ReentrantLock">controllerLock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="(x$1: Int)Unit">leaderId</a> = <a href="../controller/KafkaController.scala.html#kafka.controller.KafkaController" title="kafka.controller.KafkaController.type">KafkaController</a>.<a href="../controller/KafkaController.scala.html#kafka.controller.KafkaController.parseControllerId" title="(controllerInfoString: String)Int">parseControllerId</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector;LeaderChangeListener.handleDataChange.data" title="Object">data</a>.<span title="()String">toString</span><span class="delimiter">)</span>
+        <a href="../utils/Logging.scala.html#kafka.utils;Logging.info(1729dbc42f)" title="(msg: =&gt; String)Unit">info</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;New leader is %d&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.leaderId_=" title="=&gt; Int">leaderId</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Called when the leader information stored in zookeeper has been delete. Try to elect as the leader
+     * @throws Exception
+     *             On any error.
+     */</span>
+    @throws<span class="delimiter">(</span>classOf<span class="delimiter">[</span>Exception<span class="delimiter">]</span><span class="delimiter">)</span>
+    def <a title="(dataPath: String)Unit" id="kafka.server;ZookeeperLeaderElector;LeaderChangeListener.handleDataDeleted">handleDataDeleted</a><span class="delimiter">(</span><a title="String" id="kafka.server;ZookeeperLeaderElector;LeaderChangeListener.handleDataDeleted.dataPath">dataPath</a>: <span title="String">String</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; Boolean)Boolean">inLock</a><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.controllerContext" title="kafka.controller.ControllerContext">controllerContext</a>.<a href="../controller/KafkaController.scala.html#kafka.controller;ControllerContext.controllerLock" title="=&gt; java.util.concurrent.locks.ReentrantLock">controllerLock</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+        <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;%s leader change listener fired for path %s to handle data deleted: trying to elect as a leader&quot;</span>
+          .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.brokerId" title="Int">brokerId</a>, <a href="#kafka.server;ZookeeperLeaderElector;LeaderChangeListener.handleDataDeleted.dataPath" title="String">dataPath</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        if<span class="delimiter">(</span><a href="#kafka.server;ZookeeperLeaderElector.amILeader" title="=&gt; Boolean">amILeader</a><span class="delimiter">)</span>
+          <a href="#kafka.server;ZookeeperLeaderElector.onResigningAsLeader" title="()Unit">onResigningAsLeader</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#kafka.server;ZookeeperLeaderElector.elect" title="=&gt; Boolean">elect</a>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

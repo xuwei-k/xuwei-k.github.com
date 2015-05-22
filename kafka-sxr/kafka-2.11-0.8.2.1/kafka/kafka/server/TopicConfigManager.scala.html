@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/server/TopicConfigManager.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+
+package kafka.server
+
+import java.util.Properties
+import scala.collection._
+import kafka.log._
+import kafka.utils._
+import kafka.admin.AdminUtils
+import org.I0Itec.zkclient.<span class="delimiter">{</span>IZkChildListener, ZkClient<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * This class initiates and carries out topic config changes.
+ * 
+ * It works as follows.
+ * 
+ * Config is stored under the path
+ *   /brokers/topics/&lt;topic_name&gt;/config
+ * This znode stores the topic-overrides for this topic (but no defaults) in properties format.
+ * 
+ * To avoid watching all topics for changes instead we have a notification path
+ *   /brokers/config_changes
+ * The TopicConfigManager has a child watch on this path.
+ * 
+ * To update a topic config we first update the topic config properties. Then we create a new sequential
+ * znode under the change path which contains the name of the topic that was updated, say
+ *   /brokers/config_changes/config_change_13321
+ * This is just a notification--the actual config change is stored only once under the /brokers/topics/&lt;topic_name&gt;/config path.
+ *   
+ * This will fire a watcher on all brokers. This watcher works as follows. It reads all the config change notifications.
+ * It keeps track of the highest config change suffix number it has applied previously. For any previously applied change it finds
+ * it checks if this notification is larger than a static expiration time (say 10mins) and if so it deletes this notification. 
+ * For any new changes it reads the new configuration, combines it with the defaults, and updates the log config 
+ * for all logs for that topic (if any) that it has.
+ * 
+ * Note that config is always read from the config path in zk, the notification is just a trigger to do so. So if a broker is
+ * down and misses a change that is fine--when it restarts it will be loading the full config anyway. Note also that
+ * if there are two consecutive config changes it is possible that only the last one will be applied (since by the time the 
+ * broker reads the config the both changes may have been made). In this case the broker would needlessly refresh the config twice,
+ * but that is harmless.
+ * 
+ * On restart the config manager re-processes all notifications. This will usually be wasted work, but avoids any race conditions
+ * on startup where a change might be missed between the initial config load and registering for change notifications.
+ * 
+ */</span>
+class <a title="class TopicConfigManager extends AnyRef with kafka.utils.Logging" id="kafka.server.TopicConfigManager">TopicConfigManager</a><a href="#kafka.server.TopicConfigManager" title="kafka.server.TopicConfigManager" class="delimiter">(</a>private val <a title="org.I0Itec.zkclient.ZkClient" id="kafka.server;TopicConfigManager.zkClient">zkClient</a>: <span title="org.I0Itec.zkclient.ZkClient">ZkClient</span>,
+                         private val <a title="kafka.log.LogManager" id="kafka.server;TopicConfigManager.logManager">logManager</a>: <a href="../log/LogManager.scala.html#kafka.log;LogManager" title="kafka.log.LogManager">LogManager</a>,
+                         private val <a title="Long" id="kafka.server.TopicConfigManager.<init>$default$3">changeExpirationMs</a>: <span title="Long">Long</span> = <span class="int">15</span>*<span class="int">60</span><span title="Long(900000L)">*</span><span class="int">1000</span>,
+                         private val <a title="kafka.utils.Time" id="kafka.server.TopicConfigManager.<init>$default$4">time</a>: <a href="../utils/Time.scala.html#kafka.utils;Time" title="kafka.utils.Time">Time</a> = <a href="../utils/Time.scala.html#kafka.utils.SystemTime" title="kafka.utils.SystemTime.type">SystemTime</a><span class="delimiter">)</span> extends <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+  private var <a title="Long" id="kafka.server;TopicConfigManager.lastExecutedChange_=">lastExecutedChange</a> = -<span title="Long(-1L)" class="long">1L</span>
+  
+  <span class="comment">/**
+   * Begin watching for config changes
+   */</span>
+  def <a title="()Unit" id="kafka.server;TopicConfigManager.startup">startup</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.makeSurePersistentPathExists" title="(client: org.I0Itec.zkclient.ZkClient, path: String)Unit">makeSurePersistentPathExists</a><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.TopicConfigChangesPath" title="=&gt; String">TopicConfigChangesPath</a><span class="delimiter">)</span>
+    <a href="#kafka.server;TopicConfigManager.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>.<span title="(x$1: String, x$2: org.I0Itec.zkclient.IZkChildListener)java.util.List[String]">subscribeChildChanges</span><span class="delimiter">(</span><a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.TopicConfigChangesPath" title="=&gt; String">TopicConfigChangesPath</a>, <a href="#kafka.server;TopicConfigManager.ConfigChangeListener" title="TopicConfigManager.this.ConfigChangeListener.type">ConfigChangeListener</a><span class="delimiter">)</span>
+    <a href="#kafka.server;TopicConfigManager.processAllConfigChanges" title="()Unit">processAllConfigChanges</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Process all config changes
+   */</span>
+  private def <a title="()Unit" id="kafka.server;TopicConfigManager.processAllConfigChanges">processAllConfigChanges</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val <a title="java.util.List[String]" id="kafka.server;TopicConfigManager.processAllConfigChanges.configChanges">configChanges</a> = <a href="#kafka.server;TopicConfigManager.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>.<span title="(x$1: String)java.util.List[String]">getChildren</span><span class="delimiter">(</span><a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.TopicConfigChangesPath" title="=&gt; String">TopicConfigChangesPath</a><span class="delimiter">)</span>
+    import <span title="scala.collection.JavaConversions.type">JavaConversions</span>._
+    <a href="#kafka.server;TopicConfigManager.processConfigChanges" title="(notifications: Seq[String])Unit">processConfigChanges</a><span class="delimiter">(</span><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processAllConfigChanges.configChanges" title="(l: java.util.List[String])scala.collection.mutable.Buffer[String]">configChanges</a>: mutable.<span title="scala.collection.mutable.Buffer[String]">Buffer</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span>.<span title="(implicit ord: scala.math.Ordering[String])scala.collection.mutable.Buffer[String]">sorted</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Process the given list of config changes
+   */</span>
+  private def <a title="(notifications: Seq[String])Unit" id="kafka.server;TopicConfigManager.processConfigChanges">processConfigChanges</a><span class="delimiter">(</span><a title="Seq[String]" id="kafka.server;TopicConfigManager.processConfigChanges.notifications">notifications</a>: <span title="Seq[String]">Seq</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.notifications" title="Seq[String]">notifications</a>.<span title="=&gt; Int">size</span> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../utils/Logging.scala.html#kafka.utils;Logging.info(1729dbc42f)" title="(msg: =&gt; String)Unit">info</a><span class="delimiter">(</span><span title="String(&quot;Processing config change notification(s)...&quot;)" class="string">&quot;Processing config change notification(s)...&quot;</span><span class="delimiter">)</span>
+      val <a title="Long" id="kafka.server;TopicConfigManager.processConfigChanges.now">now</a> = <a href="#kafka.server.TopicConfigManager.<init>$default$4" title="=&gt; kafka.utils.Time">time</a>.<a href="../utils/Time.scala.html#kafka.utils;Time.milliseconds" title="=&gt; Long">milliseconds</a>
+      val <a title="scala.collection.mutable.Buffer[(kafka.common.TopicAndPartition, kafka.log.Log)]" id="kafka.server;TopicConfigManager.processConfigChanges.logs">logs</a> = <a href="#kafka.server;TopicConfigManager.logManager" title="=&gt; kafka.log.LogManager">logManager</a>.<a href="../log/LogManager.scala.html#kafka.log;LogManager.logsByTopicPartition" title="=&gt; scala.collection.immutable.Map[kafka.common.TopicAndPartition,kafka.log.Log]">logsByTopicPartition</a>.<span title="scala.collection.mutable.Buffer[(kafka.common.TopicAndPartition, kafka.log.Log)]">toBuffer</span>
+      val <a title="scala.collection.immutable.Map[String,scala.collection.mutable.Buffer[kafka.log.Log]]" id="kafka.server;TopicConfigManager.processConfigChanges.logsByTopic">logsByTopic</a> = <a href="#kafka.server;TopicConfigManager.processConfigChanges.logs" title="scala.collection.mutable.Buffer[(kafka.common.TopicAndPartition, kafka.log.Log)]">logs</a>.<span title="(f: ((kafka.common.TopicAndPartition, kafka.log.Log)) =&gt; String)scala.collection.immutable.Map[String,scala.collection.mutable.Buffer[(kafka.common.TopicAndPartition, kafka.log.Log)]]">groupBy</span><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.logsByTopic.$anonfun.x$1" title="(kafka.common.TopicAndPartition, kafka.log.Log)">_</a>.<span title="=&gt; kafka.common.TopicAndPartition">_1</span>.<a href="../common/TopicAndPartition.scala.html#kafka.common;TopicAndPartition.topic" title="=&gt; String">topic</a><span class="delimiter">)</span>.<span title="(f: scala.collection.mutable.Buffer[(kafka.common.TopicAndPartition, kafka.log.Log)] =&gt; scala.collection.mutable.Buffer[kafka.log.Log])scala.collection.immutable.Map[String,scala.collection.mutable.Buffer[kafka.log.Log]]">mapValues</span><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.logsByTopic.$anonfun.x$2" title="scala.collection.mutable.Buffer[(kafka.common.TopicAndPartition, kafka.log.Log)]">_</a>.<span title="(f: ((kafka.common.TopicAndPartition, kafka.log.Log)) =&gt; kafka.log.Log)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.mutable.Buffer[(kafka.common.TopicAndPartition, kafka.log.Log)],kafka.log.Log,scala.collection.mutable.Buffer[kafka.log.Log]])scala.collection.mutable.Buffer[kafka.log.Log]">map</span><span title="scala.collection.generic.CanBuildFrom[scala.collection.mutable.Buffer.Coll,kafka.log.Log,scala.collection.mutable.Buffer[kafka.log.Log]]" class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.logsByTopic.$anonfun.$anonfun.x$3" title="(kafka.common.TopicAndPartition, kafka.log.Log)">_</a>.<span title="=&gt; kafka.log.Log">_2</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      for <span class="delimiter">(</span><a title="String" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.notification">notification</a> &lt;- <a href="#kafka.server;TopicConfigManager.processConfigChanges.notifications" title="(f: String =&gt; Unit)Unit">notifications</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        val <a title="Long" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.changeId">changeId</a> = <a href="#kafka.server;TopicConfigManager.changeNumber" title="(name: String)Long">changeNumber</a><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.notification" title="String">notification</a><span class="delimiter">)</span>
+        if <span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.changeId" title="Long">changeId</a> <span title="(x: Long)Boolean">&gt;</span> <a href="#kafka.server;TopicConfigManager.lastExecutedChange_=" title="=&gt; Long">lastExecutedChange</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          val changeZnode = <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.TopicConfigChangesPath" title="=&gt; String">TopicConfigChangesPath</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;/&quot;)" class="string">&quot;/&quot;</span> <a title="String" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.changeZnode">+</a> <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.notification" title="String">notification</a>
+          val <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.jsonOpt" title="(Option[String], org.apache.zookeeper.data.Stat)" class="delimiter">(</a><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.x$4" title="Option[String]" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.jsonOpt">jsonOpt</a>, <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.x$4" title="org.apache.zookeeper.data.Stat" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.stat">stat</a><span class="delimiter">)</span> = <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.readDataMaybeNull" title="(client: org.I0Itec.zkclient.ZkClient, path: String)(Option[String], org.apache.zookeeper.data.Stat)">readDataMaybeNull</a><span title="(Option[String], org.apache.zookeeper.data.Stat) @unchecked" class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.changeZnode" title="String">changeZnode</a><span class="delimiter">)</span>
+          if<span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.jsonOpt" title="Option[String]">jsonOpt</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+            val <a title="String" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.json">json</a> = <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.jsonOpt" title="Option[String]">jsonOpt</a>.<span title="=&gt; String">get</span>
+            val <a title="String" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.topic">topic</a> = <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.json" title="String">json</a>.<span title="(x$1: Int, x$2: Int)String">substring</span><span class="delimiter">(</span><span title="Int(1)" class="int">1</span>, <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.json" title="String">json</a>.<span title="()Int">length</span> <span title="(x: Int)Int">-</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span> <span class="comment">// hacky way to dequote</span>
+            if <span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.logsByTopic" title="scala.collection.immutable.Map[String,scala.collection.mutable.Buffer[kafka.log.Log]]">logsByTopic</a>.<span title="(key: String)Boolean">contains</span><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.topic" title="String">topic</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+              <span class="comment">/* combine the default properties with the overrides in zk to create the new LogConfig */</span>
+              val <a title="java.util.Properties" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.props">props</a> = new <span title="java.util.Properties">Properties</span><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.logManager" title="=&gt; kafka.log.LogManager">logManager</a>.<a href="../log/LogManager.scala.html#kafka.log;LogManager.defaultConfig" title="=&gt; kafka.log.LogConfig">defaultConfig</a>.<a href="../log/LogConfig.scala.html#kafka.log;LogConfig.toProps" title="=&gt; java.util.Properties">toProps</a><span class="delimiter">)</span>
+              <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.props" title="java.util.Properties">props</a>.<span title="(x$1: java.util.Map[_ &lt;: Object, _ &lt;: Object])Unit">putAll</span><span class="delimiter">(</span><a href="../admin/AdminUtils.scala.html#kafka.admin.AdminUtils" title="kafka.admin.AdminUtils.type">AdminUtils</a>.<a href="../admin/AdminUtils.scala.html#kafka.admin.AdminUtils.fetchTopicConfig" title="(zkClient: org.I0Itec.zkclient.ZkClient, topic: String)java.util.Properties">fetchTopicConfig</a><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.topic" title="String">topic</a><span class="delimiter">)</span><span class="delimiter">)</span>
+              val <a title="kafka.log.LogConfig" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.logConfig">logConfig</a> = <a href="../log/LogConfig.scala.html#kafka.log.LogConfig" title="kafka.log.LogConfig.type">LogConfig</a>.<a href="../log/LogConfig.scala.html#kafka.log.LogConfig.fromProps(d9dd0b68a5)" title="(props: java.util.Properties)kafka.log.LogConfig">fromProps</a><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.props" title="java.util.Properties">props</a><span class="delimiter">)</span>
+              for <span class="delimiter">(</span><a title="kafka.log.Log" id="kafka.server;TopicConfigManager.processConfigChanges.$anonfun.$anonfun.log">log</a> &lt;- <a href="#kafka.server;TopicConfigManager.processConfigChanges.logsByTopic" title="(key: String)scala.collection.mutable.Buffer[kafka.log.Log]">logsByTopic</a><span title="(f: kafka.log.Log =&gt; Unit)Unit" class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.topic" title="String">topic</a><span class="delimiter">)</span><span class="delimiter">)</span>
+                <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.$anonfun.log" title="kafka.log.Log">log</a>.<a href="../log/Log.scala.html#kafka.log;Log.config_=" title="(x$1: kafka.log.LogConfig)Unit">config</a> = <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.logConfig" title="kafka.log.LogConfig">logConfig</a>
+              <a href="../utils/Logging.scala.html#kafka.utils;Logging.info(1729dbc42f)" title="(msg: =&gt; String)Unit">info</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Processed topic config change %d for topic %s, setting new config to %s.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.changeId" title="Long">changeId</a>, <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.topic" title="String">topic</a>, <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.props" title="java.util.Properties">props</a><span class="delimiter">)</span><span class="delimiter">)</span>
+              <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications" title="(now: Long, notifications: Seq[String])Unit">purgeObsoleteNotifications</a><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.processConfigChanges.now" title="Long">now</a>, <a href="#kafka.server;TopicConfigManager.processConfigChanges.notifications" title="Seq[String]">notifications</a><span class="delimiter">)</span>
+            <span class="delimiter">}</span>
+          <span class="delimiter">}</span>
+          <a href="#kafka.server;TopicConfigManager.lastExecutedChange_=" title="(x$1: Long)Unit">lastExecutedChange</a> = <a href="#kafka.server;TopicConfigManager.processConfigChanges.$anonfun.changeId" title="Long">changeId</a>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  private def <a title="(now: Long, notifications: Seq[String])Unit" id="kafka.server;TopicConfigManager.purgeObsoleteNotifications">purgeObsoleteNotifications</a><span class="delimiter">(</span><a title="Long" id="kafka.server;TopicConfigManager.purgeObsoleteNotifications.now">now</a>: <span title="Long">Long</span>, <a title="Seq[String]" id="kafka.server;TopicConfigManager.purgeObsoleteNotifications.notifications">notifications</a>: <span title="Seq[String]">Seq</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    for<span class="delimiter">(</span><a title="String" id="kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.notification">notification</a> &lt;- <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.notifications" title="Seq[String]">notifications</a>.<span title="(f: String =&gt; AnyVal)Unit">sorted</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.jsonOpt" title="(Option[String], org.apache.zookeeper.data.Stat)" class="delimiter">(</a><a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.x$5" title="Option[String]" id="kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.jsonOpt">jsonOpt</a>, <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.x$5" title="org.apache.zookeeper.data.Stat" id="kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.stat">stat</a><span class="delimiter">)</span> = <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.readDataMaybeNull" title="(client: org.I0Itec.zkclient.ZkClient, path: String)(Option[String], org.apache.zookeeper.data.Stat)">readDataMaybeNull</a><span title="(Option[String], org.apache.zookeeper.data.Stat) @unchecked" class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.TopicConfigChangesPath" title="=&gt; String">TopicConfigChangesPath</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;/&quot;)" class="string">&quot;/&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.notification" title="String">notification</a><span class="delimiter">)</span>
+      if<span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.jsonOpt" title="Option[String]">jsonOpt</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        val changeZnode = <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.TopicConfigChangesPath" title="=&gt; String">TopicConfigChangesPath</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;/&quot;)" class="string">&quot;/&quot;</span> <a title="String" id="kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.changeZnode">+</a> <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.notification" title="String">notification</a>
+        if <span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.now" title="Long">now</a> <span title="(x: Long)Long">-</span> <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.stat" title="org.apache.zookeeper.data.Stat">stat</a>.<span title="()Long">getCtime</span> <span title="(x: Long)Boolean">&gt;</span> <a href="#kafka.server.TopicConfigManager.<init>$default$3" title="=&gt; Long">changeExpirationMs</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Purging config change notification &quot;)" class="string">&quot;Purging config change notification &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.notification" title="String">notification</a><span class="delimiter">)</span>
+          <a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils" title="kafka.utils.ZkUtils.type">ZkUtils</a>.<a href="../utils/ZkUtils.scala.html#kafka.utils.ZkUtils.deletePath" title="(client: org.I0Itec.zkclient.ZkClient, path: String)Boolean">deletePath</a><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.zkClient" title="=&gt; org.I0Itec.zkclient.ZkClient">zkClient</a>, <a href="#kafka.server;TopicConfigManager.purgeObsoleteNotifications.$anonfun.changeZnode" title="String">changeZnode</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> else <span class="delimiter">{</span>
+          return
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+    
+  <span class="comment">/* get the change number from a change notification znode */</span>
+  private def <a title="(name: String)Long" id="kafka.server;TopicConfigManager.changeNumber">changeNumber</a><span class="delimiter">(</span><a title="String" id="kafka.server;TopicConfigManager.changeNumber.name">name</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="Long">Long</span> = <a href="#kafka.server;TopicConfigManager.changeNumber.name" title="String">name</a>.<span title="(x$1: Int)String">substring</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="delimiter">(</span><a href="../admin/AdminUtils.scala.html#kafka.admin.AdminUtils" title="kafka.admin.AdminUtils.type">AdminUtils</a>.<a href="../admin/AdminUtils.scala.html#kafka.admin.AdminUtils.TopicConfigChangeZnodePrefix" title="=&gt; String">TopicConfigChangeZnodePrefix</a>.<span title="()Int">length</span><span class="delimiter">)</span>.<span title="=&gt; Long">toLong</span>
+  
+  <span class="comment">/**
+   * A listener that applies config changes to logs
+   */</span>
+  object <a title="TopicConfigManager.this.ConfigChangeListener.type" id="kafka.server;TopicConfigManager.ConfigChangeListener">ConfigChangeListener</a> extends <span title="org.I0Itec.zkclient.IZkChildListener">IZkChildListener</span> <span class="delimiter">{</span>
+    override def <a title="(path: String, chillins: java.util.List[String])Unit" id="kafka.server;TopicConfigManager.ConfigChangeListener.handleChildChange">handleChildChange</a><span class="delimiter">(</span><a title="String" id="kafka.server;TopicConfigManager.ConfigChangeListener.handleChildChange.path">path</a>: <span title="String">String</span>, <a title="java.util.List[String]" id="kafka.server;TopicConfigManager.ConfigChangeListener.handleChildChange.chillins">chillins</a>: java.util.<span title="java.util.List[String]">List</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      try <span class="delimiter">{</span>
+        import <span title="scala.collection.JavaConversions.type">JavaConversions</span>._
+        <a href="#kafka.server;TopicConfigManager.processConfigChanges" title="(notifications: Seq[String])Unit">processConfigChanges</a><span class="delimiter">(</span><a href="#kafka.server;TopicConfigManager.ConfigChangeListener.handleChildChange.chillins" title="(l: java.util.List[String])scala.collection.mutable.Buffer[String]">chillins</a>: mutable.<span title="scala.collection.mutable.Buffer[String]">Buffer</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+        case <a title="Exception" id="kafka.server;TopicConfigManager.ConfigChangeListener.handleChildChange.e">e</a>: <span title="Exception">Exception</span> =&gt; <a href="../utils/Logging.scala.html#kafka.utils;Logging.error(cfd112d89b)" title="(msg: =&gt; String, e: =&gt; Throwable)Unit">error</a><span class="delimiter">(</span><span title="String(&quot;Error processing config change:&quot;)" class="string">&quot;Error processing config change:&quot;</span>, <a href="#kafka.server;TopicConfigManager.ConfigChangeListener.handleChildChange.e" title="Exception">e</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+        </pre>
+    </body>
+</html>

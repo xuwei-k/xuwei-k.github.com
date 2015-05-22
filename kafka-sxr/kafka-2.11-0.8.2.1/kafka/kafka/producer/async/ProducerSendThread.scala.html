@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/producer/async/ProducerSendThread.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+
+package kafka.producer.async
+
+import kafka.utils.<span class="delimiter">{</span>SystemTime, Logging<span class="delimiter">}</span>
+import java.util.concurrent.<span class="delimiter">{</span>TimeUnit, CountDownLatch, BlockingQueue<span class="delimiter">}</span>
+import collection.mutable.ArrayBuffer
+import kafka.producer.KeyedMessage
+import kafka.metrics.KafkaMetricsGroup
+import com.yammer.metrics.core.Gauge
+
+class <a title="class ProducerSendThread[K, V] extends Thread with kafka.utils.Logging with kafka.metrics.KafkaMetricsGroup" id="kafka.producer.async;ProducerSendThread">ProducerSendThread</a><span class="delimiter">[</span><a title="" id="kafka.producer.async;ProducerSendThread;K">K</a>,<a title="" id="kafka.producer.async;ProducerSendThread;V">V</a><span class="delimiter">]</span><a href="#kafka.producer.async;ProducerSendThread" title="kafka.producer.async.ProducerSendThread[K,V]" class="delimiter">(</a>val <a title="String" id="kafka.producer.async;ProducerSendThread.threadName">threadName</a>: <span title="String">String</span>,
+                              val <a title="java.util.concurrent.BlockingQueue[kafka.producer.KeyedMessage[K,V]]" id="kafka.producer.async;ProducerSendThread.queue">queue</a>: <span title="java.util.concurrent.BlockingQueue[kafka.producer.KeyedMessage[K,V]]">BlockingQueue</span><span class="delimiter">[</span>KeyedMessage<span class="delimiter">[</span>K,V<span class="delimiter">]</span><span class="delimiter">]</span>,
+                              val <a title="kafka.producer.async.EventHandler[K,V]" id="kafka.producer.async;ProducerSendThread.handler">handler</a>: <a href="EventHandler.scala.html#kafka.producer.async;EventHandler" title="kafka.producer.async.EventHandler[K,V]">EventHandler</a><span class="delimiter">[</span>K,V<span class="delimiter">]</span>,
+                              val <a title="Long" id="kafka.producer.async;ProducerSendThread.queueTime">queueTime</a>: <span title="Long">Long</span>,
+                              val <a title="Int" id="kafka.producer.async;ProducerSendThread.batchSize">batchSize</a>: <span title="Int">Int</span>,
+                              val <a title="String" id="kafka.producer.async;ProducerSendThread.clientId">clientId</a>: <span title="String">String</span><span class="delimiter">)</span> extends <a href="#kafka.producer.async;ProducerSendThread" title="Thread">Thread</a><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.threadName" title="String">threadName</a><span class="delimiter">)</span> with <a href="../../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> with <a href="../../metrics/KafkaMetricsGroup.scala.html#kafka.metrics;KafkaMetricsGroup" title="kafka.metrics.KafkaMetricsGroup">KafkaMetricsGroup</a> <span class="delimiter">{</span>
+
+  private val <a title="java.util.concurrent.CountDownLatch" id="kafka.producer.async;ProducerSendThread.shutdownLatch">shutdownLatch</a> = new <span title="java.util.concurrent.CountDownLatch">CountDownLatch</span><span class="delimiter">(</span><span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+  private val <a title="kafka.producer.KeyedMessage[K,V]" id="kafka.producer.async;ProducerSendThread.shutdownCommand">shutdownCommand</a> = new <a href="../KeyedMessage.scala.html#kafka.producer;KeyedMessage" title="kafka.producer.KeyedMessage[K,V]">KeyedMessage</a><span class="delimiter">[</span>K,V<span class="delimiter">]</span><span class="delimiter">(</span><span title="String(&quot;shutdown&quot;)" class="string">&quot;shutdown&quot;</span>, null.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="K" class="delimiter">[</span><a href="#kafka.producer.async;ProducerSendThread;K" title="K">K</a><span class="delimiter">]</span>, null.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="V" class="delimiter">[</span><a href="#kafka.producer.async;ProducerSendThread;V" title="V">V</a><span class="delimiter">]</span><span class="delimiter">)</span>
+
+  <a href="../../metrics/KafkaMetricsGroup.scala.html#kafka.metrics;KafkaMetricsGroup.newGauge" title="(name: String, metric: com.yammer.metrics.core.Gauge[Int], tags: scala.collection.Map[String,String])com.yammer.metrics.core.Gauge[Int]">newGauge</a><span class="delimiter">(</span><span title="String(&quot;ProducerQueueSize&quot;)" class="string">&quot;ProducerQueueSize&quot;</span>,
+          new <a title="&lt;$anon: com.yammer.metrics.core.Gauge[Int]&gt; extends com.yammer.metrics.core.Gauge[Int]" id="kafka.producer.async;ProducerSendThread.<local ProducerSendThread>;$anon">Gauge</a><span class="delimiter">[</span>Int<span class="delimiter">]</span> <span class="delimiter">{</span>
+            def <a title="()Int" id="kafka.producer.async;ProducerSendThread.<local ProducerSendThread>;$anon.value">value</a> = <a href="#kafka.producer.async;ProducerSendThread.queue" title="=&gt; java.util.concurrent.BlockingQueue[kafka.producer.KeyedMessage[K,V]]">queue</a>.<span title="()Int">size</span>
+          <span class="delimiter">}</span>,
+          <span title="(elems: (String, String)*)scala.collection.immutable.Map[String,String]">Map</span><span class="delimiter">(</span><span title="(self: String)ArrowAssoc[String]" class="string">&quot;clientId&quot;</span> <span title="(y: String)(String, String)">-&gt;</span> <a href="#kafka.producer.async;ProducerSendThread.clientId" title="=&gt; String">clientId</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  override def <a title="()Unit" id="kafka.producer.async;ProducerSendThread.run">run</a> <span class="delimiter">{</span>
+    try <span class="delimiter">{</span>
+      <a href="#kafka.producer.async;ProducerSendThread.processEvents" title="()Unit">processEvents</a>
+    <span class="delimiter">}</span>catch <span class="delimiter">{</span>
+      case <a title="Throwable" id="kafka.producer.async;ProducerSendThread.run.e">e</a>: <span title="Throwable">Throwable</span> =&gt; <a href="../../utils/Logging.scala.html#kafka.utils;Logging.error(cfd112d89b)" title="(msg: =&gt; String, e: =&gt; Throwable)Unit">error</a><span class="delimiter">(</span><span title="String(&quot;Error in sending events: &quot;)" class="string">&quot;Error in sending events: &quot;</span>, <a href="#kafka.producer.async;ProducerSendThread.run.e" title="Throwable">e</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>finally <span class="delimiter">{</span>
+      <a href="#kafka.producer.async;ProducerSendThread.shutdownLatch" title="=&gt; java.util.concurrent.CountDownLatch">shutdownLatch</a>.<span title="()Unit">countDown</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  def <a title="=&gt; Unit" id="kafka.producer.async;ProducerSendThread.shutdown">shutdown</a> = <span class="delimiter">{</span>
+    <a href="../../utils/Logging.scala.html#kafka.utils;Logging.info(1729dbc42f)" title="(msg: =&gt; String)Unit">info</a><span class="delimiter">(</span><span title="String(&quot;Begin shutting down ProducerSendThread&quot;)" class="string">&quot;Begin shutting down ProducerSendThread&quot;</span><span class="delimiter">)</span>
+    <a href="#kafka.producer.async;ProducerSendThread.queue" title="=&gt; java.util.concurrent.BlockingQueue[kafka.producer.KeyedMessage[K,V]]">queue</a>.<span title="(x$1: kafka.producer.KeyedMessage[K,V])Unit">put</span><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.shutdownCommand" title="=&gt; kafka.producer.KeyedMessage[K,V]">shutdownCommand</a><span class="delimiter">)</span>
+    <a href="#kafka.producer.async;ProducerSendThread.shutdownLatch" title="=&gt; java.util.concurrent.CountDownLatch">shutdownLatch</a>.<span title="()Unit">await</span>
+    <a href="../../utils/Logging.scala.html#kafka.utils;Logging.info(1729dbc42f)" title="(msg: =&gt; String)Unit">info</a><span class="delimiter">(</span><span title="String(&quot;Shutdown ProducerSendThread complete&quot;)" class="string">&quot;Shutdown ProducerSendThread complete&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="()Unit" id="kafka.producer.async;ProducerSendThread.processEvents">processEvents</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    var <a title="Long" id="kafka.producer.async;ProducerSendThread.processEvents.lastSend">lastSend</a> = <a href="../../utils/Time.scala.html#kafka.utils.SystemTime" title="kafka.utils.SystemTime.type">SystemTime</a>.<a href="../../utils/Time.scala.html#kafka.utils.SystemTime.milliseconds" title="=&gt; Long">milliseconds</a>
+    var <a title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]" id="kafka.producer.async;ProducerSendThread.processEvents.events">events</a> = new <span title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">ArrayBuffer</span><span class="delimiter">[</span>KeyedMessage<span class="delimiter">[</span>K,V<span class="delimiter">]</span><span class="delimiter">]</span>
+    var <a title="Boolean" id="kafka.producer.async;ProducerSendThread.processEvents.full">full</a>: <span title="Boolean">Boolean</span> = false
+
+    <span class="comment">// drain the queue until you get a shutdown command</span>
+    <span title="=&gt; collection.immutable.Stream.type">Stream</span>.<span title="(elem: =&gt; kafka.producer.KeyedMessage[K,V])scala.collection.immutable.Stream[kafka.producer.KeyedMessage[K,V]]">continually</span><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.queue" title="=&gt; java.util.concurrent.BlockingQueue[kafka.producer.KeyedMessage[K,V]]">queue</a>.<span title="(x$1: Long, x$2: java.util.concurrent.TimeUnit)kafka.producer.KeyedMessage[K,V]">poll</span><span class="delimiter">(</span>scala.math.<span title="(x: Long, y: Long)Long">max</span><span class="delimiter">(</span><span title="Long(0L)" class="int">0</span>, <span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.lastSend" title="Long">lastSend</a> <span title="(x: Long)Long">+</span> <a href="#kafka.producer.async;ProducerSendThread.queueTime" title="=&gt; Long">queueTime</a><span class="delimiter">)</span> <span title="(x: Long)Long">-</span> <a href="../../utils/Time.scala.html#kafka.utils.SystemTime" title="kafka.utils.SystemTime.type">SystemTime</a>.<a href="../../utils/Time.scala.html#kafka.utils.SystemTime.milliseconds" title="=&gt; Long">milliseconds</a><span class="delimiter">)</span>, TimeUnit.<span title="java.util.concurrent.TimeUnit(MILLISECONDS)">MILLISECONDS</span><span class="delimiter">)</span><span class="delimiter">)</span>
+                      .<span title="(p: kafka.producer.KeyedMessage[K,V] =&gt; Boolean)scala.collection.immutable.Stream[kafka.producer.KeyedMessage[K,V]]">takeWhile</span><span class="delimiter">(</span><a title="kafka.producer.KeyedMessage[K,V]" id="kafka.producer.async;ProducerSendThread.processEvents.$anonfun.item">item</a> =&gt; if<span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.item" title="kafka.producer.KeyedMessage[K,V]">item</a> <span title="(x$1: Any)Boolean">!=</span> null<span class="delimiter">)</span> <a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.item" title="kafka.producer.KeyedMessage[K,V]">item</a> <span title="(x$1: AnyRef)Boolean">ne</span> <a href="#kafka.producer.async;ProducerSendThread.shutdownCommand" title="=&gt; kafka.producer.KeyedMessage[K,V]">shutdownCommand</a> else true<span class="delimiter">)</span>.<span title="(f: kafka.producer.KeyedMessage[K,V] =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span>
+      <a title="kafka.producer.KeyedMessage[K,V]" id="kafka.producer.async;ProducerSendThread.processEvents.$anonfun.currentQueueItem">currentQueueItem</a> =&gt;
+        val elapsed = <span class="delimiter">(</span><a href="../../utils/Time.scala.html#kafka.utils.SystemTime" title="kafka.utils.SystemTime.type">SystemTime</a>.<a href="../../utils/Time.scala.html#kafka.utils.SystemTime.milliseconds" title="=&gt; Long">milliseconds</a> <a title="Long" id="kafka.producer.async;ProducerSendThread.processEvents.$anonfun.elapsed">-</a> <a href="#kafka.producer.async;ProducerSendThread.processEvents.lastSend" title="Long">lastSend</a><span class="delimiter">)</span>
+        <span class="comment">// check if the queue time is reached. This happens when the poll method above returns after a timeout and</span>
+        <span class="comment">// returns a null object</span>
+        val expired = <a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.currentQueueItem" title="kafka.producer.KeyedMessage[K,V]">currentQueueItem</a> <a title="Boolean" id="kafka.producer.async;ProducerSendThread.processEvents.$anonfun.expired">==</a> null
+        if<span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.currentQueueItem" title="kafka.producer.KeyedMessage[K,V]">currentQueueItem</a> <span title="(x$1: Any)Boolean">!=</span> null<span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="../../utils/Logging.scala.html#kafka.utils;Logging.trace(1729dbc42f)" title="(msg: =&gt; String)Unit">trace</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Dequeued item for topic %s, partition key: %s, data: %s&quot;</span>
+              .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.currentQueueItem" title="kafka.producer.KeyedMessage[K,V]">currentQueueItem</a>.<a href="../KeyedMessage.scala.html#kafka.producer;KeyedMessage.topic" title="=&gt; String">topic</a>, <a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.currentQueueItem" title="kafka.producer.KeyedMessage[K,V]">currentQueueItem</a>.<a href="../KeyedMessage.scala.html#kafka.producer;KeyedMessage.key" title="=&gt; K">key</a>, <a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.currentQueueItem" title="kafka.producer.KeyedMessage[K,V]">currentQueueItem</a>.<a href="../KeyedMessage.scala.html#kafka.producer;KeyedMessage.message" title="=&gt; V">message</a><span class="delimiter">)</span><span class="delimiter">)</span>
+          <a href="#kafka.producer.async;ProducerSendThread.processEvents.events" title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">events</a> <span title="(elem: kafka.producer.KeyedMessage[K,V])scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">+=</span> <a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.currentQueueItem" title="kafka.producer.KeyedMessage[K,V]">currentQueueItem</a>
+        <span class="delimiter">}</span>
+
+        <span class="comment">// check if the batch size is reached</span>
+        <a href="#kafka.producer.async;ProducerSendThread.processEvents.full" title="Boolean">full</a> = <a href="#kafka.producer.async;ProducerSendThread.processEvents.events" title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">events</a>.<span title="=&gt; Int">size</span> <span title="(x: Int)Boolean">&gt;=</span> <a href="#kafka.producer.async;ProducerSendThread.batchSize" title="=&gt; Int">batchSize</a>
+
+        if<span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.full" title="Boolean">full</a> <span title="(x: Boolean)Boolean">||</span> <a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.expired" title="Boolean">expired</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          if<span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.expired" title="Boolean">expired</a><span class="delimiter">)</span>
+            <a href="../../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.$anonfun.elapsed" title="Long">elapsed</a> <span title="(x: String)String">+</span> <span title="String(&quot; ms elapsed. Queue time reached. Sending..&quot;)" class="string">&quot; ms elapsed. Queue time reached. Sending..&quot;</span><span class="delimiter">)</span>
+          if<span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.full" title="Boolean">full</a><span class="delimiter">)</span>
+            <a href="../../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Batch full. Sending..&quot;)" class="string">&quot;Batch full. Sending..&quot;</span><span class="delimiter">)</span>
+          <span class="comment">// if either queue time has reached or batch size has reached, dispatch to event handler</span>
+          <a href="#kafka.producer.async;ProducerSendThread.tryToHandle" title="(events: Seq[kafka.producer.KeyedMessage[K,V]])Unit">tryToHandle</a><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.events" title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">events</a><span class="delimiter">)</span>
+          <a href="#kafka.producer.async;ProducerSendThread.processEvents.lastSend" title="Long">lastSend</a> = <a href="../../utils/Time.scala.html#kafka.utils.SystemTime" title="kafka.utils.SystemTime.type">SystemTime</a>.<a href="../../utils/Time.scala.html#kafka.utils.SystemTime.milliseconds" title="=&gt; Long">milliseconds</a>
+          <a href="#kafka.producer.async;ProducerSendThread.processEvents.events" title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">events</a> = new <span title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">ArrayBuffer</span><span class="delimiter">[</span>KeyedMessage<span class="delimiter">[</span>K,V<span class="delimiter">]</span><span class="delimiter">]</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <span class="comment">// send the last batch of events</span>
+    <a href="#kafka.producer.async;ProducerSendThread.tryToHandle" title="(events: Seq[kafka.producer.KeyedMessage[K,V]])Unit">tryToHandle</a><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.processEvents.events" title="scala.collection.mutable.ArrayBuffer[kafka.producer.KeyedMessage[K,V]]">events</a><span class="delimiter">)</span>
+    if<span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.queue" title="=&gt; java.util.concurrent.BlockingQueue[kafka.producer.KeyedMessage[K,V]]">queue</a>.<span title="()Int">size</span> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      throw new <a href="IllegalQueueStateException.scala.html#kafka.producer.async;IllegalQueueStateException" title="kafka.producer.async.IllegalQueueStateException">IllegalQueueStateException</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Invalid queue state! After queue shutdown, %d remaining items in the queue&quot;</span>
+        .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.queue" title="=&gt; java.util.concurrent.BlockingQueue[kafka.producer.KeyedMessage[K,V]]">queue</a>.<span title="()Int">size</span><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  def <a title="(events: Seq[kafka.producer.KeyedMessage[K,V]])Unit" id="kafka.producer.async;ProducerSendThread.tryToHandle">tryToHandle</a><span class="delimiter">(</span><a title="Seq[kafka.producer.KeyedMessage[K,V]]" id="kafka.producer.async;ProducerSendThread.tryToHandle.events">events</a>: <span title="Seq[kafka.producer.KeyedMessage[K,V]]">Seq</span><span class="delimiter">[</span>KeyedMessage<span class="delimiter">[</span>K,V<span class="delimiter">]</span><span class="delimiter">]</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val <a title="Int" id="kafka.producer.async;ProducerSendThread.tryToHandle.size">size</a> = <a href="#kafka.producer.async;ProducerSendThread.tryToHandle.events" title="Seq[kafka.producer.KeyedMessage[K,V]]">events</a>.<span title="=&gt; Int">size</span>
+    try <span class="delimiter">{</span>
+      <a href="../../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;Handling &quot;)" class="string">&quot;Handling &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.producer.async;ProducerSendThread.tryToHandle.size" title="Int">size</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; events&quot;)" class="string">&quot; events&quot;</span><span class="delimiter">)</span>
+      if<span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.tryToHandle.size" title="Int">size</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+        <a href="#kafka.producer.async;ProducerSendThread.handler" title="=&gt; kafka.producer.async.EventHandler[K,V]">handler</a>.<a href="EventHandler.scala.html#kafka.producer.async;EventHandler.handle" title="(events: Seq[kafka.producer.KeyedMessage[K,V]])Unit">handle</a><span class="delimiter">(</span><a href="#kafka.producer.async;ProducerSendThread.tryToHandle.events" title="Seq[kafka.producer.KeyedMessage[K,V]]">events</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>catch <span class="delimiter">{</span>
+      case <a title="Throwable" id="kafka.producer.async;ProducerSendThread.tryToHandle.e">e</a>: <span title="Throwable">Throwable</span> =&gt; <a href="../../utils/Logging.scala.html#kafka.utils;Logging.error(cfd112d89b)" title="(msg: =&gt; String, e: =&gt; Throwable)Unit">error</a><span class="delimiter">(</span><span title="String(&quot;Error in handling batch of &quot;)" class="string">&quot;Error in handling batch of &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.producer.async;ProducerSendThread.tryToHandle.size" title="Int">size</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; events&quot;)" class="string">&quot; events&quot;</span>, <a href="#kafka.producer.async;ProducerSendThread.tryToHandle.e" title="Throwable">e</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

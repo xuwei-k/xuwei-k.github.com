@@ -1,0 +1,397 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>kafka/kafka/log/OffsetIndex.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the &quot;License&quot;); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */</span>
+
+package kafka.log
+
+import scala.math._
+import java.io._
+import java.nio._
+import java.nio.channels._
+import java.util.concurrent.locks._
+import java.util.concurrent.atomic._
+import kafka.utils._
+import kafka.utils.<a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.inLock
+import kafka.common.InvalidOffsetException
+
+<span class="comment">/**
+ * An index that maps offsets to physical file locations for a particular log segment. This index may be sparse:
+ * that is it may not hold an entry for all messages in the log.
+ * 
+ * The index is stored in a file that is pre-allocated to hold a fixed maximum number of 8-byte entries.
+ * 
+ * The index supports lookups against a memory-map of this file. These lookups are done using a simple binary search variant
+ * to locate the offset/location pair for the greatest offset less than or equal to the target offset.
+ * 
+ * Index files can be opened in two ways: either as an empty, mutable index that allows appends or
+ * an immutable read-only index file that has previously been populated. The makeReadOnly method will turn a mutable file into an 
+ * immutable one and truncate off any extra bytes. This is done when the index file is rolled over.
+ * 
+ * No attempt is made to checksum the contents of this file, in the event of a crash it is rebuilt.
+ * 
+ * The file format is a series of entries. The physical format is a 4 byte &quot;relative&quot; offset and a 4 byte file location for the 
+ * message with that offset. The offset stored is relative to the base offset of the index file. So, for example,
+ * if the base offset was 50, then the offset 55 would be stored as 5. Using relative offsets in this way let's us use
+ * only 4 bytes for the offset.
+ * 
+ * The frequency of entries is up to the user of this class.
+ * 
+ * All external APIs translate from relative offsets to full offsets, so users of this class do not interact with the internal 
+ * storage format.
+ */</span>
+class <a title="class OffsetIndex extends AnyRef with kafka.utils.Logging" id="kafka.log.OffsetIndex">OffsetIndex</a><a href="#kafka.log.OffsetIndex" title="kafka.log.OffsetIndex" class="delimiter">(</a>@volatile var <a title="java.io.File" id="kafka.log;OffsetIndex.file">file</a>: <span title="java.io.File">File</span>, val <a title="Long" id="kafka.log;OffsetIndex.baseOffset">baseOffset</a>: <span title="Long">Long</span>, val <a title="Int" id="kafka.log.OffsetIndex.<init>$default$3">maxIndexSize</a>: <span title="Int">Int</span> = -<span title="Int(-1)" class="int">1</span><span class="delimiter">)</span> extends <a href="../utils/Logging.scala.html#kafka.utils;Logging" title="kafka.utils.Logging">Logging</a> <span class="delimiter">{</span>
+  
+  private val <a title="java.util.concurrent.locks.ReentrantLock" id="kafka.log;OffsetIndex.lock">lock</a> = new <span title="java.util.concurrent.locks.ReentrantLock">ReentrantLock</span>
+  
+  <span class="comment">/* initialize the memory mapping for this index */</span>
+  private var <a title="java.nio.MappedByteBuffer" id="kafka.log;OffsetIndex.mmap_=">mmap</a>: <span title="java.nio.MappedByteBuffer">MappedByteBuffer</span> = 
+    <span class="delimiter">{</span>
+      val <a title="Boolean" id="kafka.log;OffsetIndex.mmap.newlyCreated">newlyCreated</a> = <a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()Boolean">createNewFile</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      val <a title="java.io.RandomAccessFile" id="kafka.log;OffsetIndex.mmap.raf">raf</a> = new <span title="java.io.RandomAccessFile">RandomAccessFile</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>, <span title="String(&quot;rw&quot;)" class="string">&quot;rw&quot;</span><span class="delimiter">)</span>
+      try <span class="delimiter">{</span>
+        <span class="comment">/* pre-allocate the file if necessary */</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.mmap.newlyCreated" title="Boolean">newlyCreated</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          if<span class="delimiter">(</span><a href="#kafka.log.OffsetIndex.<init>$default$3" title="=&gt; Int">maxIndexSize</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(8)" class="int">8</span><span class="delimiter">)</span>
+            throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="String(&quot;Invalid max index size: &quot;)" class="string">&quot;Invalid max index size: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log.OffsetIndex.<init>$default$3" title="=&gt; Int">maxIndexSize</a><span class="delimiter">)</span>
+          <a href="#kafka.log;OffsetIndex.mmap.raf" title="java.io.RandomAccessFile">raf</a>.<span title="(x$1: Long)Unit">setLength</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.roundToExactMultiple" title="(number: Int, factor: Int)Int">roundToExactMultiple</a><span title="=&gt; Long" class="delimiter">(</span><a href="#kafka.log.OffsetIndex.<init>$default$3" title="=&gt; Int">maxIndexSize</a>, <span title="Int(8)" class="int">8</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+          
+        <span class="comment">/* memory-map the file */</span>
+        val <a title="Long" id="kafka.log;OffsetIndex.mmap.len">len</a> = <a href="#kafka.log;OffsetIndex.mmap.raf" title="java.io.RandomAccessFile">raf</a>.<span title="()Long">length</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        val <a title="java.nio.MappedByteBuffer" id="kafka.log;OffsetIndex.mmap.idx">idx</a> = <a href="#kafka.log;OffsetIndex.mmap.raf" title="java.io.RandomAccessFile">raf</a>.<span title="()java.nio.channels.FileChannel">getChannel</span>.<span title="(x$1: java.nio.channels.FileChannel.MapMode, x$2: Long, x$3: Long)java.nio.MappedByteBuffer">map</span><span class="delimiter">(</span><span title="java.nio.channels.FileChannel.type">FileChannel</span>.<span title="java.nio.channels.FileChannel.MapMode.type">MapMode</span>.<span title="java.nio.channels.FileChannel.MapMode">READ_WRITE</span>, <span title="Long(0L)" class="int">0</span>, <a href="#kafka.log;OffsetIndex.mmap.len" title="Long">len</a><span class="delimiter">)</span>
+          
+        <span class="comment">/* set the position in the index for the next entry */</span>
+        if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.mmap.newlyCreated" title="Boolean">newlyCreated</a><span class="delimiter">)</span>
+          <a href="#kafka.log;OffsetIndex.mmap.idx" title="java.nio.MappedByteBuffer">idx</a>.<span title="(x$1: Int)java.nio.Buffer">position</span><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+        else
+          <span class="comment">// if this is a pre-existing index, assume it is all valid and set position to last entry</span>
+          <a href="#kafka.log;OffsetIndex.mmap.idx" title="java.nio.MappedByteBuffer">idx</a>.<span title="(x$1: Int)java.nio.Buffer">position</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.roundToExactMultiple" title="(number: Int, factor: Int)Int">roundToExactMultiple</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.mmap.idx" title="java.nio.MappedByteBuffer">idx</a>.<span title="()Int">limit</span>, <span title="Int(8)" class="int">8</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <a href="#kafka.log;OffsetIndex.mmap.idx" title="java.nio.MappedByteBuffer">idx</a>
+      <span class="delimiter">}</span> finally <span class="delimiter">{</span>
+        <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Logging.scala.html#kafka.utils;Logging.swallow" title="(action: =&gt; Unit)Unit">swallow</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.mmap.raf" title="java.io.RandomAccessFile">raf</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  
+  <span class="comment">/* the number of eight-byte entries currently in the index */</span>
+  private var <a title="java.util.concurrent.atomic.AtomicInteger" id="kafka.log;OffsetIndex.size_=">size</a> = new <span title="java.util.concurrent.atomic.AtomicInteger">AtomicInteger</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()Int">position</span> <span title="(x: Int)Int">/</span> <span title="Int(8)" class="int">8</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * The maximum number of eight-byte entries this index can hold
+   */</span>
+  @volatile
+  var maxEntries = <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()Int">limit</span> <a title="Int" id="kafka.log;OffsetIndex.maxEntries_=">/</a> <span title="Int(8)" class="int">8</span>
+  
+  <span class="comment">/* the last offset in the index */</span>
+  var <a title="Long" id="kafka.log;OffsetIndex.lastOffset_=">lastOffset</a> = <a href="#kafka.log;OffsetIndex.readLastEntry" title="()kafka.log.OffsetPosition">readLastEntry</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.offset" title="=&gt; Long">offset</a>
+  
+  <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Loaded index file %s with maxEntries = %d, maxIndexSize = %d, entries = %d, lastOffset = %d, file position = %d&quot;</span>
+    .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span>, <a href="#kafka.log;OffsetIndex.maxEntries_=" title="=&gt; Int">maxEntries</a>, <a href="#kafka.log.OffsetIndex.<init>$default$3" title="=&gt; Int">maxIndexSize</a>, <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a><span class="delimiter">(</span><span class="delimiter">)</span>, <a href="#kafka.log;OffsetIndex.lastOffset_=" title="=&gt; Long">lastOffset</a>, <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()Int">position</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * The last entry in the index
+   */</span>
+  def <a title="()kafka.log.OffsetPosition" id="kafka.log;OffsetIndex.readLastEntry">readLastEntry</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="kafka.log.OffsetPosition">OffsetPosition</a> = <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; kafka.log.OffsetPosition)kafka.log.OffsetPosition">inLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#kafka.log;OffsetIndex.size_=" title="=&gt; java.util.concurrent.atomic.AtomicInteger">size</a>.<span title="()Int">get</span> match <span class="delimiter">{</span>
+        case <span title="Int(0)" class="int">0</span> =&gt; <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="(offset: Long, position: Int)kafka.log.OffsetPosition">OffsetPosition</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a>, <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+        case <a title="Int" id="kafka.log;OffsetIndex.readLastEntry.s">s</a> =&gt; <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="(offset: Long, position: Int)kafka.log.OffsetPosition">OffsetPosition</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a> <span title="(x: Int)Long">+</span> <a href="#kafka.log;OffsetIndex.relativeOffset" title="(buffer: java.nio.ByteBuffer, n: Int)Int">relativeOffset</a><span class="delimiter">(</span>this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>, <a href="#kafka.log;OffsetIndex.readLastEntry.s" title="Int">s</a><span title="(x: Int)Int">-</span><span title="Int(1)" class="int">1</span><span class="delimiter">)</span>, <a href="#kafka.log;OffsetIndex.physical" title="(buffer: java.nio.ByteBuffer, n: Int)Int">physical</a><span class="delimiter">(</span>this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>, <a href="#kafka.log;OffsetIndex.readLastEntry.s" title="Int">s</a><span title="(x: Int)Int">-</span><span title="Int(1)" class="int">1</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Find the largest offset less than or equal to the given targetOffset 
+   * and return a pair holding this offset and it's corresponding physical file position.
+   * 
+   * @param targetOffset The offset to look up.
+   * 
+   * @return The offset found and the corresponding file position for this offset. 
+   * If the target offset is smaller than the least entry in the index (or the index is empty),
+   * the pair (baseOffset, 0) is returned.
+   */</span>
+  def <a title="(targetOffset: Long)kafka.log.OffsetPosition" id="kafka.log;OffsetIndex.lookup">lookup</a><span class="delimiter">(</span><a title="Long" id="kafka.log;OffsetIndex.lookup.targetOffset">targetOffset</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="kafka.log.OffsetPosition">OffsetPosition</a> = <span class="delimiter">{</span>
+    <a href="#kafka.log;OffsetIndex.maybeLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; kafka.log.OffsetPosition)kafka.log.OffsetPosition">maybeLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a title="java.nio.ByteBuffer" id="kafka.log;OffsetIndex.lookup.idx">idx</a> = <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()java.nio.ByteBuffer">duplicate</span>
+      val <a title="Int" id="kafka.log;OffsetIndex.lookup.slot">slot</a> = <a href="#kafka.log;OffsetIndex.indexSlotFor" title="(idx: java.nio.ByteBuffer, targetOffset: Long)Int">indexSlotFor</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lookup.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.lookup.targetOffset" title="Long">targetOffset</a><span class="delimiter">)</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lookup.slot" title="Int">slot</a> <span title="(x: Int)Boolean">==</span> -<span title="Int(-1)" class="int">1</span><span class="delimiter">)</span>
+        <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="(offset: Long, position: Int)kafka.log.OffsetPosition">OffsetPosition</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a>, <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      else
+        <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="(offset: Long, position: Int)kafka.log.OffsetPosition">OffsetPosition</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a> <span title="(x: Int)Long">+</span> <a href="#kafka.log;OffsetIndex.relativeOffset" title="(buffer: java.nio.ByteBuffer, n: Int)Int">relativeOffset</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lookup.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.lookup.slot" title="Int">slot</a><span class="delimiter">)</span>, <a href="#kafka.log;OffsetIndex.physical" title="(buffer: java.nio.ByteBuffer, n: Int)Int">physical</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lookup.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.lookup.slot" title="Int">slot</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Find the slot in which the largest offset less than or equal to the given
+   * target offset is stored.
+   * 
+   * @param idx The index buffer
+   * @param targetOffset The offset to look for
+   * 
+   * @return The slot found or -1 if the least entry in the index is larger than the target offset or the index is empty
+   */</span>
+  private def <a title="(idx: java.nio.ByteBuffer, targetOffset: Long)Int" id="kafka.log;OffsetIndex.indexSlotFor">indexSlotFor</a><span class="delimiter">(</span><a title="java.nio.ByteBuffer" id="kafka.log;OffsetIndex.indexSlotFor.idx">idx</a>: <span title="java.nio.ByteBuffer">ByteBuffer</span>, <a title="Long" id="kafka.log;OffsetIndex.indexSlotFor.targetOffset">targetOffset</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <span class="delimiter">{</span>
+    <span class="comment">// we only store the difference from the base offset so calculate that</span>
+    val relOffset = <a href="#kafka.log;OffsetIndex.indexSlotFor.targetOffset" title="Long">targetOffset</a> <a title="Long" id="kafka.log;OffsetIndex.indexSlotFor.relOffset">-</a> <a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a>
+    
+    <span class="comment">// check if the index is empty</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+      return -<span title="Int(-1)" class="int">1</span>
+    
+    <span class="comment">// check if the target offset is smaller than the least offset</span>
+    if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.relativeOffset" title="(buffer: java.nio.ByteBuffer, n: Int)Int">relativeOffset</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.indexSlotFor.idx" title="java.nio.ByteBuffer">idx</a>, <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span title="(x: Long)Boolean">&gt;</span> <a href="#kafka.log;OffsetIndex.indexSlotFor.relOffset" title="Long">relOffset</a><span class="delimiter">)</span>
+      return -<span title="Int(-1)" class="int">1</span>
+      
+    <span class="comment">// binary search for the entry</span>
+    var <a title="Int" id="kafka.log;OffsetIndex.indexSlotFor.lo">lo</a> = <span title="Int(0)" class="int">0</span>
+    var hi = <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a><a title="Int" id="kafka.log;OffsetIndex.indexSlotFor.hi">-</a><span title="Int(1)" class="int">1</span>
+    while<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.indexSlotFor.lo" title="Int">lo</a> <span title="(x: Int)Boolean">&lt;</span> <a href="#kafka.log;OffsetIndex.indexSlotFor.hi" title="Int">hi</a><span class="delimiter">)</span> <a href="#kafka.log;OffsetIndex.indexSlotFor.while$1" title="()Unit" class="delimiter">{</a>
+      val <a title="Int" id="kafka.log;OffsetIndex.indexSlotFor.mid">mid</a> = <span title="(x: Double)Double">ceil</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.indexSlotFor.hi" title="Int">hi</a><span title="(x: Double)Double">/</span><span title="Double(2.0)" class="double">2.0</span> <span title="(x: Double)Double">+</span> <a href="#kafka.log;OffsetIndex.indexSlotFor.lo" title="Int">lo</a><span title="(x: Double)Double">/</span><span title="Double(2.0)" class="double">2.0</span><span class="delimiter">)</span>.<span title="=&gt; Int">toInt</span>
+      val <a title="Int" id="kafka.log;OffsetIndex.indexSlotFor.found">found</a> = <a href="#kafka.log;OffsetIndex.relativeOffset" title="(buffer: java.nio.ByteBuffer, n: Int)Int">relativeOffset</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.indexSlotFor.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.indexSlotFor.mid" title="Int">mid</a><span class="delimiter">)</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.indexSlotFor.found" title="Int">found</a> <span title="(x: Long)Boolean">==</span> <a href="#kafka.log;OffsetIndex.indexSlotFor.relOffset" title="Long">relOffset</a><span class="delimiter">)</span>
+        return <a href="#kafka.log;OffsetIndex.indexSlotFor.mid" title="Int">mid</a>
+      else if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.indexSlotFor.found" title="Int">found</a> <span title="(x: Long)Boolean">&lt;</span> <a href="#kafka.log;OffsetIndex.indexSlotFor.relOffset" title="Long">relOffset</a><span class="delimiter">)</span>
+        <a href="#kafka.log;OffsetIndex.indexSlotFor.lo" title="Int">lo</a> = <a href="#kafka.log;OffsetIndex.indexSlotFor.mid" title="Int">mid</a>
+      else
+        <a href="#kafka.log;OffsetIndex.indexSlotFor.hi" title="Int">hi</a> = <a href="#kafka.log;OffsetIndex.indexSlotFor.mid" title="Int">mid</a> <span title="(x: Int)Int">-</span> <span title="Int(1)" class="int">1</span>
+    <span class="delimiter">}</span>
+    <a href="#kafka.log;OffsetIndex.indexSlotFor.lo" title="Int">lo</a>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/* return the nth offset relative to the base offset */</span>
+  private def <a title="(buffer: java.nio.ByteBuffer, n: Int)Int" id="kafka.log;OffsetIndex.relativeOffset">relativeOffset</a><span class="delimiter">(</span><a title="java.nio.ByteBuffer" id="kafka.log;OffsetIndex.relativeOffset.buffer">buffer</a>: <span title="java.nio.ByteBuffer">ByteBuffer</span>, <a title="Int" id="kafka.log;OffsetIndex.relativeOffset.n">n</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <a href="#kafka.log;OffsetIndex.relativeOffset.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="(x$1: Int)Int">getInt</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.relativeOffset.n" title="Int">n</a> <span title="(x: Int)Int">*</span> <span title="Int(8)" class="int">8</span><span class="delimiter">)</span>
+  
+  <span class="comment">/* return the nth physical position */</span>
+  private def <a title="(buffer: java.nio.ByteBuffer, n: Int)Int" id="kafka.log;OffsetIndex.physical">physical</a><span class="delimiter">(</span><a title="java.nio.ByteBuffer" id="kafka.log;OffsetIndex.physical.buffer">buffer</a>: <span title="java.nio.ByteBuffer">ByteBuffer</span>, <a title="Int" id="kafka.log;OffsetIndex.physical.n">n</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <span title="Int">Int</span> = <a href="#kafka.log;OffsetIndex.physical.buffer" title="java.nio.ByteBuffer">buffer</a>.<span title="(x$1: Int)Int">getInt</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.physical.n" title="Int">n</a> <span title="(x: Int)Int">*</span> <span title="Int(8)" class="int">8</span> <span title="(x: Int)Int">+</span> <span title="Int(4)" class="int">4</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Get the nth offset mapping from the index
+   * @param n The entry number in the index
+   * @return The offset/position pair at that entry
+   */</span>
+  def <a title="(n: Int)kafka.log.OffsetPosition" id="kafka.log;OffsetIndex.entry">entry</a><span class="delimiter">(</span><a title="Int" id="kafka.log;OffsetIndex.entry.n">n</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="kafka.log.OffsetPosition">OffsetPosition</a> = <span class="delimiter">{</span>
+    <a href="#kafka.log;OffsetIndex.maybeLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; kafka.log.OffsetPosition)kafka.log.OffsetPosition">maybeLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entry.n" title="Int">n</a> <span title="(x: Int)Boolean">&gt;=</span> <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a><span class="delimiter">)</span>
+        throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Attempt to fetch the %dth entry from an index of size %d.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entry.n" title="Int">n</a>, <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      val <a title="java.nio.ByteBuffer" id="kafka.log;OffsetIndex.entry.idx">idx</a> = <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()java.nio.ByteBuffer">duplicate</span>
+      <a href="OffsetPosition.scala.html#kafka.log;OffsetPosition" title="(offset: Long, position: Int)kafka.log.OffsetPosition">OffsetPosition</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.relativeOffset" title="(buffer: java.nio.ByteBuffer, n: Int)Int">relativeOffset</a><span title="=&gt; Long" class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entry.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.entry.n" title="Int">n</a><span class="delimiter">)</span>, <a href="#kafka.log;OffsetIndex.physical" title="(buffer: java.nio.ByteBuffer, n: Int)Int">physical</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entry.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.entry.n" title="Int">n</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Append an entry for the given offset/location pair to the index. This entry must have a larger offset than all subsequent entries.
+   */</span>
+  def <a title="(offset: Long, position: Int)Unit" id="kafka.log;OffsetIndex.append">append</a><span class="delimiter">(</span><a title="Long" id="kafka.log;OffsetIndex.append.offset">offset</a>: <span title="Long">Long</span>, <a title="Int" id="kafka.log;OffsetIndex.append.position">position</a>: <span title="Int">Int</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; Unit)Unit">inLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#kafka.log;OffsetIndex.isFull" title="=&gt; Boolean">isFull</a>, <span title="String(&quot;Attempt to append to a full index (size = &quot;)" class="string">&quot;Attempt to append to a full index (size = &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;OffsetIndex.size_=" title="=&gt; java.util.concurrent.atomic.AtomicInteger">size</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;).&quot;)" class="string">&quot;).&quot;</span><span class="delimiter">)</span>
+      if <span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.size_=" title="=&gt; java.util.concurrent.atomic.AtomicInteger">size</a>.<span title="()Int">get</span> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span> <span title="(x: Boolean)Boolean">||</span> <a href="#kafka.log;OffsetIndex.append.offset" title="Long">offset</a> <span title="(x: Long)Boolean">&gt;</span> <a href="#kafka.log;OffsetIndex.lastOffset_=" title="=&gt; Long">lastOffset</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="../utils/Logging.scala.html#kafka.utils;Logging.debug(1729dbc42f)" title="(msg: =&gt; String)Unit">debug</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Adding index entry %d =&gt; %d to %s.&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.append.offset" title="Long">offset</a>, <a href="#kafka.log;OffsetIndex.append.position" title="Int">position</a>, <a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getName</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="(x$1: Int)java.nio.ByteBuffer">putInt</span><span class="delimiter">(</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.append.offset" title="Long">offset</a> <span title="(x: Long)Long">-</span> <a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a><span class="delimiter">)</span>.<span title="=&gt; Int">toInt</span><span class="delimiter">)</span>
+        this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="(x$1: Int)java.nio.ByteBuffer">putInt</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.append.position" title="Int">position</a><span class="delimiter">)</span>
+        this.<a href="#kafka.log;OffsetIndex.size_=" title="=&gt; java.util.concurrent.atomic.AtomicInteger">size</a>.<span title="()Int">incrementAndGet</span><span class="delimiter">(</span><span class="delimiter">)</span>
+        this.<a href="#kafka.log;OffsetIndex.lastOffset_=" title="(x$1: Long)Unit">lastOffset</a> = <a href="#kafka.log;OffsetIndex.append.offset" title="Long">offset</a>
+        <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a> <span title="(x: Int)Int">*</span> <span title="Int(8)" class="int">8</span> <span title="(x: Int)Boolean">==</span> <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()Int">position</span>, <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a> <span title="(x: String)String">+</span> <span title="String(&quot; entries but file position in index is &quot;)" class="string">&quot; entries but file position in index is &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()Int">position</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot;.&quot;)" class="string">&quot;.&quot;</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span> else <span class="delimiter">{</span>
+        throw new <a href="../common/InvalidOffsetException.scala.html#kafka.common;InvalidOffsetException" title="kafka.common.InvalidOffsetException">InvalidOffsetException</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Attempt to append an offset (%d) to position %d no larger than the last offset appended (%d) to %s.&quot;</span>
+          .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.append.offset" title="Long">offset</a>, <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a>, <a href="#kafka.log;OffsetIndex.lastOffset_=" title="=&gt; Long">lastOffset</a>, <a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * True iff there are no more slots available in this index
+   */</span>
+  def <a title="=&gt; Boolean" id="kafka.log;OffsetIndex.isFull">isFull</a>: <span title="Boolean">Boolean</span> = <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a> <span title="(x: Int)Boolean">&gt;=</span> this.<a href="#kafka.log;OffsetIndex.maxEntries_=" title="=&gt; Int">maxEntries</a>
+  
+  <span class="comment">/**
+   * Truncate the entire index, deleting all entries
+   */</span>
+  def <a title="()Unit" id="kafka.log;OffsetIndex.truncate">truncate</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#kafka.log;OffsetIndex.truncateToEntries" title="(entries: Int)Unit">truncateToEntries</a><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Remove all entries from the index which have an offset greater than or equal to the given offset.
+   * Truncating to an offset larger than the largest in the index has no effect.
+   */</span>
+  def <a title="(offset: Long)Unit" id="kafka.log;OffsetIndex.truncateTo">truncateTo</a><span class="delimiter">(</span><a title="Long" id="kafka.log;OffsetIndex.truncateTo.offset">offset</a>: <span title="Long">Long</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; Unit)Unit">inLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a title="java.nio.ByteBuffer" id="kafka.log;OffsetIndex.truncateTo.idx">idx</a> = <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()java.nio.ByteBuffer">duplicate</span>
+      val <a title="Int" id="kafka.log;OffsetIndex.truncateTo.slot">slot</a> = <a href="#kafka.log;OffsetIndex.indexSlotFor" title="(idx: java.nio.ByteBuffer, targetOffset: Long)Int">indexSlotFor</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.truncateTo.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.truncateTo.offset" title="Long">offset</a><span class="delimiter">)</span>
+
+      <span class="comment">/* There are 3 cases for choosing the new size
+       * 1) if there is no entry in the index &lt;= the offset, delete everything
+       * 2) if there is an entry for this exact offset, delete it and everything larger than it
+       * 3) if there is no entry for this offset, delete everything larger than the next smallest
+       */</span>
+      val <a title="Int" id="kafka.log;OffsetIndex.truncateTo.newEntries">newEntries</a> = 
+        if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.truncateTo.slot" title="Int">slot</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span>
+          <span title="Int(0)" class="int">0</span>
+        else if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.relativeOffset" title="(buffer: java.nio.ByteBuffer, n: Int)Int">relativeOffset</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.truncateTo.idx" title="java.nio.ByteBuffer">idx</a>, <a href="#kafka.log;OffsetIndex.truncateTo.slot" title="Int">slot</a><span class="delimiter">)</span> <span title="(x: Long)Boolean">==</span> <a href="#kafka.log;OffsetIndex.truncateTo.offset" title="Long">offset</a> <span title="(x: Long)Long">-</span> <a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a><span class="delimiter">)</span>
+          <a href="#kafka.log;OffsetIndex.truncateTo.slot" title="Int">slot</a>
+        else
+          <a href="#kafka.log;OffsetIndex.truncateTo.slot" title="Int">slot</a> <span title="(x: Int)Int">+</span> <span title="Int(1)" class="int">1</span>
+      <a href="#kafka.log;OffsetIndex.truncateToEntries" title="(entries: Int)Unit">truncateToEntries</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.truncateTo.newEntries" title="Int">newEntries</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Truncates index to a known number of entries.
+   */</span>
+  private def <a title="(entries: Int)Unit" id="kafka.log;OffsetIndex.truncateToEntries">truncateToEntries</a><span class="delimiter">(</span><a title="Int" id="kafka.log;OffsetIndex.truncateToEntries.entries">entries</a>: <span title="Int">Int</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; Unit)Unit">inLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      this.<a href="#kafka.log;OffsetIndex.size_=" title="=&gt; java.util.concurrent.atomic.AtomicInteger">size</a>.<span title="(x$1: Int)Unit">set</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.truncateToEntries.entries" title="Int">entries</a><span class="delimiter">)</span>
+      <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="(x$1: Int)java.nio.Buffer">position</span><span class="delimiter">(</span>this.<a href="#kafka.log;OffsetIndex.size_=" title="=&gt; java.util.concurrent.atomic.AtomicInteger">size</a>.<span title="()Int">get</span> <span title="(x: Int)Int">*</span> <span title="Int(8)" class="int">8</span><span class="delimiter">)</span>
+      this.<a href="#kafka.log;OffsetIndex.lastOffset_=" title="(x$1: Long)Unit">lastOffset</a> = <a href="#kafka.log;OffsetIndex.readLastEntry" title="()kafka.log.OffsetPosition">readLastEntry</a>.<a href="OffsetPosition.scala.html#kafka.log;OffsetPosition.offset" title="=&gt; Long">offset</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Trim this segment to fit just the valid entries, deleting all trailing unwritten bytes from
+   * the file.
+   */</span>
+  def <a title="()Unit" id="kafka.log;OffsetIndex.trimToValidSize">trimToValidSize</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; Unit)Unit">inLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#kafka.log;OffsetIndex.resize" title="(newSize: Int)Unit">resize</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a> <span title="(x: Int)Int">*</span> <span title="Int(8)" class="int">8</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Reset the size of the memory map and the underneath file. This is used in two kinds of cases: (1) in
+   * trimToValidSize() which is called at closing the segment or new segment being rolled; (2) at
+   * loading segments from disk or truncating back to an old segment where a new log segment became active;
+   * we want to reset the index size to maximum index size to avoid rolling new segment.
+   */</span>
+  def <a title="(newSize: Int)Unit" id="kafka.log;OffsetIndex.resize">resize</a><span class="delimiter">(</span><a title="Int" id="kafka.log;OffsetIndex.resize.newSize">newSize</a>: <span title="Int">Int</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; java.nio.Buffer)java.nio.Buffer">inLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+      val <a title="java.io.RandomAccessFile" id="kafka.log;OffsetIndex.resize.raf">raf</a> = new <span title="java.io.RandomAccessFile">RandomAccessFile</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>, <span title="String(&quot;rws&quot;)" class="string">&quot;rws&quot;</span><span class="delimiter">)</span>
+      val <a title="Int" id="kafka.log;OffsetIndex.resize.roundedNewSize">roundedNewSize</a> = <a href="#kafka.log;OffsetIndex.roundToExactMultiple" title="(number: Int, factor: Int)Int">roundToExactMultiple</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.resize.newSize" title="Int">newSize</a>, <span title="Int(8)" class="int">8</span><span class="delimiter">)</span>
+      val <a title="Int" id="kafka.log;OffsetIndex.resize.position">position</a> = this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()Int">position</span>
+      
+      <span class="comment">/* Windows won't let us modify the file length while the file is mmapped :-( */</span>
+      if<span class="delimiter">(</span><a href="../utils/Os.scala.html#kafka.utils.Os" title="kafka.utils.Os.type">Os</a>.<a href="../utils/Os.scala.html#kafka.utils.Os.isWindows" title="=&gt; Boolean">isWindows</a><span class="delimiter">)</span>
+        <a href="#kafka.log;OffsetIndex.forceUnmap" title="(m: java.nio.MappedByteBuffer)Unit">forceUnmap</a><span class="delimiter">(</span>this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a><span class="delimiter">)</span>
+      try <span class="delimiter">{</span>
+        <a href="#kafka.log;OffsetIndex.resize.raf" title="java.io.RandomAccessFile">raf</a>.<span title="(x$1: Long)Unit">setLength</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.resize.roundedNewSize" title="=&gt; Long">roundedNewSize</a><span class="delimiter">)</span>
+        this.<a href="#kafka.log;OffsetIndex.mmap_=" title="(x$1: java.nio.MappedByteBuffer)Unit">mmap</a> = <a href="#kafka.log;OffsetIndex.resize.raf" title="java.io.RandomAccessFile">raf</a>.<span title="()java.nio.channels.FileChannel">getChannel</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="(x$1: java.nio.channels.FileChannel.MapMode, x$2: Long, x$3: Long)java.nio.MappedByteBuffer">map</span><span class="delimiter">(</span><span title="java.nio.channels.FileChannel.type">FileChannel</span>.<span title="java.nio.channels.FileChannel.MapMode.type">MapMode</span>.<span title="java.nio.channels.FileChannel.MapMode">READ_WRITE</span>, <span title="Long(0L)" class="int">0</span>, <a href="#kafka.log;OffsetIndex.resize.roundedNewSize" title="=&gt; Long">roundedNewSize</a><span class="delimiter">)</span>
+        this.<a href="#kafka.log;OffsetIndex.maxEntries_=" title="(x$1: Int)Unit">maxEntries</a> = this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()Int">limit</span> <span title="(x: Int)Int">/</span> <span title="Int(8)" class="int">8</span>
+        this.<a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="(x$1: Int)java.nio.Buffer">position</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.resize.position" title="Int">position</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span> finally <span class="delimiter">{</span>
+        <a href="../utils/Utils.scala.html#kafka.utils.Utils" title="kafka.utils.Utils.type">Utils</a>.<a href="../utils/Logging.scala.html#kafka.utils;Logging.swallow" title="(action: =&gt; Unit)Unit">swallow</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.resize.raf" title="java.io.RandomAccessFile">raf</a>.<span title="()Unit">close</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Forcefully free the buffer's mmap. We do this only on windows.
+   */</span>
+  private def <a title="(m: java.nio.MappedByteBuffer)Unit" id="kafka.log;OffsetIndex.forceUnmap">forceUnmap</a><span class="delimiter">(</span><a title="java.nio.MappedByteBuffer" id="kafka.log;OffsetIndex.forceUnmap.m">m</a>: <span title="java.nio.MappedByteBuffer">MappedByteBuffer</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    try <span class="delimiter">{</span>
+      if<span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.forceUnmap.m" title="java.nio.MappedByteBuffer">m</a>.<span title="[T0]=&gt; Boolean">isInstanceOf</span><span title="Boolean" class="delimiter">[</span>sun.nio.ch.<span title="sun.nio.ch.DirectBuffer">DirectBuffer</span><span class="delimiter">]</span><span class="delimiter">)</span>
+        <span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.forceUnmap.m" title="java.nio.MappedByteBuffer">m</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="sun.nio.ch.DirectBuffer" class="delimiter">[</span>sun.nio.ch.<span title="sun.nio.ch.DirectBuffer">DirectBuffer</span><span class="delimiter">]</span><span class="delimiter">)</span>.<span title="()sun.misc.Cleaner">cleaner</span><span class="delimiter">(</span><span class="delimiter">)</span>.<span title="()Unit">clean</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+      case <a title="Throwable" id="kafka.log;OffsetIndex.forceUnmap.t">t</a>: <span title="Throwable">Throwable</span> =&gt; <a href="../utils/Logging.scala.html#kafka.utils;Logging.warn(cfd112d89b)" title="(msg: =&gt; String, e: =&gt; Throwable)Unit">warn</a><span class="delimiter">(</span><span title="String(&quot;Error when freeing index buffer&quot;)" class="string">&quot;Error when freeing index buffer&quot;</span>, <a href="#kafka.log;OffsetIndex.forceUnmap.t" title="Throwable">t</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Flush the data in the index to disk
+   */</span>
+  def <a title="()Unit" id="kafka.log;OffsetIndex.flush">flush</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="../utils/Utils.scala.html#kafka.utils.Utils.inLock" title="(lock: java.util.concurrent.locks.Lock)(fun: =&gt; java.nio.MappedByteBuffer)java.nio.MappedByteBuffer">inLock</a><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.lock" title="=&gt; java.util.concurrent.locks.ReentrantLock">lock</a><span class="delimiter">)</span> <span title="Unit" class="delimiter">{</span>
+      <a href="#kafka.log;OffsetIndex.mmap_=" title="=&gt; java.nio.MappedByteBuffer">mmap</a>.<span title="()java.nio.MappedByteBuffer">force</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Delete this index file
+   */</span>
+  def <a title="()Boolean" id="kafka.log;OffsetIndex.delete">delete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    <a href="../utils/Logging.scala.html#kafka.utils;Logging.info(1729dbc42f)" title="(msg: =&gt; String)Unit">info</a><span class="delimiter">(</span><span title="String(&quot;Deleting index &quot;)" class="string">&quot;Deleting index &quot;</span> <span title="(x$1: Any)String">+</span> this.<a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span><span class="delimiter">)</span>
+    this.<a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()Boolean">delete</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/** The number of entries in this index */</span>
+  def <a title="()Int" id="kafka.log;OffsetIndex.entries">entries</a><span class="delimiter">(</span><span class="delimiter">)</span> = <a href="#kafka.log;OffsetIndex.size_=" title="=&gt; java.util.concurrent.atomic.AtomicInteger">size</a>.<span title="()Int">get</span>
+  
+  <span class="comment">/**
+   * The number of bytes actually used by this index
+   */</span>
+  def <a title="()Int" id="kafka.log;OffsetIndex.sizeInBytes">sizeInBytes</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span title="Int(8)" class="int">8</span> <span title="(x: Int)Int">*</span> <a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a>
+  
+  <span class="comment">/** Close the index */</span>
+  def <a title="()Unit" id="kafka.log;OffsetIndex.close">close</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <a href="#kafka.log;OffsetIndex.trimToValidSize" title="()Unit">trimToValidSize</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Rename the file that backs this offset index
+   * @return true iff the rename was successful
+   */</span>
+  def <a title="(f: java.io.File)Boolean" id="kafka.log;OffsetIndex.renameTo">renameTo</a><span class="delimiter">(</span><a title="java.io.File" id="kafka.log;OffsetIndex.renameTo.f">f</a>: <span title="java.io.File">File</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">{</span>
+    val <a title="Boolean" id="kafka.log;OffsetIndex.renameTo.success">success</a> = this.<a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="(x$1: java.io.File)Boolean">renameTo</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.renameTo.f" title="java.io.File">f</a><span class="delimiter">)</span>
+    this.<a href="#kafka.log;OffsetIndex.file" title="(x$1: java.io.File)Unit">file</a> = <a href="#kafka.log;OffsetIndex.renameTo.f" title="java.io.File">f</a>
+    <a href="#kafka.log;OffsetIndex.renameTo.success" title="Boolean">success</a>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Do a basic sanity check on this index to detect obvious problems
+   * @throws IllegalArgumentException if any problems are found
+   */</span>
+  def <a title="()Unit" id="kafka.log;OffsetIndex.sanityCheck">sanityCheck</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.entries" title="()Int">entries</a> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span> <span title="(x: Boolean)Boolean">||</span> <a href="#kafka.log;OffsetIndex.lastOffset_=" title="=&gt; Long">lastOffset</a> <span title="(x: Long)Boolean">&gt;</span> <a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a>,
+            <span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Corrupt index found, index file (%s) has non-zero size but the last offset is %d and the base offset is %d&quot;</span>
+            .<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getAbsolutePath</span>, <a href="#kafka.log;OffsetIndex.lastOffset_=" title="=&gt; Long">lastOffset</a>, <a href="#kafka.log;OffsetIndex.baseOffset" title="=&gt; Long">baseOffset</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      val <a title="Long" id="kafka.log;OffsetIndex.sanityCheck.len">len</a> = <a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()Long">length</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.sanityCheck.len" title="Long">len</a> <span title="(x: Int)Long">%</span> <span title="Int(8)" class="int">8</span> <span title="(x: Int)Boolean">==</span> <span title="Int(0)" class="int">0</span>, 
+              <span title="String(&quot;Index file &quot;)" class="string">&quot;Index file &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;OffsetIndex.file" title="=&gt; java.io.File">file</a>.<span title="()String">getName</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot; is corrupt, found &quot;)" class="string">&quot; is corrupt, found &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#kafka.log;OffsetIndex.sanityCheck.len" title="Long">len</a> <span title="(x$1: Any)String">+</span> 
+              <span title="String(&quot; bytes which is not positive or not a multiple of 8.&quot;)" class="string">&quot; bytes which is not positive or not a multiple of 8.&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+  
+  <span class="comment">/**
+   * Round a number to the greatest exact multiple of the given factor less than the given number.
+   * E.g. roundToExactMultiple(67, 8) == 64
+   */</span>
+  private def <a title="(number: Int, factor: Int)Int" id="kafka.log;OffsetIndex.roundToExactMultiple">roundToExactMultiple</a><span class="delimiter">(</span><a title="Int" id="kafka.log;OffsetIndex.roundToExactMultiple.number">number</a>: <span title="Int">Int</span>, <a title="Int" id="kafka.log;OffsetIndex.roundToExactMultiple.factor">factor</a>: <span title="Int">Int</span><span class="delimiter">)</span> = <a href="#kafka.log;OffsetIndex.roundToExactMultiple.factor" title="Int">factor</a> <span title="(x: Int)Int">*</span> <span class="delimiter">(</span><a href="#kafka.log;OffsetIndex.roundToExactMultiple.number" title="Int">number</a> <span title="(x: Int)Int">/</span> <a href="#kafka.log;OffsetIndex.roundToExactMultiple.factor" title="Int">factor</a><span class="delimiter">)</span>
+  
+  <span class="comment">/**
+   * Execute the given function in a lock only if we are running on windows. We do this 
+   * because Windows won't let us resize a file while it is mmapped. As a result we have to force unmap it
+   * and this requires synchronizing reads.
+   */</span>
+  private def <a title="[T](lock: java.util.concurrent.locks.Lock)(fun: =&gt; T)T" id="kafka.log;OffsetIndex.maybeLock">maybeLock</a><span class="delimiter">[</span><a title="" id="kafka.log;OffsetIndex.maybeLock;T">T</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="java.util.concurrent.locks.Lock" id="kafka.log;OffsetIndex.maybeLock.lock">lock</a>: <span title="java.util.concurrent.locks.Lock">Lock</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="=&gt; T" id="kafka.log;OffsetIndex.maybeLock.fun">fun</a>: =&gt; T<span class="delimiter">)</span>: <a href="#kafka.log;OffsetIndex.maybeLock;T" title="T">T</a> = <span class="delimiter">{</span>
+    if<span class="delimiter">(</span><a href="../utils/Os.scala.html#kafka.utils.Os" title="kafka.utils.Os.type">Os</a>.<a href="../utils/Os.scala.html#kafka.utils.Os.isWindows" title="=&gt; Boolean">isWindows</a><span class="delimiter">)</span>
+      <a href="#kafka.log;OffsetIndex.maybeLock.lock" title="java.util.concurrent.locks.Lock">lock</a>.<span title="()Unit">lock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    try <span class="delimiter">{</span>
+      return <a href="#kafka.log;OffsetIndex.maybeLock.fun" title="=&gt; T">fun</a>
+    <span class="delimiter">}</span> finally <span class="delimiter">{</span>
+      if<span class="delimiter">(</span><a href="../utils/Os.scala.html#kafka.utils.Os" title="kafka.utils.Os.type">Os</a>.<a href="../utils/Os.scala.html#kafka.utils.Os.isWindows" title="=&gt; Boolean">isWindows</a><span class="delimiter">)</span>
+        <a href="#kafka.log;OffsetIndex.maybeLock.lock" title="java.util.concurrent.locks.Lock">lock</a>.<span title="()Unit">unlock</span><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+        </pre>
+    </body>
+</html>
