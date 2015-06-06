@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>play/play/mvc/WebSocket.java</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */
+package play.mvc;
+
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import akka.actor.ActorRef;
+import akka.actor.Props;
+import play.libs.F.*;
+
+/**
+ * A WebSocket result.
+ */
+public abstract class WebSocket&lt;A&gt; {
+
+    /**
+     * Called when the WebSocket is ready
+     *
+     * @param in The Socket in.
+     * @param out The Socket out.
+     */
+    public abstract void onReady(In&lt;A&gt; in, Out&lt;A&gt; out);
+
+    /**
+     * If this method returns a result, the WebSocket will be rejected with that result.
+     *
+     * This method will be invoked before onReady.
+     *
+     * @return The result to reject the WebSocket with, or null if the WebSocket shouldn't be rejected.
+     */
+    public Result rejectWith() {
+        return null;
+    }
+
+    /**
+     * If this method returns true, then the WebSocket should be handled by an actor.  The actor will be obtained by
+     * passing an ActorRef representing to the actor method, which should return the props for creating the actor.
+     */
+    public boolean isActor() {
+        return false;
+    }
+
+    /**
+     * The props to create the actor to handle this WebSocket.
+     *
+     * @param out The actor to send upstream messages to.
+     * @return The props of the actor to handle the WebSocket.  If isActor returns true, must not return null.
+     */
+    public Props actorProps(ActorRef out) {
+        return null;
+    }
+
+    /**
+     * A WebSocket out.
+     */
+    public static interface Out&lt;A&gt; {
+
+        /**
+         * Writes a frame.
+         */
+        public void write(A frame);
+
+        /**
+         * Close this channel.
+         */
+        public void close();
+    }
+
+    /**
+     * A WebSocket in.
+     */
+    public static class In&lt;A&gt; {
+
+        /**
+         * Callbacks to invoke at each frame.
+         */
+        public final List&lt;Callback&lt;A&gt;&gt; callbacks = new CopyOnWriteArrayList&lt;Callback&lt;A&gt;&gt;();
+
+        /**
+         * Callbacks to invoke on close.
+         */
+        public final List&lt;Callback0&gt; closeCallbacks = new CopyOnWriteArrayList&lt;Callback0&gt;();
+
+        /**
+         * Registers a message callback.
+         */
+        public void onMessage(Callback&lt;A&gt; callback) {
+            callbacks.add(callback);
+        }
+
+        /**
+         * Registers a close callback.
+         */
+        public void onClose(Callback0 callback) {
+            closeCallbacks.add(callback);
+        }
+
+    }
+
+    /**
+     * Creates a WebSocket. The abstract {@code onReady} method is
+     * implemented using the specified {@code Callback2&lt;In&lt;A&gt;, Out&lt;A&gt;&gt;}
+     *
+     * @param callback the callback used to implement onReady
+     * @return a new WebSocket
+     * @throws NullPointerException if the specified callback is null
+     */
+    public static &lt;A&gt; WebSocket&lt;A&gt; whenReady(Callback2&lt;In&lt;A&gt;, Out&lt;A&gt;&gt; callback) {
+        return new WhenReadyWebSocket&lt;A&gt;(callback);
+    }
+
+    /**
+     * Rejects a WebSocket.
+     *
+     * @param result The result that will be returned.
+     * @return A rejected WebSocket.
+     */
+    public static &lt;A&gt; WebSocket&lt;A&gt; reject(final Result result) {
+        return new WebSocket&lt;A&gt;() {
+            public void onReady(In&lt;A&gt; in, Out&lt;A&gt; out) {
+            }
+            public Result rejectWith() {
+                return result;
+            }
+        };
+    }
+
+    /**
+     * Handles a WebSocket with an actor.
+     *
+     * @param props The function used to create the props for the actor.  The passed in argument is the upstream actor.
+     * @return An actor WebSocket.
+     */
+    public static &lt;A&gt; WebSocket&lt;A&gt; withActor(final Function&lt;ActorRef, Props&gt; props) {
+        return new WebSocket&lt;A&gt;() {
+            public void onReady(In&lt;A&gt; in, Out&lt;A&gt; out) {
+            }
+            public boolean isActor() {
+                return true;
+            }
+            public Props actorProps(ActorRef out) {
+                try {
+                    return props.apply(out);
+                } catch (RuntimeException e) {
+                    throw e;
+                } catch (Error e) {
+                    throw e;
+                } catch (Throwable t) {
+                    throw new RuntimeException(t);
+                }
+            }
+        };
+    }
+
+    /**
+     * An extension of WebSocket that obtains its onReady from
+     * the specified {@code Callback2&lt;In&lt;A&gt;, Out&lt;A&gt;&gt;}.
+     */
+    static final class WhenReadyWebSocket&lt;A&gt; extends WebSocket&lt;A&gt; {
+
+        private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(WhenReadyWebSocket.class);
+
+        private final Callback2&lt;In&lt;A&gt;, Out&lt;A&gt;&gt; callback;
+
+        WhenReadyWebSocket(Callback2&lt;In&lt;A&gt;, Out&lt;A&gt;&gt; callback) {
+            if (callback == null) throw new NullPointerException(&quot;WebSocket onReady callback cannot be null&quot;);
+            this.callback = callback;
+        }
+
+        @Override
+        public void onReady(In&lt;A&gt; in, Out&lt;A&gt; out) {
+            try {
+                callback.invoke(in, out);
+            } catch (Throwable e) {
+                logger.error(&quot;Exception in WebSocket.onReady&quot;, e);
+            }
+        }
+    }
+}
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,555 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>play-java-ws/play/libs/ws/ning/NingWSRequest.java</title>
+        <script type="text/javascript" src="../../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */
+
+package play.libs.ws.ning;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.ning.http.client.*;
+import com.ning.http.client.generators.FileBodyGenerator;
+import com.ning.http.client.generators.InputStreamBodyGenerator;
+import com.ning.http.client.oauth.OAuthSignatureCalculator;
+import com.ning.http.util.AsyncHttpProviderUtils;
+import org.jboss.netty.handler.codec.http.HttpHeaders;
+import play.core.parsers.FormUrlEncodedParser;
+import play.libs.F;
+import play.libs.Json;
+import play.libs.oauth.OAuth;
+import play.libs.ws.*;
+
+import java.io.File;
+import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.util.*;
+
+/**
+ * provides the User facing API for building WS request.
+ */
+public class NingWSRequest implements WSRequest {
+
+    private final String url;
+    private String method = &quot;GET&quot;;
+    private Object body = null;
+    private Map&lt;String, Collection&lt;String&gt;&gt; headers = new HashMap&lt;String, Collection&lt;String&gt;&gt;();
+    private Map&lt;String, Collection&lt;String&gt;&gt; queryParameters = new HashMap&lt;String, Collection&lt;String&gt;&gt;();
+
+    private String username = null;
+    private String password = null;
+    private WSAuthScheme scheme = null;
+    private WSSignatureCalculator calculator = null;
+    private NingWSClient client = null;
+
+    private int timeout = 0;
+    private Boolean followRedirects = null;
+    private String virtualHost = null;
+
+    public NingWSRequest(NingWSClient client, String url) {
+        this.client = client;
+        URI reference = URI.create(url);
+
+        this.url = url;
+
+        String userInfo = reference.getUserInfo();
+        if (userInfo != null) {
+            this.setAuth(userInfo);
+        }
+        if (reference.getQuery() != null) {
+            this.setQueryString(reference.getQuery());
+        }
+    }
+
+    /**
+     * Sets a header with the given name, this can be called repeatedly.
+     *
+     * @param name
+     * @param value
+     */
+    @Override
+    public NingWSRequest setHeader(String name, String value) {
+        if (headers.containsKey(name)) {
+            Collection&lt;String&gt; values = headers.get(name);
+            values.add(value);
+        } else {
+            List&lt;String&gt; values = new ArrayList&lt;String&gt;();
+            values.add(value);
+            headers.put(name, values);
+        }
+        return this;
+    }
+
+    /**
+     * Sets a query string
+     *
+     * @param query
+     */
+    @Override
+    public WSRequest setQueryString(String query) {
+        String[] params = query.split(&quot;&amp;&quot;);
+        for (String param : params) {
+            String[] keyValue = param.split(&quot;=&quot;);
+            if (keyValue.length &gt; 2) {
+                throw new RuntimeException(new MalformedURLException(&quot;QueryString parameter should not have more than 2 = per part&quot;));
+            } else if (keyValue.length &gt;= 2) {
+                this.setQueryParameter(keyValue[0], keyValue[1]);
+            } else if (keyValue.length == 1 &amp;&amp; param.charAt(0) != '=') {
+                this.setQueryParameter(keyValue[0], null);
+            } else {
+                throw new RuntimeException(new MalformedURLException(&quot;QueryString part should not start with an = and not be empty&quot;));
+            }
+        }
+        return this;
+    }
+
+    @Override
+    public WSRequest setQueryParameter(String name, String value) {
+        if (queryParameters.containsKey(name)) {
+            Collection&lt;String&gt; values = queryParameters.get(name);
+            values.add(value);
+        } else {
+            List&lt;String&gt; values = new ArrayList&lt;String&gt;();
+            values.add(value);
+            queryParameters.put(name, values);
+        }
+        return this;
+    }
+
+    @Override
+    public WSRequest setAuth(String userInfo) {
+        this.scheme = WSAuthScheme.BASIC;
+
+        if (userInfo.equals(&quot;&quot;)) {
+            throw new RuntimeException(new MalformedURLException(&quot;userInfo should not be empty&quot;));
+        }
+
+        int split = userInfo.indexOf(&quot;:&quot;);
+
+        if (split == 0) { // We only have a password without user
+            this.username = &quot;&quot;;
+            this.password = userInfo.substring(1);
+        } else if (split == -1) { // We only have a username without password
+            this.username = userInfo;
+            this.password = &quot;&quot;;
+        } else {
+            this.username = userInfo.substring(0, split);
+            this.password = userInfo.substring(split + 1);
+        }
+
+        return this;
+    }
+
+    @Override
+    public WSRequest setAuth(String username, String password) {
+        this.username = username;
+        this.password = password;
+        this.scheme = WSAuthScheme.BASIC;
+        return this;
+    }
+
+    @Override
+    public WSRequest setAuth(String username, String password, WSAuthScheme scheme) {
+        this.username = username;
+        this.password = password;
+        this.scheme = scheme;
+        return this;
+    }
+
+    @Override
+    public WSRequest sign(WSSignatureCalculator calculator) {
+        this.calculator = calculator;
+        return this;
+    }
+
+    @Override
+    public WSRequest setFollowRedirects(Boolean followRedirects) {
+        this.followRedirects = followRedirects;
+        return this;
+    }
+
+    @Override
+    public WSRequest setVirtualHost(String virtualHost) {
+        this.virtualHost = virtualHost;
+        return this;
+    }
+
+    @Override
+    public WSRequest setRequestTimeout(long timeout) {
+        if (timeout &lt; 0 || timeout &gt; Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(&quot;Timeout must be between 0 and &quot; + Integer.MAX_VALUE + &quot; inclusive&quot;);
+        }
+        this.timeout = (int) timeout;
+        return this;
+    }
+
+    @Override
+    public WSRequest setContentType(String contentType) {
+        return setHeader(HttpHeaders.Names.CONTENT_TYPE, contentType);
+    }
+
+    @Override
+    public WSRequest setMethod(String method) {
+        this.method = method;
+        return this;
+    }
+
+    @Override
+    public WSRequest setBody(String body) {
+        this.body = body;
+        return this;
+    }
+
+    @Override
+    public WSRequest setBody(JsonNode body) {
+        this.body = body;
+        return this;
+    }
+
+    @Override
+    public WSRequest setBody(InputStream body) {
+        this.body = body;
+        return this;
+    }
+
+    @Override
+    public WSRequest setBody(File body) {
+        this.body = body;
+        return this;
+    }
+
+    @Override
+    public String getUrl() {
+        return this.url;
+    }
+
+    @Override
+    public Map&lt;String, Collection&lt;String&gt;&gt; getHeaders() {
+        return new HashMap&lt;String, Collection&lt;String&gt;&gt;(this.headers);
+    }
+
+    @Override
+    public Map&lt;String, Collection&lt;String&gt;&gt; getQueryParameters() {
+        return new HashMap&lt;String, Collection&lt;String&gt;&gt;(this.queryParameters);
+    }
+
+    @Override
+    public String getUsername() {
+        return this.username;
+    }
+
+    @Override
+    public String getPassword() {
+        return this.password;
+    }
+
+    @Override
+    public WSAuthScheme getScheme() {
+        return this.scheme;
+    }
+
+    @Override
+    public WSSignatureCalculator getCalculator() {
+        return this.calculator;
+    }
+
+    @Override
+    public long getRequestTimeout() {
+        return this.timeout;
+    }
+
+    @Override
+    public Boolean getFollowRedirects() {
+        return this.followRedirects;
+    }
+
+    // Intentionally package public.
+    String getVirtualHost() {
+        return this.virtualHost;
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; get() {
+        return execute(&quot;GET&quot;);
+    }
+
+    //-------------------------------------------------------------------------
+    // PATCH
+    //-------------------------------------------------------------------------
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; patch(String body) {
+        setMethod(&quot;PATCH&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; patch(JsonNode body) {
+        setMethod(&quot;PATCH&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; patch(InputStream body) {
+        setMethod(&quot;PATCH&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;WSResponse&gt; patch(File body) {
+        setMethod(&quot;PATCH&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    //-------------------------------------------------------------------------
+    // POST
+    //-------------------------------------------------------------------------
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(String body) {
+        setMethod(&quot;POST&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(JsonNode body) {
+        setMethod(&quot;POST&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(InputStream body) {
+        setMethod(&quot;POST&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; post(File body) {
+        setMethod(&quot;POST&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    //-------------------------------------------------------------------------
+    // PUT
+    //-------------------------------------------------------------------------
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(String body) {
+        setMethod(&quot;PUT&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(JsonNode body) {
+        setMethod(&quot;PUT&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(InputStream body) {
+        setMethod(&quot;PUT&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; put(File body) {
+        setMethod(&quot;PUT&quot;);
+        setBody(body);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; delete() {
+        return execute(&quot;DELETE&quot;);
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; head() {
+        return execute(&quot;HEAD&quot;);
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; options() {
+        return execute(&quot;OPTIONS&quot;);
+    }
+
+    @Override
+    public F.Promise&lt;play.libs.ws.WSResponse&gt; execute(String method) {
+        setMethod(method);
+        return execute();
+    }
+
+    @Override
+    public F.Promise&lt;WSResponse&gt; execute() {
+        Request request = buildRequest();
+        return execute(request);
+    }
+
+    Request buildRequest() {
+        RequestBuilder builder = new RequestBuilder(method);
+
+        builder.setUrl(url);
+        builder.setQueryParams(new FluentStringsMap(queryParameters));
+        builder.setHeaders(headers);
+
+        if (body == null) {
+            // do nothing
+        } else if (body instanceof String) {
+            String stringBody = ((String) body);
+            FluentCaseInsensitiveStringsMap headers = new FluentCaseInsensitiveStringsMap(this.headers);
+
+            // Detect and maybe add charset
+            String contentType = headers.getFirstValue(HttpHeaders.Names.CONTENT_TYPE);
+            if (contentType == null) {
+                contentType = &quot;text/plain&quot;;
+            }
+            String charset = AsyncHttpProviderUtils.parseCharset(contentType);
+            if (charset == null) {
+                charset = &quot;utf-8&quot;;
+                List&lt;String&gt; contentTypeList = new ArrayList&lt;String&gt;();
+                contentTypeList.add(contentType + &quot;; charset=utf-8&quot;);
+                headers.replace(HttpHeaders.Names.CONTENT_TYPE, contentTypeList);
+            }
+
+            byte[] bodyBytes;
+            try {
+                bodyBytes = stringBody.getBytes(charset);
+            } catch (UnsupportedEncodingException e) {
+                throw new RuntimeException(e);
+            }
+
+            // If using a POST with OAuth signing, the builder looks at
+            // getFormParams() rather than getBody() and constructs the signature
+            // based on the form params.
+            if (contentType.equals(HttpHeaders.Values.APPLICATION_X_WWW_FORM_URLENCODED)) {
+                Map&lt;String, List&lt;String&gt;&gt; stringListMap = FormUrlEncodedParser.parseAsJava(stringBody, &quot;utf-8&quot;);
+                for (String key : stringListMap.keySet()) {
+                    List&lt;String&gt; values = stringListMap.get(key);
+                    for (String value : values) {
+                        builder.addFormParam(key, value);
+                    }
+                }
+            } else {
+                builder.setBody(stringBody);
+            }
+
+            builder.setHeaders(headers);
+            builder.setBodyEncoding(charset);
+        } else if (body instanceof JsonNode) {
+            JsonNode jsonBody = (JsonNode) body;
+            FluentCaseInsensitiveStringsMap headers = new FluentCaseInsensitiveStringsMap(this.headers);
+            List&lt;String&gt; contentType = new ArrayList&lt;String&gt;();
+            contentType.add(&quot;application/json; charset=utf-8&quot;);
+            headers.replace(HttpHeaders.Names.CONTENT_TYPE, contentType);
+            String bodyStr = Json.stringify(jsonBody);
+            byte[] bodyBytes;
+            try {
+                bodyBytes = bodyStr.getBytes(&quot;utf-8&quot;);
+            } catch (UnsupportedEncodingException e) {
+                throw new RuntimeException(e);
+            }
+
+            builder.setBody(bodyStr);
+            builder.setHeaders(headers);
+            builder.setBodyEncoding(&quot;utf-8&quot;);
+        } else if (body instanceof File) {
+            File fileBody = (File) body;
+            FileBodyGenerator bodyGenerator = new FileBodyGenerator(fileBody);
+            builder.setBody(bodyGenerator);
+        } else if (body instanceof InputStream) {
+            InputStream inputStreamBody = (InputStream) body;
+            InputStreamBodyGenerator bodyGenerator = new InputStreamBodyGenerator(inputStreamBody);
+            builder.setBody(bodyGenerator);
+        } else {
+            throw new IllegalStateException(&quot;Impossible body: &quot; + body);
+        }
+
+        if (this.timeout &gt; 0) {
+            builder.setRequestTimeout(this.timeout);
+        }
+
+        if (this.followRedirects != null) {
+            builder.setFollowRedirects(this.followRedirects);
+        }
+        if (this.virtualHost != null) {
+            builder.setVirtualHost(this.virtualHost);
+        }
+
+        if (this.username != null &amp;&amp; this.password != null &amp;&amp; this.scheme != null) {
+            builder.setRealm(auth(this.username, this.password, this.scheme));
+        }
+
+        if (this.calculator != null) {
+            if (this.calculator instanceof OAuth.OAuthCalculator) {
+                OAuthSignatureCalculator calc = ((OAuth.OAuthCalculator) this.calculator).getCalculator();
+                builder.setSignatureCalculator(calc);
+            } else {
+                throw new IllegalStateException(&quot;Use OAuth.OAuthCalculator&quot;);
+            }
+        }
+
+        return builder.build();
+    }
+
+    private F.Promise&lt;WSResponse&gt; execute(Request request) {
+
+        final scala.concurrent.Promise&lt;play.libs.ws.WSResponse&gt; scalaPromise = scala.concurrent.Promise$.MODULE$.&lt;play.libs.ws.WSResponse&gt;apply();
+        try {
+            AsyncHttpClient asyncHttpClient = (AsyncHttpClient) client.getUnderlying();
+            asyncHttpClient.executeRequest(request, new AsyncCompletionHandler&lt;com.ning.http.client.Response&gt;() {
+                @Override
+                public com.ning.http.client.Response onCompleted(com.ning.http.client.Response response) {
+                    final com.ning.http.client.Response ahcResponse = response;
+                    scalaPromise.success(new NingWSResponse(ahcResponse));
+                    return response;
+                }
+
+                @Override
+                public void onThrowable(Throwable t) {
+                    scalaPromise.failure(t);
+                }
+            });
+        } catch (RuntimeException exception) {
+            scalaPromise.failure(exception);
+        }
+        return F.Promise.wrap(scalaPromise.future());
+    }
+
+    Realm auth(String username, String password, WSAuthScheme scheme) {
+        Realm.AuthScheme authScheme = Realm.AuthScheme.valueOf(scheme.name());
+        return (new Realm.RealmBuilder())
+                .setScheme(authScheme)
+                .setPrincipal(username)
+                .setPassword(password)
+                .setUsePreemptiveAuth(true)
+                .build();
+    }
+
+
+}
+
+        </pre>
+    </body>
+</html>

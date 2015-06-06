@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>play-streams-experimental/play/api/libs/streams/impl/PromiseSubscriber.scala</title>
+        <script type="text/javascript" src="../../../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="keyword">package</span> play.api.libs.streams.impl
+
+<span class="keyword">import</span> org.reactivestreams._
+<span class="keyword">import</span> play.api.libs.concurrent.StateMachine
+<span class="keyword">import</span> play.api.libs.iteratee.Execution
+<span class="keyword">import</span> scala.annotation.tailrec
+<span class="keyword">import</span> scala.concurrent.<span class="delimiter">{</span> ExecutionContext, Promise <span class="delimiter">}</span>
+<span class="keyword">import</span> scala.util.<span class="delimiter">{</span> Failure, Success, Try <span class="delimiter">}</span>
+
+<span class="keyword">private</span><span class="delimiter">[</span>streams<span class="delimiter">]</span> <span class="keyword">object</span> <a title="play.api.libs.streams.impl.PromiseSubscriber.type" id="play.api.libs.streams.impl.PromiseSubscriber">PromiseSubscriber</a> <a href="#play.api.libs.streams.impl.PromiseSubscriber" title="play.api.libs.streams.impl.PromiseSubscriber.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Internal state of the Subscriber.
+   *
+   * @tparam The type of the element.
+   */</span>
+  <span class="keyword">sealed</span> <span class="keyword">trait</span> <a title="trait State extends AnyRef" id="play.api.libs.streams.impl.PromiseSubscriber;State">State</a>
+  <span class="comment">/**
+   * A Subscriber that hasn't had onSubscribe called on it yet, and whose
+   * Promise is not complete.
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">case object</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.productElement.x$1" title="play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.type" id="play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.readResolve">AwaitingSubscription</a> <span title="Product" class="keyword">extends</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber;State" title="play.api.libs.streams.impl.PromiseSubscriber.State">State</a>
+  <span class="comment">/**
+   * A Subscriber that has had onSubscribe called on and whose
+   * Promise is not complete.
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">case object</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Subscribed.productElement.x$1" title="play.api.libs.streams.impl.PromiseSubscriber.Subscribed.type" id="play.api.libs.streams.impl.PromiseSubscriber.Subscribed.readResolve">Subscribed</a> <span title="Product" class="keyword">extends</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber;State" title="play.api.libs.streams.impl.PromiseSubscriber.State">State</a>
+  <span class="comment">/**
+   * A Subscriber that is complete, either because onComplete or onError was
+   * called or because its Promise is complete.
+   */</span>
+  <span class="keyword">final</span> <span class="keyword">case object</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.productElement.x$1" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type" id="play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve">Completed</a> <span title="Product" class="keyword">extends</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber;State" title="play.api.libs.streams.impl.PromiseSubscriber.State">State</a>
+<span class="delimiter">}</span>
+
+<span title="AnyRef" class="keyword">import</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber" title="play.api.libs.streams.impl.PromiseSubscriber.type">PromiseSubscriber</a>._
+
+<span class="comment">// Assume that promise's onComplete handler runs asynchronously</span>
+<span class="keyword">private</span><span class="delimiter">[</span>streams<span class="delimiter">]</span> <span class="keyword">class</span> <a title="class PromiseSubscriber[T] extends play.api.libs.concurrent.StateMachine[play.api.libs.streams.impl.PromiseSubscriber.State] with org.reactivestreams.Subscriber[T]" id="play.api.libs.streams.impl;PromiseSubscriber">PromiseSubscriber</a><span class="delimiter">[</span><a title="" id="play.api.libs.streams.impl;PromiseSubscriber;T">T</a><span class="delimiter">]</span><a href="#play.api.libs.streams.impl;PromiseSubscriber" title="play.api.libs.streams.impl.PromiseSubscriber[T]" class="delimiter">(</a><a title="scala.concurrent.Promise[T]" id="play.api.libs.streams.impl;PromiseSubscriber.prom">prom</a>: <span title="scala.concurrent.Promise[T]">Promise</span><span class="delimiter">[</span>T<span class="delimiter">]</span><span class="delimiter">)</span>
+    <span class="keyword">extends</span> <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine" title="play.api.libs.concurrent.StateMachine[play.api.libs.streams.impl.PromiseSubscriber.State]">StateMachine</a><span class="delimiter">[</span>State<span class="delimiter">]</span><span class="delimiter">(</span>initialState = <a href="#play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.type">AwaitingSubscription</a><span class="delimiter">)</span> <span class="keyword">with</span> <span title="org.reactivestreams.Subscriber[T]">Subscriber</span><span class="delimiter">[</span>T<span class="delimiter">]</span> <span class="delimiter">{</span>
+
+  <span class="comment">// Streams methods</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(subscription: org.reactivestreams.Subscription)Unit" id="play.api.libs.streams.impl;PromiseSubscriber.onSubscribe">onSubscribe</a><span class="delimiter">(</span><a title="org.reactivestreams.Subscription" id="play.api.libs.streams.impl;PromiseSubscriber.onSubscribe.subscription">subscription</a>: <span title="org.reactivestreams.Subscription">Subscription</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.exclusive" title="(f: play.api.libs.streams.impl.PromiseSubscriber.State =&gt; Unit)Unit">exclusive</a> <a href="#play.api.libs.streams.impl;PromiseSubscriber.onSubscribe.$anonfun.x0$1" title="Unit" class="delimiter">{</a>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Subscribed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Subscribed.type">Subscribed</a> =&gt;
+      <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)IllegalStateException" class="keyword">new</span> <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Can\'t call onSubscribe twice&quot;)" class="string">&quot;Can't call onSubscribe twice&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.type">AwaitingSubscription</a> =&gt;
+      <span class="comment">// Check if promise is completed. Even if we request elements, we</span>
+      <span class="comment">// still need to handle the Promise completing in some other way.</span>
+      <span title="Unit" class="keyword">if</span> <span class="delimiter">(</span><a href="#play.api.libs.streams.impl;PromiseSubscriber.prom" title="scala.concurrent.Promise[T]">prom</a>.<span title="=&gt; Boolean">isCompleted</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.state_=" title="(x$1: play.api.libs.streams.impl.PromiseSubscriber.State)Unit">state</a> = <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a>
+        <a href="#play.api.libs.streams.impl;PromiseSubscriber.onSubscribe.subscription" title="org.reactivestreams.Subscription">subscription</a>.<span title="()Unit">cancel</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span> <span class="keyword">else</span> <span class="delimiter">{</span>
+        <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.state_=" title="(x$1: play.api.libs.streams.impl.PromiseSubscriber.State)Unit">state</a> = <a href="#play.api.libs.streams.impl.PromiseSubscriber.Subscribed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Subscribed.type">Subscribed</a>
+        <a href="#play.api.libs.streams.impl;PromiseSubscriber.onSubscribe.subscription" title="org.reactivestreams.Subscription">subscription</a>.<span title="(x$1: Long)Unit">request</span><span class="delimiter">(</span><span title="Long(1L)" class="int">1</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a> =&gt;
+      <a href="#play.api.libs.streams.impl;PromiseSubscriber.onSubscribe.subscription" title="org.reactivestreams.Subscription">subscription</a>.<span title="()Unit">cancel</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(cause: Throwable)Unit" id="play.api.libs.streams.impl;PromiseSubscriber.onError">onError</a><span class="delimiter">(</span><a title="Throwable" id="play.api.libs.streams.impl;PromiseSubscriber.onError.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.exclusive" title="(f: play.api.libs.streams.impl.PromiseSubscriber.State =&gt; Unit)Unit">exclusive</a> <a href="#play.api.libs.streams.impl;PromiseSubscriber.onError.$anonfun.x0$2" title="Unit" class="delimiter">{</a>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.type">AwaitingSubscription</a> | <a href="#play.api.libs.streams.impl.PromiseSubscriber.Subscribed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Subscribed.type">Subscribed</a> =&gt;
+      <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.state_=" title="(x$1: play.api.libs.streams.impl.PromiseSubscriber.State)Unit">state</a> = <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a>
+      <a href="#play.api.libs.streams.impl;PromiseSubscriber.prom" title="scala.concurrent.Promise[T]">prom</a>.<span title="(t: Throwable)PromiseSubscriber.this.prom.type">failure</span><span title="Unit" class="delimiter">(</span><a href="#play.api.libs.streams.impl;PromiseSubscriber.onError.cause" title="Throwable">cause</a><span class="delimiter">)</span> <span class="comment">// we assume any Future.onComplete handlers run asynchronously</span>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a> =&gt;
+      <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="()Unit" id="play.api.libs.streams.impl;PromiseSubscriber.onComplete">onComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.exclusive" title="(f: play.api.libs.streams.impl.PromiseSubscriber.State =&gt; Unit)Unit">exclusive</a> <a href="#play.api.libs.streams.impl;PromiseSubscriber.onComplete.$anonfun.x0$3" title="Unit" class="delimiter">{</a>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.type">AwaitingSubscription</a> | <a href="#play.api.libs.streams.impl.PromiseSubscriber.Subscribed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Subscribed.type">Subscribed</a> =&gt;
+      <a href="#play.api.libs.streams.impl;PromiseSubscriber.prom" title="scala.concurrent.Promise[T]">prom</a>.<span title="(t: Throwable)PromiseSubscriber.this.prom.type">failure</span><span class="delimiter">(</span><span title="(x$1: String)IllegalStateException" class="keyword">new</span> <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Can\'t handle onComplete until an element has been received&quot;)" class="string">&quot;Can't handle onComplete until an element has been received&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.state_=" title="(x$1: play.api.libs.streams.impl.PromiseSubscriber.State)Unit">state</a> = <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a> =&gt;
+      <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="keyword">override</span> <span class="keyword">def</span> <a title="(element: T)Unit" id="play.api.libs.streams.impl;PromiseSubscriber.onNext">onNext</a><span class="delimiter">(</span><a title="T" id="play.api.libs.streams.impl;PromiseSubscriber.onNext.element">element</a>: <a href="#play.api.libs.streams.impl;PromiseSubscriber;T" title="T">T</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.exclusive" title="(f: play.api.libs.streams.impl.PromiseSubscriber.State =&gt; Unit)Unit">exclusive</a> <a href="#play.api.libs.streams.impl;PromiseSubscriber.onNext.$anonfun.x0$4" title="Unit" class="delimiter">{</a>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.AwaitingSubscription.type">AwaitingSubscription</a> =&gt;
+      <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.state_=" title="(x$1: play.api.libs.streams.impl.PromiseSubscriber.State)Unit">state</a> = <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a>
+      <span title="Nothing" class="keyword">throw</span> <span title="(x$1: String)IllegalStateException" class="keyword">new</span> <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;Can\'t handle onNext until at least one subscription has occurred&quot;)" class="string">&quot;Can't handle onNext until at least one subscription has occurred&quot;</span><span class="delimiter">)</span>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Subscribed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Subscribed.type">Subscribed</a> =&gt;
+      <a href="../../../../../../play-iteratees/play/api/libs/concurrent/StateMachine.scala.html#play.api.libs.concurrent;StateMachine.state_=" title="(x$1: play.api.libs.streams.impl.PromiseSubscriber.State)Unit">state</a> = <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a>
+      <a href="#play.api.libs.streams.impl;PromiseSubscriber.prom" title="scala.concurrent.Promise[T]">prom</a>.<span title="(v: T)PromiseSubscriber.this.prom.type">success</span><span title="Unit" class="delimiter">(</span><a href="#play.api.libs.streams.impl;PromiseSubscriber.onNext.element" title="T">element</a><span class="delimiter">)</span> <span class="comment">// we assume any Future.onComplete handlers run asynchronously</span>
+    <span class="keyword">case</span> <a href="#play.api.libs.streams.impl.PromiseSubscriber.Completed.readResolve" title="play.api.libs.streams.impl.PromiseSubscriber.Completed.type">Completed</a> =&gt;
+      <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

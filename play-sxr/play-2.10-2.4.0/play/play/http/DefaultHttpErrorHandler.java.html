@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>play/play/http/DefaultHttpErrorHandler.java</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */
+package play.http;
+
+import play.*;
+import play.api.OptionalSourceMapper;
+import play.api.UsefulException;
+import play.api.http.HttpErrorHandlerExceptions;
+import play.api.routing.Router;
+import play.libs.F;
+import play.mvc.Http;
+import play.mvc.Http.*;
+import play.mvc.Result;
+import play.mvc.Results;
+import scala.Option;
+import scala.Some;
+
+import javax.inject.*;
+
+/**
+ * Default implementation of the http error handler.
+ *
+ * This class is intended to be extended to allow reusing Play's default error handling functionality.
+ */
+public class DefaultHttpErrorHandler implements HttpErrorHandler {
+
+    private final Option&lt;String&gt; playEditor;
+    private final Environment environment;
+    private final OptionalSourceMapper sourceMapper;
+    private final Provider&lt;Router&gt; routes;
+
+    @Inject
+    public DefaultHttpErrorHandler(Configuration configuration, Environment environment,
+                                   OptionalSourceMapper sourceMapper, Provider&lt;Router&gt; routes) {
+        this.environment = environment;
+        this.sourceMapper = sourceMapper;
+        this.routes = routes;
+
+        this.playEditor = Option.apply(configuration.getString(&quot;play.editor&quot;));
+    }
+
+    /**
+     * Invoked when a client error occurs, that is, an error in the 4xx series.
+     *
+     * @param request The request that caused the client error.
+     * @param statusCode The error status code.  Must be greater or equal to 400, and less than 500.
+     * @param message The error message.
+     */
+    @Override
+    public F.Promise&lt;Result&gt; onClientError(RequestHeader request, int statusCode, String message) {
+        if (statusCode == 400) {
+            return onBadRequest(request, message);
+        } else if (statusCode == 403) {
+            return onForbidden(request, message);
+        } else if (statusCode == 404) {
+            return onNotFound(request, message);
+        } else if (statusCode &gt;= 400 &amp;&amp; statusCode &lt; 500) {
+            return F.Promise.&lt;Result&gt;pure(Results.status(statusCode, views.html.defaultpages.badRequest.render(
+                request.method(), request.uri(), message
+            )));
+        } else {
+            throw new IllegalArgumentException(&quot;onClientError invoked with non client error status code &quot; + statusCode + &quot;: &quot; + message);
+        }
+    }
+
+    /**
+     * Invoked when a client makes a bad request.
+     *
+     * @param request The request that was bad.
+     * @param message The error message.
+     */
+    protected F.Promise&lt;Result&gt; onBadRequest(RequestHeader request, String message) {
+        return F.Promise.&lt;Result&gt;pure(Results.badRequest(views.html.defaultpages.badRequest.render(
+                request.method(), request.uri(), message
+        )));
+    }
+
+    /**
+     * Invoked when a client makes a request that was forbidden.
+     *
+     * @param request The forbidden request.
+     * @param message The error message.
+     */
+    protected F.Promise&lt;Result&gt; onForbidden(RequestHeader request, String message) {
+        return F.Promise.&lt;Result&gt;pure(Results.forbidden(views.html.defaultpages.unauthorized.render()));
+    }
+
+    /**
+     * Invoked when a handler or resource is not found.
+     *
+     * @param request The request that no handler was found to handle.
+     * @param message A message.
+     */
+    protected F.Promise&lt;Result&gt; onNotFound(RequestHeader request, String message){
+        if (environment.isProd()) {
+            return F.Promise.&lt;Result&gt;pure(Results.notFound(views.html.defaultpages.notFound.render(
+                    request.method(), request.uri())));
+        } else {
+            return F.Promise.&lt;Result&gt;pure(Results.notFound(views.html.defaultpages.devNotFound.render(
+                    request.method(), request.uri(), Some.apply(routes.get())
+            )));
+        }
+    }
+
+    /**
+     * Invoked when a server error occurs.
+     *
+     * By default, the implementation of this method delegates to [[onProdServerError()]] when in prod mode, and
+     * [[onDevServerError()]] in dev mode.  It is recommended, if you want Play's debug info on the error page in dev
+     * mode, that you override [[onProdServerError()]] instead of this method.
+     *
+     * @param request The request that triggered the server error.
+     * @param exception The server error.
+     */
+    @Override
+    public F.Promise&lt;Result&gt; onServerError(RequestHeader request, Throwable exception) {
+        try {
+            UsefulException usefulException = throwableToUsefulException(exception);
+
+            logServerError(request, usefulException);
+
+            switch (environment.mode()) {
+                case PROD:
+                    return onProdServerError(request, usefulException);
+                default:
+                    return onDevServerError(request, usefulException);
+            }
+        } catch (Exception e) {
+            Logger.error(&quot;Error while handling error&quot;, e);
+            return F.Promise.&lt;Result&gt;pure(Results.internalServerError());
+        }
+    }
+
+    /**
+     * Responsible for logging server errors.
+     *
+     * This can be overridden to add additional logging information, eg. the id of the authenticated user.
+     *
+     * @param request The request that triggered the server error.
+     * @param usefulException The server error.
+     */
+    protected void logServerError(RequestHeader request, UsefulException usefulException) {
+        Logger.error(String.format(&quot;\n\n! @%s - Internal server error, for (%s) [%s] -&gt;\n&quot;,
+                        usefulException.id, request.method(), request.uri()),
+                usefulException
+        );
+    }
+
+    /**
+     * Convert the given exception to an exception that Play can report more information about.
+     *
+     * This will generate an id for the exception, and in dev mode, will load the source code for the code that threw the
+     * exception, making it possible to report on the location that the exception was thrown from.
+     */
+    private UsefulException throwableToUsefulException(final Throwable throwable) {
+        return HttpErrorHandlerExceptions.throwableToUsefulException(sourceMapper.sourceMapper(), environment.isProd(), throwable);
+    }
+
+    /**
+     * Invoked in dev mode when a server error occurs.
+     *
+     * @param request The request that triggered the error.
+     * @param exception The exception.
+     */
+    protected F.Promise&lt;Result&gt; onDevServerError(RequestHeader request, UsefulException exception) {
+        return F.Promise.&lt;Result&gt;pure(Results.internalServerError(views.html.defaultpages.devError.render(playEditor, exception)));
+    }
+
+    /**
+     * Invoked in prod mode when a server error occurs.
+     *
+     * Override this rather than [[onServerError()]] if you don't want to change Play's debug output when logging errors
+     * in dev mode.
+     *
+     * @param request The request that triggered the error.
+     * @param exception The exception.
+     */
+    protected F.Promise&lt;Result&gt; onProdServerError(RequestHeader request, UsefulException exception) {
+        return F.Promise.&lt;Result&gt;pure(Results.internalServerError(views.html.defaultpages.error.render(exception)));
+    }
+
+}
+
+        </pre>
+    </body>
+</html>

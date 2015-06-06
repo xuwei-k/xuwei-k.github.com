@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>play/play/api/Play.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/*
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+<span class="keyword">package</span> play.api
+
+<span class="keyword">import</span> play.api.i18n.MessagesApi
+<span class="keyword">import</span> play.utils.Threads
+
+<span class="keyword">import</span> java.io._
+
+<span class="keyword">import</span> scala.concurrent.Await
+<span class="keyword">import</span> scala.concurrent.duration.Duration
+<span class="keyword">import</span> scala.util.control.NonFatal
+<span class="keyword">import</span> javax.xml.parsers.SAXParserFactory
+<span class="keyword">import</span> org.apache.xerces.impl.Constants
+<span class="keyword">import</span> javax.xml.XMLConstants
+
+<span class="comment">/** Application mode, either `DEV`, `TEST`, or `PROD`. */</span>
+<span class="keyword">object</span> <a title="play.api.Mode.type" id="play.api.Mode">Mode</a> <a href="#play.api.Mode" title="play.api.Mode.type" class="keyword">extends</a> <span title="Enumeration">Enumeration</span> <span class="delimiter">{</span>
+  <span class="keyword">type</span> <a title="play.api.Mode.Value" id="play.api.Mode;Mode">Mode</a> = <span title="play.api.Mode.Value">Value</span>
+  <span class="keyword">val</span> <a title="play.api.Mode.Value" id="play.api.Mode.Dev">Dev</a>, <a title="play.api.Mode.Value" id="play.api.Mode.Test">Test</a>, <a title="play.api.Mode.Value" id="play.api.Mode.Prod">Prod</a> = <span title="=&gt; play.api.Mode.Value">Value</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * High-level API to access Play global features.
+ *
+ * Note that this API depends on a running application.
+ * You can import the currently running application in a scope using:
+ * {{{
+ * import play.api.Play.current
+ * }}}
+ */</span>
+<span class="keyword">object</span> <a title="play.api.Play.type" id="play.api.Play">Play</a> <a href="#play.api.Play" title="play.api.Play.type" class="delimiter">{</a>
+
+  <span class="keyword">private</span> <span class="keyword">val</span> <a title="play.api.Logger" id="play.api.Play.logger">logger</a> = <a href="Logger.scala.html#play.api.Logger.apply(1f619881c1)" title="(clazz: Class[?0])play.api.Logger">Logger</a><span class="delimiter">(</span><a href="#play.api.Play" title="play.api.Play.type">Play</a>.<span title="()Class[_]">getClass</span><span class="delimiter">)</span>
+
+  <span class="comment">/*
+   * We want control over the sax parser used so we specify the factory required explicitly. We know that
+   * SAXParserFactoryImpl will yield a SAXParser having looked at its source code, despite there being
+   * no explicit doco stating this is the case. That said, there does not appear to be any other way than
+   * declaring a factory in order to yield a parser of a specific type.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>play<span class="delimiter">]</span> <span class="keyword">val</span> <a title="javax.xml.parsers.SAXParserFactory" id="play.api.Play.xercesSaxParserFactory">xercesSaxParserFactory</a> =
+    <span title="javax.xml.parsers.SAXParserFactory.type">SAXParserFactory</span>.<span title="(x$1: String, x$2: ClassLoader)javax.xml.parsers.SAXParserFactory">newInstance</span><span class="delimiter">(</span><span title="String(&quot;org.apache.xerces.jaxp.SAXParserFactoryImpl&quot;)" class="string">&quot;org.apache.xerces.jaxp.SAXParserFactoryImpl&quot;</span>, <a href="#play.api.Play" title="play.api.Play.type">Play</a>.<span title="()Class[_]">getClass</span>.<span title="()ClassLoader">getClassLoader</span><span class="delimiter">)</span>
+  <a href="#play.api.Play.xercesSaxParserFactory" title="=&gt; javax.xml.parsers.SAXParserFactory">xercesSaxParserFactory</a>.<span title="(x$1: String, x$2: Boolean)Unit">setFeature</span><span class="delimiter">(</span>Constants.SAX_FEATURE_PREFIX <span title="String(&quot;http://xml.org/sax/features/external-general-entities&quot;)">+</span> Constants.EXTERNAL_GENERAL_ENTITIES_FEATURE, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+  <a href="#play.api.Play.xercesSaxParserFactory" title="=&gt; javax.xml.parsers.SAXParserFactory">xercesSaxParserFactory</a>.<span title="(x$1: String, x$2: Boolean)Unit">setFeature</span><span class="delimiter">(</span>Constants.SAX_FEATURE_PREFIX <span title="String(&quot;http://xml.org/sax/features/external-parameter-entities&quot;)">+</span> Constants.EXTERNAL_PARAMETER_ENTITIES_FEATURE, <span title="Boolean(false)" class="keyword">false</span><span class="delimiter">)</span>
+  <a href="#play.api.Play.xercesSaxParserFactory" title="=&gt; javax.xml.parsers.SAXParserFactory">xercesSaxParserFactory</a>.<span title="(x$1: String, x$2: Boolean)Unit">setFeature</span><span class="delimiter">(</span>Constants.XERCES_FEATURE_PREFIX <span title="String(&quot;http://apache.org/xml/features/disallow-doctype-decl&quot;)">+</span> Constants.DISALLOW_DOCTYPE_DECL_FEATURE, <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+  <a href="#play.api.Play.xercesSaxParserFactory" title="=&gt; javax.xml.parsers.SAXParserFactory">xercesSaxParserFactory</a>.<span title="(x$1: String, x$2: Boolean)Unit">setFeature</span><span class="delimiter">(</span>XMLConstants.<span title="String(&quot;http://javax.xml.XMLConstants/feature/secure-processing&quot;)">FEATURE_SECURE_PROCESSING</span>, <span title="Boolean(true)" class="keyword">true</span><span class="delimiter">)</span>
+
+  <span class="comment">/*
+   * A parser to be used that is configured to ensure that no schemas are loaded.
+   */</span>
+  <span class="keyword">private</span><span class="delimiter">[</span>play<span class="delimiter">]</span> <span class="keyword">def</span> <a title="=&gt; scala.xml.factory.XMLLoader[scala.xml.Elem]" id="play.api.Play.XML">XML</a> = scala.xml.<span title="scala.xml.XML.type">XML</span>.<span title="(p: scala.xml.SAXParser)scala.xml.factory.XMLLoader[scala.xml.Elem]">withSAXParser</span><span class="delimiter">(</span><a href="#play.api.Play.xercesSaxParserFactory" title="=&gt; javax.xml.parsers.SAXParserFactory">xercesSaxParserFactory</a>.<span title="()javax.xml.parsers.SAXParser">newSAXParser</span><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Returns the currently running application, or `null` if not defined.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; play.api.Application" id="play.api.Play.unsafeApplication">unsafeApplication</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a> = <a href="#play.api.Play._currentApp_=" title="=&gt; play.api.Application">_currentApp</a>
+
+  <span class="comment">/**
+   * Optionally returns the current running application.
+   */</span>
+  <span class="keyword">def</span> <a title="=&gt; Option[play.api.Application]" id="play.api.Play.maybeApplication">maybeApplication</a>: <span title="Option[play.api.Application]">Option</span><span class="delimiter">[</span>Application<span class="delimiter">]</span> = <span title="(x: play.api.Application)Option[play.api.Application]">Option</span><span class="delimiter">(</span><a href="#play.api.Play._currentApp_=" title="=&gt; play.api.Application">_currentApp</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Implicitly import the current running application in the context.
+   *
+   * Note that by relying on this, your code will only work properly in
+   * the context of a running application.
+   */</span>
+  <span class="keyword">implicit</span> <span class="keyword">def</span> <a title="=&gt; play.api.Application" id="play.api.Play.current">current</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a> = <a href="#play.api.Play.maybeApplication" title="=&gt; Option[play.api.Application]">maybeApplication</a>.<span title="(default: =&gt; play.api.Application)play.api.Application">getOrElse</span><span class="delimiter">(</span>sys.<span title="(message: String)Nothing">error</span><span class="delimiter">(</span><span title="String(&quot;There is no started application&quot;)" class="string">&quot;There is no started application&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  @volatile <span class="keyword">private</span><span class="delimiter">[</span>play<span class="delimiter">]</span> <span class="keyword">var</span> <a title="play.api.Application" id="play.api.Play._currentApp_=">_currentApp</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a> = _
+
+  <span class="comment">/**
+   * Starts this application.
+   *
+   * @param app the application to start
+   */</span>
+  <span class="keyword">def</span> <a title="(app: play.api.Application)Unit" id="play.api.Play.start">start</a><span class="delimiter">(</span><a title="play.api.Application" id="play.api.Play.start.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="comment">// First stop previous app if exists</span>
+    <a href="#play.api.Play.stop" title="(app: play.api.Application)Unit">stop</a><span class="delimiter">(</span><a href="#play.api.Play._currentApp_=" title="=&gt; play.api.Application">_currentApp</a><span class="delimiter">)</span>
+
+    <a href="#play.api.Play._currentApp_=" title="(x$1: play.api.Application)Unit">_currentApp</a> = <a href="#play.api.Play.start.app" title="play.api.Application">app</a>
+
+    <span class="comment">// Ensure routes are eagerly loaded, so that the reverse routers are correctly initialised before plugins are</span>
+    <span class="comment">// started.</span>
+    <a href="#play.api.Play.start.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.routes" title="=&gt; play.api.routing.Router">routes</a>
+    <a href="../utils/Threads.scala.html#play.utils.Threads" title="play.utils.Threads.type">Threads</a>.<a href="../utils/Threads.scala.html#play.utils.Threads.withContextClassLoader" title="(classloader: ClassLoader)(b: =&gt; Unit)Unit">withContextClassLoader</a><span class="delimiter">(</span><a href="#play.api.Play.classloader" title="(implicit app: play.api.Application)ClassLoader">classloader</a><span class="delimiter">(</span><a href="#play.api.Play.start.app" title="play.api.Application">app</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#play.api.Play.start.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.plugins" title="=&gt; Seq[play.api.Plugin.Deprecated]">plugins</a>.<span title="(f: play.api.Plugin.Deprecated =&gt; Unit)Unit">foreach</span><span class="delimiter">(</span><a href="#play.api.Play.start.$anonfun.x$1" title="play.api.Plugin.Deprecated">_</a>.<a href="Plugins.scala.html#play.api;Plugin.onStart" title="()Unit">onStart</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <a href="#play.api.Play.start.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.mode" title="=&gt; play.api.Mode.Mode">mode</a> <span title="Unit" class="keyword">match</span> <span class="delimiter">{</span>
+      <span class="keyword">case</span> <a href="#play.api.Mode" title="play.api.Mode.type">Mode</a>.<a href="#play.api.Mode.Test" title="=&gt; play.api.Mode.Value">Test</a> =&gt;
+      <span class="keyword">case</span> <a title="play.api.Mode.Mode" id="play.api.Play.start.mode">mode</a> =&gt; <a href="#play.api.Play.logger" title="=&gt; play.api.Logger">logger</a>.<a href="Logger.scala.html#play.api;LoggerLike.info(83d3728a3c)" title="(message: =&gt; String)Unit">info</a><span class="delimiter">(</span><span title="String(&quot;Application started (&quot;)" class="string">&quot;Application started (&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#play.api.Play.start.mode" title="play.api.Mode.Mode">mode</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;)&quot;)" class="string">&quot;)&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Stops the given application.
+   */</span>
+  <span class="keyword">def</span> <a title="(app: play.api.Application)Unit" id="play.api.Play.stop">stop</a><span class="delimiter">(</span><a title="play.api.Application" id="play.api.Play.stop.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    <span title="Any" class="keyword">if</span> <span class="delimiter">(</span><a href="#play.api.Play.stop.app" title="play.api.Application">app</a> <span title="(x$1: AnyRef)Boolean">!=</span> <span title="Null(null)" class="keyword">null</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="../utils/Threads.scala.html#play.utils.Threads" title="play.utils.Threads.type">Threads</a>.<a href="../utils/Threads.scala.html#play.utils.Threads.withContextClassLoader" title="(classloader: ClassLoader)(b: =&gt; Any)Any">withContextClassLoader</a><span class="delimiter">(</span><a href="#play.api.Play.classloader" title="(implicit app: play.api.Application)ClassLoader">classloader</a><span class="delimiter">(</span><a href="#play.api.Play.stop.app" title="play.api.Application">app</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#play.api.Play.stop.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.plugins" title="=&gt; Seq[play.api.Plugin.Deprecated]">plugins</a>.<span title="=&gt; Seq[play.api.Plugin.Deprecated]">reverse</span>.<span title="(f: play.api.Plugin.Deprecated =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span> <a title="play.api.Plugin.Deprecated" id="play.api.Play.stop.$anonfun.p">p</a> =&gt;
+          <span class="keyword">try</span> <span class="delimiter">{</span> <a href="#play.api.Play.stop.$anonfun.p" title="play.api.Plugin.Deprecated">p</a>.<a href="Plugins.scala.html#play.api;Plugin.onStop" title="()Unit">onStop</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span> <span class="keyword">case</span> <a href="#play.api.Play.stop.$anonfun.<unapply-selector>" title="(t: Throwable)Option[Throwable]">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="play.api.Play.stop.$anonfun.e">e</a><span class="delimiter">)</span> =&gt; <a href="#play.api.Play.logger" title="=&gt; play.api.Logger">logger</a>.<a href="Logger.scala.html#play.api;LoggerLike.warn(804ef4765b)" title="(message: =&gt; String, error: =&gt; Throwable)Unit">warn</a><span class="delimiter">(</span><span title="String(&quot;Error stopping plugin&quot;)" class="string">&quot;Error stopping plugin&quot;</span>, <a href="#play.api.Play.stop.$anonfun.e" title="Throwable">e</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+        <span class="keyword">try</span> <span class="delimiter">{</span> <span title="scala.concurrent.Await.type">Await</span>.<span title="(awaitable: scala.concurrent.Awaitable[Unit], atMost: scala.concurrent.duration.Duration)awaitable.type">ready</span><span class="delimiter">(</span><a href="#play.api.Play.stop.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.stop" title="()scala.concurrent.Future[Unit]">stop</a><span class="delimiter">(</span><span class="delimiter">)</span>, <span title="scala.concurrent.duration.Duration.type">Duration</span>.<span title="=&gt; scala.concurrent.duration.Duration.Infinite">Inf</span><span class="delimiter">)</span> <span class="delimiter">}</span> <span class="keyword">catch</span> <span class="delimiter">{</span> <span class="keyword">case</span> <a href="#play.api.Play.stop.<unapply-selector>" title="(t: Throwable)Option[Throwable]">NonFatal</a><span class="delimiter">(</span><a title="Throwable" id="play.api.Play.stop.e">e</a><span class="delimiter">)</span> =&gt; <a href="#play.api.Play.logger" title="=&gt; play.api.Logger">logger</a>.<a href="Logger.scala.html#play.api;LoggerLike.warn(804ef4765b)" title="(message: =&gt; String, error: =&gt; Throwable)Unit">warn</a><span class="delimiter">(</span><span title="String(&quot;Error stopping application&quot;)" class="string">&quot;Error stopping application&quot;</span>, <a href="#play.api.Play.stop.e" title="Throwable">e</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+    <a href="#play.api.Play._currentApp_=" title="(x$1: play.api.Application)Unit">_currentApp</a> = <span title="Null(null)" class="keyword">null</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Scans the current application classloader to retrieve a resources contents as a stream.
+   *
+   * For example, to retrieve a configuration file:
+   * {{{
+   * val maybeConf = application.resourceAsStream(&quot;conf/logger.xml&quot;)
+   * }}}
+   *
+   * @param name Absolute name of the resource (from the classpath root).
+   * @return Maybe a stream if found.
+   */</span>
+  <span class="keyword">def</span> <a title="(name: String)(implicit app: play.api.Application)Option[java.io.InputStream]" id="play.api.Play.resourceAsStream">resourceAsStream</a><span class="delimiter">(</span><a title="String" id="play.api.Play.resourceAsStream.name">name</a>: <span title="String">String</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.resourceAsStream.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="Option[java.io.InputStream]">Option</span><span class="delimiter">[</span>InputStream<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <a href="#play.api.Play.resourceAsStream.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.resourceAsStream" title="(name: String)Option[java.io.InputStream]">resourceAsStream</a><span class="delimiter">(</span><a href="#play.api.Play.resourceAsStream.name" title="String">name</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Scans the current application classloader to retrieve a resource.
+   *
+   * For example, to retrieve a configuration file:
+   * {{{
+   * val maybeConf = application.resource(&quot;conf/logger.xml&quot;)
+   * }}}
+   *
+   * @param name absolute name of the resource (from the classpath root)
+   * @return the resource URL, if found
+   */</span>
+  <span class="keyword">def</span> <a title="(name: String)(implicit app: play.api.Application)Option[java.net.URL]" id="play.api.Play.resource">resource</a><span class="delimiter">(</span><a title="String" id="play.api.Play.resource.name">name</a>: <span title="String">String</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.resource.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="Option[java.net.URL]">Option</span><span class="delimiter">[</span>java.net.URL<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <a href="#play.api.Play.resource.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.resource" title="(name: String)Option[java.net.URL]">resource</a><span class="delimiter">(</span><a href="#play.api.Play.resource.name" title="String">name</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Retrieves a file relative to the current application root path.
+   *
+   * For example, to retrieve a configuration file:
+   * {{{
+   * val myConf = application.getFile(&quot;conf/myConf.yml&quot;)
+   * }}}
+   *
+   * @param relativePath the relative path of the file to fetch
+   * @return a file instance; it is not guaranteed that the file exists
+   */</span>
+  <span class="keyword">def</span> <a title="(relativePath: String)(implicit app: play.api.Application)java.io.File" id="play.api.Play.getFile">getFile</a><span class="delimiter">(</span><a title="String" id="play.api.Play.getFile.relativePath">relativePath</a>: <span title="String">String</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.getFile.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="java.io.File">File</span> = <span class="delimiter">{</span>
+    <a href="#play.api.Play.getFile.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.getFile" title="(relativePath: String)java.io.File">getFile</a><span class="delimiter">(</span><a href="#play.api.Play.getFile.relativePath" title="String">relativePath</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Retrieves a file relative to the current application root path.
+   *
+   * For example, to retrieve a configuration file:
+   * {{{
+   * val myConf = application.getExistingFile(&quot;conf/myConf.yml&quot;)
+   * }}}
+   *
+   * @param relativePath relative path of the file to fetch
+   * @return an existing file
+   */</span>
+  <span class="keyword">def</span> <a title="(relativePath: String)(implicit app: play.api.Application)Option[java.io.File]" id="play.api.Play.getExistingFile">getExistingFile</a><span class="delimiter">(</span><a title="String" id="play.api.Play.getExistingFile.relativePath">relativePath</a>: <span title="String">String</span><span class="delimiter">)</span><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.getExistingFile.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="Option[java.io.File]">Option</span><span class="delimiter">[</span>File<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <a href="#play.api.Play.getExistingFile.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.getExistingFile" title="(relativePath: String)Option[java.io.File]">getExistingFile</a><span class="delimiter">(</span><a href="#play.api.Play.getExistingFile.relativePath" title="String">relativePath</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Returns the current application.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)play.api.Application" id="play.api.Play.application">application</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.application.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a> = <a href="#play.api.Play.application.app" title="play.api.Application">app</a>
+
+  <span class="comment">/**
+   * Returns the current application classloader.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)ClassLoader" id="play.api.Play.classloader">classloader</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.classloader.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="ClassLoader">ClassLoader</span> = <a href="#play.api.Play.classloader.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.classloader" title="=&gt; ClassLoader">classloader</a>
+
+  <span class="comment">/**
+   * Returns the current application configuration.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)play.api.Configuration" id="play.api.Play.configuration">configuration</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.configuration.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <a href="Configuration.scala.html#play.api;Configuration" title="play.api.Configuration">Configuration</a> = <a href="#play.api.Play.configuration.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.configuration" title="=&gt; play.api.Configuration">configuration</a>
+
+  <span class="comment">/**
+   * Returns the current application router.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)play.api.routing.Router" id="play.api.Play.routes">routes</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.routes.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: play.api.routing.<a href="routing/Router.scala.html#play.api.routing;Router" title="play.api.routing.Router">Router</a> = <a href="#play.api.Play.routes.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.routes" title="=&gt; play.api.routing.Router">routes</a>
+
+  <span class="comment">/**
+   * Returns the current application global settings.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)play.api.GlobalSettings" id="play.api.Play.global">global</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.global.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <a href="GlobalSettings.scala.html#play.api;GlobalSettings" title="play.api.GlobalSettings">GlobalSettings</a> = <a href="#play.api.Play.global.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.global" title="=&gt; play.api.GlobalSettings">global</a>
+
+  <span class="comment">/**
+   * Returns the current application mode.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)play.api.Mode.Mode" id="play.api.Play.mode">mode</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.mode.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: Mode.<span title="play.api.Mode.Mode">Mode</span> = <a href="#play.api.Play.mode.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.mode" title="=&gt; play.api.Mode.Mode">mode</a>
+
+  <span class="comment">/**
+   * Returns `true` if the current application is `DEV` mode.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)Boolean" id="play.api.Play.isDev">isDev</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.isDev.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">(</span><a href="#play.api.Play.isDev.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.mode" title="=&gt; play.api.Mode.Mode">mode</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#play.api.Mode" title="play.api.Mode.type">Mode</a>.<a href="#play.api.Mode.Dev" title="=&gt; play.api.Mode.Value">Dev</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Returns `true` if the current application is `PROD` mode.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)Boolean" id="play.api.Play.isProd">isProd</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.isProd.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">(</span><a href="#play.api.Play.isProd.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.mode" title="=&gt; play.api.Mode.Mode">mode</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#play.api.Mode" title="play.api.Mode.type">Mode</a>.<a href="#play.api.Mode.Prod" title="=&gt; play.api.Mode.Value">Prod</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Returns `true` if the current application is `TEST` mode.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit app: play.api.Application)Boolean" id="play.api.Play.isTest">isTest</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.Application" id="play.api.Play.isTest.app">app</a>: <a href="Application.scala.html#play.api;Application" title="play.api.Application">Application</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <span class="delimiter">(</span><a href="#play.api.Play.isTest.app" title="play.api.Application">app</a>.<a href="Application.scala.html#play.api;Application.mode" title="=&gt; play.api.Mode.Mode">mode</a> <span title="(x$1: AnyRef)Boolean">==</span> <a href="#play.api.Mode" title="play.api.Mode.type">Mode</a>.<a href="#play.api.Mode.Test" title="=&gt; play.api.Mode.Value">Test</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Returns the name of the cookie that can be used to permanently set the user's language.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit messagesApi: play.api.i18n.MessagesApi)String" id="play.api.Play.langCookieName">langCookieName</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.i18n.MessagesApi" id="play.api.Play.langCookieName.messagesApi">messagesApi</a>: <a href="i18n/Messages.scala.html#play.api.i18n;MessagesApi" title="play.api.i18n.MessagesApi">MessagesApi</a><span class="delimiter">)</span>: <span title="String">String</span> =
+    <a href="#play.api.Play.langCookieName.messagesApi" title="play.api.i18n.MessagesApi">messagesApi</a>.<a href="i18n/Messages.scala.html#play.api.i18n;MessagesApi.langCookieName" title="=&gt; String">langCookieName</a>
+
+  <span class="comment">/**
+   * Returns whether the language cookie should have the secure flag set.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit messagesApi: play.api.i18n.MessagesApi)Boolean" id="play.api.Play.langCookieSecure">langCookieSecure</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.i18n.MessagesApi" id="play.api.Play.langCookieSecure.messagesApi">messagesApi</a>: <a href="i18n/Messages.scala.html#play.api.i18n;MessagesApi" title="play.api.i18n.MessagesApi">MessagesApi</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> =
+    <a href="#play.api.Play.langCookieSecure.messagesApi" title="play.api.i18n.MessagesApi">messagesApi</a>.<a href="i18n/Messages.scala.html#play.api.i18n;MessagesApi.langCookieSecure" title="=&gt; Boolean">langCookieSecure</a>
+
+  <span class="comment">/**
+   * Returns whether the language cookie should have the HTTP only flag set.
+   */</span>
+  <span class="keyword">def</span> <a title="(implicit messagesApi: play.api.i18n.MessagesApi)Boolean" id="play.api.Play.langCookieHttpOnly">langCookieHttpOnly</a><span class="delimiter">(</span><span class="keyword">implicit</span> <a title="play.api.i18n.MessagesApi" id="play.api.Play.langCookieHttpOnly.messagesApi">messagesApi</a>: <a href="i18n/Messages.scala.html#play.api.i18n;MessagesApi" title="play.api.i18n.MessagesApi">MessagesApi</a><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> =
+    <a href="#play.api.Play.langCookieHttpOnly.messagesApi" title="play.api.i18n.MessagesApi">messagesApi</a>.<a href="i18n/Messages.scala.html#play.api.i18n;MessagesApi.langCookieHttpOnly" title="=&gt; Boolean">langCookieHttpOnly</a>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

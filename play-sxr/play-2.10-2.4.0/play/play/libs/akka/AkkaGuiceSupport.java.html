@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>play/play/libs/akka/AkkaGuiceSupport.java</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+/*
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */
+package play.libs.akka;
+
+import akka.actor.Actor;
+import akka.actor.ActorRef;
+import akka.actor.Props;
+import com.google.inject.Binder;
+import com.google.inject.Module;
+import com.google.inject.assistedinject.FactoryModuleBuilder;
+import com.google.inject.binder.AnnotatedBindingBuilder;
+import com.google.inject.name.Names;
+import com.google.inject.util.Providers;
+import play.libs.Akka;
+
+import java.util.function.Function;
+
+/**
+ * Support for binding actors with Guice.
+ *
+ * Mix this interface in with a Guice AbstractModule to get convenient support for binding actors.  For example:
+ * &lt;pre&gt;
+ * public class MyModule extends AbstractModule implements AkkaGuiceSupport {
+ *   protected void configure() {
+ *     bindActor(MyActor.class, &quot;myActor&quot;);
+ *   }
+ * }
+ * &lt;/pre&gt;
+ *
+ * Then to use the above actor in your application, add a qualified injected dependency, like so:
+ * &lt;pre&gt;
+ * public class MyController extends Controller {
+ *   {@literal @}Inject @Named(&quot;myActor&quot;) ActorRef myActor;
+ *   ...
+ * }
+ * &lt;/pre&gt;
+ */
+public interface AkkaGuiceSupport {
+
+    /**
+     * Bind an actor.
+     *
+     * This will cause the actor to be instantiated by Guice, allowing it to be dependency injected itself.  It will
+     * bind the returned ActorRef for the actor will be bound, qualified with the passed in name, so that it can be
+     * injected into other components.
+     *
+     * @param actorClass The class that implements the actor.
+     * @param name The name of the actor.
+     * @param props A function to provide props for the actor. The props passed in will just describe how to create the
+     *              actor, this function can be used to provide additional configuration such as router and dispatcher
+     *              configuration.
+     */
+    default &lt;T extends Actor&gt; void bindActor(Class&lt;T&gt; actorClass, String name, Function&lt;Props, Props&gt; props) {
+        BinderAccessor.binder(this).bind(ActorRef.class)
+                .annotatedWith(Names.named(name))
+                .toProvider(Providers.guicify(Akka.providerOf(actorClass, name, props)))
+                .asEagerSingleton();
+    }
+
+    /**
+     * Bind an actor.
+     *
+     * This will cause the actor to be instantiated by Guice, allowing it to be dependency injected itself.  It will
+     * bind the returned ActorRef for the actor will be bound, qualified with the passed in name, so that it can be
+     * injected into other components.
+     *
+     * @param actorClass The class that implements the actor.
+     * @param name The name of the actor.
+     */
+    default &lt;T extends Actor&gt; void bindActor(Class&lt;T&gt; actorClass, String name) {
+        bindActor(actorClass, name, Function.identity());
+    }
+
+    /**
+     * Bind an actor factory.
+     *
+     * This is useful for when you want to have child actors injected, and want to pass parameters into them, as well as
+     * have Guice provide some of the parameters.  It is intended to be used with Guice's AssistedInject feature.
+     *
+     * Let's say you have an actor that looks like this:
+     *
+     * &lt;pre&gt;
+     * public class MyChildActor extends UntypedActor {
+     *     final Database db;
+     *     final String id;
+     *
+     *     {@literal @}Inject
+     *     public MyChildActor(Database db, {@literal @}Assisted String id) {
+     *         this.db = db;
+     *         this.id = id;
+     *     }
+     *     ...
+     * }
+     * &lt;/pre&gt;
+     *
+     * So {@code db} should be injected, while {@code id} should be passed.  Now, define an interface that takes the id,
+     * and returns the actor:
+     *
+     * &lt;pre&gt;
+     * public interface MyChildActorFactory {
+     *   MyChildActor apply(String id);
+     * }
+     * &lt;/pre&gt;
+     *
+     * Now you can use this method to bind the child actor in your module:
+     *
+     * &lt;pre&gt;
+     * public class MyModule extends AbstractModule implements AkkaGuiceSupport {
+     *   protected void configure() {
+     *     bindActorFactory(MyChildActor.class, MyChildActorFactory.class);
+     *   }
+     * }
+     * &lt;/pre&gt;
+     *
+     * Now, when you want an actor to instantiate this as a child actor, inject `MyChildActorFactory`:
+     *
+     * &lt;pre&gt;
+     * public class MyActor extends UntypedActor implements InjectedActorSupport {
+     *   final MyChildActorFactory myChildActorFactory;
+     *
+     *   {@literal @}Inject
+     *   public MyActor(MyChildActor myChildActorFactory) {
+     *       this.myChildActorFactory = myChildActorFactory;
+     *   }
+     *
+     *   public onReceive(Object msg) {
+     *     if (msg instanceof CreateChildActor) {
+     *       ActorRef child = injectedChild(myChildActorFactory.apply(((CreateChildActor) msg).getId()));
+     *       sender().send(child, self);
+     *     }
+     *   }
+     * }
+     * &lt;/pre&gt;
+     *
+     * @param actorClass The class that implements the actor.
+     * @param factoryClass The factory interface for creating the actor.
+     */
+    default &lt;T extends Actor&gt; void bindActorFactory(Class&lt;T&gt; actorClass, Class&lt;?&gt; factoryClass) {
+        BinderAccessor.binder(this).install(
+                new FactoryModuleBuilder()
+                        .implement(Actor.class, actorClass)
+                        .build(factoryClass)
+        );
+    }
+}
+
+        </pre>
+    </body>
+</html>
