@@ -1,0 +1,502 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>cluster-sharding/akka/cluster/sharding/ClusterSharding.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+package akka.cluster.sharding
+
+import java.net.URLEncoder
+import java.util.Optional
+import java.util.concurrent.ConcurrentHashMap
+import scala.concurrent.Await
+import akka.actor.Actor
+import akka.actor.ActorRef
+import akka.actor.ActorSystem
+import akka.actor.Deploy
+import akka.actor.ExtendedActorSystem
+import akka.actor.Extension
+import akka.actor.ExtensionId
+import akka.actor.ExtensionIdProvider
+import akka.actor.NoSerializationVerificationNeeded
+import akka.actor.PoisonPill
+import akka.actor.Props
+import akka.cluster.Cluster
+import akka.cluster.ddata.DistributedData
+import akka.cluster.singleton.ClusterSingletonManager
+import akka.pattern.BackoffSupervisor
+import akka.util.ByteString
+import akka.pattern.ask
+import akka.dispatch.Dispatchers
+
+<span class="comment">/**
+ * This extension provides sharding functionality of actors in a cluster.
+ * The typical use case is when you have many stateful actors that together consume
+ * more resources (e.g. memory) than fit on one machine. You need to distribute them across
+ * several nodes in the cluster and you want to be able to interact with them using their
+ * logical identifier, but without having to care about their physical location in the cluster,
+ * which might also change over time. It could for example be actors representing Aggregate Roots in
+ * Domain-Driven Design terminology. Here we call these actors &quot;entities&quot;. These actors
+ * typically have persistent (durable) state, but this feature is not limited to
+ * actors with persistent state.
+ *
+ * In this context sharding means that actors with an identifier, so called entities,
+ * can be automatically distributed across multiple nodes in the cluster. Each entity
+ * actor runs only at one place, and messages can be sent to the entity without requiring
+ * the sender to know the location of the destination actor. This is achieved by sending
+ * the messages via a [[ShardRegion]] actor provided by this extension, which knows how
+ * to route the message with the entity id to the final destination.
+ *
+ * This extension is supposed to be used by first, typically at system startup on each node
+ * in the cluster, registering the supported entity types with the [[ClusterSharding#start]]
+ * method and then the `ShardRegion` actor for a named entity type can be retrieved with
+ * [[ClusterSharding#shardRegion]]. Messages to the entities are always sent via the local
+ * `ShardRegion`. Some settings can be configured as described in the `akka.cluster.sharding`
+ * section of the `reference.conf`.
+ *
+ * The `ShardRegion` actor is started on each node in the cluster, or group of nodes
+ * tagged with a specific role. The `ShardRegion` is created with two application specific
+ * functions to extract the entity identifier and the shard identifier from incoming messages.
+ * A shard is a group of entities that will be managed together. For the first message in a
+ * specific shard the `ShardRegion` request the location of the shard from a central coordinator,
+ * the [[ShardCoordinator]]. The `ShardCoordinator` decides which `ShardRegion` that
+ * owns the shard. The `ShardRegion` receives the decided home of the shard
+ * and if that is the `ShardRegion` instance itself it will create a local child
+ * actor representing the entity and direct all messages for that entity to it.
+ * If the shard home is another `ShardRegion` instance messages will be forwarded
+ * to that `ShardRegion` instance instead. While resolving the location of a
+ * shard incoming messages for that shard are buffered and later delivered when the
+ * shard home is known. Subsequent messages to the resolved shard can be delivered
+ * to the target destination immediately without involving the `ShardCoordinator`.
+ *
+ * To make sure that at most one instance of a specific entity actor is running somewhere
+ * in the cluster it is important that all nodes have the same view of where the shards
+ * are located. Therefore the shard allocation decisions are taken by the central
+ * `ShardCoordinator`, which is running as a cluster singleton, i.e. one instance on
+ * the oldest member among all cluster nodes or a group of nodes tagged with a specific
+ * role. The oldest member can be determined by [[akka.cluster.Member#isOlderThan]].
+ *
+ * The logic that decides where a shard is to be located is defined in a pluggable shard
+ * allocation strategy. The default implementation [[ShardCoordinator.LeastShardAllocationStrategy]]
+ * allocates new shards to the `ShardRegion` with least number of previously allocated shards.
+ * This strategy can be replaced by an application specific implementation.
+ *
+ * To be able to use newly added members in the cluster the coordinator facilitates rebalancing
+ * of shards, i.e. migrate entities from one node to another. In the rebalance process the
+ * coordinator first notifies all `ShardRegion` actors that a handoff for a shard has started.
+ * That means they will start buffering incoming messages for that shard, in the same way as if the
+ * shard location is unknown. During the rebalance process the coordinator will not answer any
+ * requests for the location of shards that are being rebalanced, i.e. local buffering will
+ * continue until the handoff is completed. The `ShardRegion` responsible for the rebalanced shard
+ * will stop all entities in that shard by sending `PoisonPill` to them. When all entities have
+ * been terminated the `ShardRegion` owning the entities will acknowledge the handoff as completed
+ * to the coordinator. Thereafter the coordinator will reply to requests for the location of
+ * the shard and thereby allocate a new home for the shard and then buffered messages in the
+ * `ShardRegion` actors are delivered to the new location. This means that the state of the entities
+ * are not transferred or migrated. If the state of the entities are of importance it should be
+ * persistent (durable), e.g. with `akka-persistence`, so that it can be recovered at the new
+ * location.
+ *
+ * The logic that decides which shards to rebalance is defined in a pluggable shard
+ * allocation strategy. The default implementation [[ShardCoordinator.LeastShardAllocationStrategy]]
+ * picks shards for handoff from the `ShardRegion` with most number of previously allocated shards.
+ * They will then be allocated to the `ShardRegion` with least number of previously allocated shards,
+ * i.e. new members in the cluster. There is a configurable threshold of how large the difference
+ * must be to begin the rebalancing. This strategy can be replaced by an application specific
+ * implementation.
+ *
+ * The state of shard locations in the `ShardCoordinator` is persistent (durable) with
+ * `akka-persistence` to survive failures. Since it is running in a cluster `akka-persistence`
+ * must be configured with a distributed journal. When a crashed or unreachable coordinator
+ * node has been removed (via down) from the cluster a new `ShardCoordinator` singleton
+ * actor will take over and the state is recovered. During such a failure period shards
+ * with known location are still available, while messages for new (unknown) shards
+ * are buffered until the new `ShardCoordinator` becomes available.
+ *
+ * As long as a sender uses the same `ShardRegion` actor to deliver messages to an entity
+ * actor the order of the messages is preserved. As long as the buffer limit is not reached
+ * messages are delivered on a best effort basis, with at-most once delivery semantics,
+ * in the same way as ordinary message sending. Reliable end-to-end messaging, with
+ * at-least-once semantics can be added by using `AtLeastOnceDelivery` in `akka-persistence`.
+ *
+ * Some additional latency is introduced for messages targeted to new or previously
+ * unused shards due to the round-trip to the coordinator. Rebalancing of shards may
+ * also add latency. This should be considered when designing the application specific
+ * shard resolution, e.g. to avoid too fine grained shards.
+ *
+ * The `ShardRegion` actor can also be started in proxy only mode, i.e. it will not
+ * host any entities itself, but knows how to delegate messages to the right location.
+ * A `ShardRegion` starts in proxy only mode if the roles of the node does not include
+ * the node role specified in `akka.cluster.sharding.role` config property
+ * or if the specified `entityProps` is `None`/`null`.
+ *
+ * If the state of the entities are persistent you may stop entities that are not used to
+ * reduce memory consumption. This is done by the application specific implementation of
+ * the entity actors for example by defining receive timeout (`context.setReceiveTimeout`).
+ * If a message is already enqueued to the entity when it stops itself the enqueued message
+ * in the mailbox will be dropped. To support graceful passivation without loosing such
+ * messages the entity actor can send [[ShardRegion.Passivate]] to its parent `ShardRegion`.
+ * The specified wrapped message in `Passivate` will be sent back to the entity, which is
+ * then supposed to stop itself. Incoming messages will be buffered by the `ShardRegion`
+ * between reception of `Passivate` and termination of the entity. Such buffered messages
+ * are thereafter delivered to a new incarnation of the entity.
+ *
+ */</span>
+object <a title="akka.cluster.sharding.ClusterSharding.type" id="akka.cluster.sharding.ClusterSharding">ClusterSharding</a> extends <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId" title="akka.actor.ExtensionId[akka.cluster.sharding.ClusterSharding]">ExtensionId</a><span class="delimiter">[</span>ClusterSharding<span class="delimiter">]</span> with <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionIdProvider" title="akka.actor.ExtensionIdProvider">ExtensionIdProvider</a> <span class="delimiter">{</span>
+  override def <a title="(system: akka.actor.ActorSystem)akka.cluster.sharding.ClusterSharding" id="akka.cluster.sharding.ClusterSharding.get">get</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.cluster.sharding.ClusterSharding.get.system">system</a>: <a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span>: <a href="#akka.cluster.sharding;ClusterSharding" title="akka.cluster.sharding.ClusterSharding">ClusterSharding</a> = super.<a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.get" title="(system: akka.actor.ActorSystem)akka.cluster.sharding.ClusterSharding">get</a><span class="delimiter">(</span><a href="#akka.cluster.sharding.ClusterSharding.get.system" title="akka.actor.ActorSystem">system</a><span class="delimiter">)</span>
+
+  override def <a title="()akka.cluster.sharding.ClusterSharding.type" id="akka.cluster.sharding.ClusterSharding.lookup">lookup</a> = <a href="#akka.cluster.sharding.ClusterSharding" title="akka.cluster.sharding.ClusterSharding.type">ClusterSharding</a>
+
+  override def <a title="(system: akka.actor.ExtendedActorSystem)akka.cluster.sharding.ClusterSharding" id="akka.cluster.sharding.ClusterSharding.createExtension">createExtension</a><span class="delimiter">(</span><a title="akka.actor.ExtendedActorSystem" id="akka.cluster.sharding.ClusterSharding.createExtension.system">system</a>: <a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem" title="akka.actor.ExtendedActorSystem">ExtendedActorSystem</a><span class="delimiter">)</span>: <a href="#akka.cluster.sharding;ClusterSharding" title="akka.cluster.sharding.ClusterSharding">ClusterSharding</a> =
+    new <a href="#akka.cluster.sharding;ClusterSharding" title="akka.cluster.sharding.ClusterSharding">ClusterSharding</a><span class="delimiter">(</span><a href="#akka.cluster.sharding.ClusterSharding.createExtension.system" title="akka.actor.ExtendedActorSystem">system</a><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * @see [[ClusterSharding$ ClusterSharding companion object]]
+ */</span>
+class <a title="class ClusterSharding extends AnyRef with akka.actor.Extension" id="akka.cluster.sharding;ClusterSharding">ClusterSharding</a><a href="#akka.cluster.sharding;ClusterSharding" title="akka.cluster.sharding.ClusterSharding" class="delimiter">(</a><a title="akka.actor.ExtendedActorSystem" id="akka.cluster.sharding;ClusterSharding.system">system</a>: <a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem" title="akka.actor.ExtendedActorSystem">ExtendedActorSystem</a><span class="delimiter">)</span> extends <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;Extension" title="akka.actor.Extension">Extension</a> <span class="delimiter">{</span>
+  import <a href="#akka.cluster.sharding.ClusterShardingGuardian" title="akka.cluster.sharding.ClusterShardingGuardian.type">ClusterShardingGuardian</a>._
+  import <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator" title="akka.cluster.sharding.ShardCoordinator.type">ShardCoordinator</a>.ShardAllocationStrategy
+  import <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator" title="akka.cluster.sharding.ShardCoordinator.type">ShardCoordinator</a>.LeastShardAllocationStrategy
+
+  private val <a title="akka.cluster.Cluster" id="akka.cluster.sharding;ClusterSharding.cluster">cluster</a> = <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.Cluster">Cluster</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.system" title="akka.actor.ExtendedActorSystem">system</a><span class="delimiter">)</span>
+
+  private val <a title="java.util.concurrent.ConcurrentHashMap[String,akka.actor.ActorRef]" id="akka.cluster.sharding;ClusterSharding.regions">regions</a>: <span title="java.util.concurrent.ConcurrentHashMap[String,akka.actor.ActorRef]">ConcurrentHashMap</span><span class="delimiter">[</span>String, ActorRef<span class="delimiter">]</span> = new <span title="java.util.concurrent.ConcurrentHashMap[String,akka.actor.ActorRef]">ConcurrentHashMap</span>
+  private lazy val <a title="akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.guardian">guardian</a> = <span class="delimiter">{</span>
+    val <a title="String" id="akka.cluster.sharding;ClusterSharding.guardian.guardianName">guardianName</a>: <span title="String">String</span> = <a href="#akka.cluster.sharding;ClusterSharding.system" title="akka.actor.ExtendedActorSystem">system</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem.settings" title="=&gt; akka.actor.ActorSystem.Settings">settings</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor.ActorSystem;Settings.config" title="=&gt; com.typesafe.config.Config">config</a>.<span title="(x$1: String)String">getString</span><span class="delimiter">(</span><span title="String(&quot;akka.cluster.sharding.guardian-name&quot;)" class="string">&quot;akka.cluster.sharding.guardian-name&quot;</span><span class="delimiter">)</span>
+    val <a title="String" id="akka.cluster.sharding;ClusterSharding.guardian.dispatcher">dispatcher</a> = <a href="#akka.cluster.sharding;ClusterSharding.system" title="akka.actor.ExtendedActorSystem">system</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem.settings" title="=&gt; akka.actor.ActorSystem.Settings">settings</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor.ActorSystem;Settings.config" title="=&gt; com.typesafe.config.Config">config</a>.<span title="(x$1: String)String">getString</span><span class="delimiter">(</span><span title="String(&quot;akka.cluster.sharding.use-dispatcher&quot;)" class="string">&quot;akka.cluster.sharding.use-dispatcher&quot;</span><span class="delimiter">)</span> match <span class="delimiter">{</span>
+      case <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span> ⇒ Dispatchers.<span title="String(&quot;akka.actor.default-dispatcher&quot;)">DefaultDispatcherId</span>
+      case <a title="String" id="akka.cluster.sharding;ClusterSharding.guardian.dispatcher.id">id</a> ⇒ <a href="#akka.cluster.sharding;ClusterSharding.guardian.dispatcher.id" title="String">id</a>
+    <span class="delimiter">}</span>
+    <a href="#akka.cluster.sharding;ClusterSharding.system" title="akka.actor.ExtendedActorSystem">system</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem.systemActorOf" title="(props: akka.actor.Props, name: String)akka.actor.ActorRef">systemActorOf</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Props.scala.html#akka.actor.Props.apply(0822e9e710)" title="[T &lt;: akka.actor.Actor]()(implicit evidence$1: scala.reflect.ClassTag[T])akka.actor.Props">Props</a><span title="()(implicit evidence$1: scala.reflect.ClassTag[akka.cluster.sharding.ClusterShardingGuardian])akka.actor.Props" class="delimiter">[</span><a href="#akka.cluster.sharding;ClusterShardingGuardian" title="akka.cluster.sharding.ClusterShardingGuardian">ClusterShardingGuardian</a><span class="delimiter">]</span>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.withDispatcher" title="(d: String)akka.actor.Props">withDispatcher</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.guardian.dispatcher" title="String">dispatcher</a><span class="delimiter">)</span>, <a href="#akka.cluster.sharding;ClusterSharding.guardian.guardianName" title="String">guardianName</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(role: Option[String])Unit" id="akka.cluster.sharding;ClusterSharding.requireClusterRole">requireClusterRole</a><span class="delimiter">(</span><a title="Option[String]" id="akka.cluster.sharding;ClusterSharding.requireClusterRole.role">role</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.requireClusterRole.role" title="Option[String]">role</a>.<span title="(p: String =&gt; Boolean)Boolean">forall</span><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.cluster" title="=&gt; akka.cluster.Cluster">cluster</a>.<a href="../../../../cluster/akka/cluster/Cluster.scala.html#akka.cluster;Cluster.selfRoles" title="=&gt; Set[String]">selfRoles</a>.<a href="#akka.cluster.sharding;ClusterSharding.requireClusterRole.$anonfun.elem" title="(elem: String)Boolean">contains</a><span class="delimiter">)</span>,
+      <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;This cluster member [&quot;)">This cluster member [$</span><span class="delimiter">{</span><a href="#akka.cluster.sharding;ClusterSharding.cluster" title="=&gt; akka.cluster.Cluster">cluster</a>.<a href="../../../../cluster/akka/cluster/Cluster.scala.html#akka.cluster;Cluster.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a><span class="delimiter">}</span><span title="String(&quot;] doesn\'t have the role [&quot;)">] doesn't have the role [$</span><a href="#akka.cluster.sharding;ClusterSharding.requireClusterRole.role" title="Option[String]">role</a><span title="String(&quot;]&quot;)" class="string">]&quot;</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Scala API: Register a named entity type by defining the [[akka.actor.Props]] of the entity actor
+   * and functions to extract entity and shard identifier from messages. The [[ShardRegion]] actor
+   * for this type can later be retrieved with the [[#shardRegion]] method.
+   *
+   * Some settings can be configured as described in the `akka.cluster.sharding` section
+   * of the `reference.conf`.
+   *
+   * @param typeName the name of the entity type
+   * @param entityProps the `Props` of the entity actors that will be created by the `ShardRegion`
+   * @param settings configuration settings, see [[ClusterShardingSettings]]
+   * @param extractEntityId partial function to extract the entity id and the message to send to the
+   *   entity from the incoming message, if the partial function does not match the message will
+   *   be `unhandled`, i.e. posted as `Unhandled` messages on the event stream
+   * @param extractShardId function to determine the shard id for an incoming message, only messages
+   *   that passed the `extractEntityId` will be used
+   * @param allocationStrategy possibility to use a custom shard allocation and
+   *   rebalancing logic
+   * @param handOffStopMessage the message that will be sent to entities when they are to be stopped
+   *   for a rebalance or graceful shutdown of a `ShardRegion`, e.g. `PoisonPill`.
+   * @return the actor ref of the [[ShardRegion]] that is to be responsible for the shard
+   */</span>
+  def <a title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy, handOffStopMessage: Any)akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf)">start</a><span class="delimiter">(</span>
+    <a title="String" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).typeName">typeName</a>: <span title="String">String</span>,
+    <a title="akka.actor.Props" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).entityProps">entityProps</a>: <a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props" title="akka.actor.Props">Props</a>,
+    <a title="akka.cluster.sharding.ClusterShardingSettings" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).settings">settings</a>: <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings" title="akka.cluster.sharding.ClusterShardingSettings">ClusterShardingSettings</a>,
+    <a title="akka.cluster.sharding.ShardRegion.ExtractEntityId" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).extractEntityId">extractEntityId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">ExtractEntityId</span>,
+    <a title="akka.cluster.sharding.ShardRegion.ExtractShardId" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).extractShardId">extractShardId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractShardId">ExtractShardId</span>,
+    <a title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).allocationStrategy">allocationStrategy</a>: <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator;ShardAllocationStrategy" title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy">ShardAllocationStrategy</a>,
+    <a title="Any" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).handOffStopMessage">handOffStopMessage</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a> = <span class="delimiter">{</span>
+
+    <a href="#akka.cluster.sharding;ClusterSharding.requireClusterRole" title="(role: Option[String])Unit">requireClusterRole</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.role" title="=&gt; Option[String]">role</a><span class="delimiter">)</span>
+    implicit val <a title="akka.util.Timeout" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).timeout">timeout</a> = <a href="#akka.cluster.sharding;ClusterSharding.system" title="akka.actor.ExtendedActorSystem">system</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem.settings" title="=&gt; akka.actor.ActorSystem.Settings">settings</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor.ActorSystem;Settings.CreationTimeout" title="=&gt; akka.util.Timeout">CreationTimeout</a>
+    val <a title="akka.cluster.sharding.ClusterShardingGuardian.Start" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).startMsg">startMsg</a> = <a href="#akka.cluster.sharding.ClusterShardingGuardian.Start.readResolve" title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy, handOffStopMessage: Any)akka.cluster.sharding.ClusterShardingGuardian.Start">Start</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).typeName" title="String">typeName</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).entityProps" title="akka.actor.Props">entityProps</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>,
+      <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).extractEntityId" title="akka.cluster.sharding.ShardRegion.ExtractEntityId">extractEntityId</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).extractShardId" title="akka.cluster.sharding.ShardRegion.ExtractShardId">extractShardId</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).allocationStrategy" title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy">allocationStrategy</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).handOffStopMessage" title="Any">handOffStopMessage</a><span class="delimiter">)</span>
+    val Started<a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion.shardRegion" title="akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion.shardRegion">shardRegion</a><span class="delimiter">)</span> = <span title="scala.concurrent.Await.type">Await</span>.<span title="(awaitable: scala.concurrent.Awaitable[Any], atMost: scala.concurrent.duration.Duration)Any">result</span><span title="Any @unchecked" class="delimiter">(</span><a href="../../../../actor/akka/pattern/AskSupport.scala.html#akka.pattern;AskSupport.ask(13940b1e32)" title="akka.pattern.AskableActorRef" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion.qual$1">guardian</a> <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).timeout" title="akka.util.Timeout" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion.x$3">?</a> <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).startMsg" title="akka.cluster.sharding.ClusterShardingGuardian.Start" id="akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion.x$1">startMsg</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).timeout" title="akka.util.Timeout">timeout</a>.<a href="../../../../actor/akka/util/Timeout.scala.html#akka.util;Timeout.duration" title="=&gt; scala.concurrent.duration.FiniteDuration">duration</a><span class="delimiter">)</span>
+    <a href="#akka.cluster.sharding;ClusterSharding.regions" title="=&gt; java.util.concurrent.ConcurrentHashMap[String,akka.actor.ActorRef]">regions</a>.<span title="(x$1: String, x$2: akka.actor.ActorRef)akka.actor.ActorRef">put</span><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).typeName" title="String">typeName</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion" title="akka.actor.ActorRef">shardRegion</a><span class="delimiter">)</span>
+    <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf).shardRegion" title="akka.actor.ActorRef">shardRegion</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Register a named entity type by defining the [[akka.actor.Props]] of the entity actor and
+   * functions to extract entity and shard identifier from messages. The [[ShardRegion]] actor
+   * for this type can later be retrieved with the [[#shardRegion]] method.
+   *
+   * The default shard allocation strategy [[ShardCoordinator.LeastShardAllocationStrategy]]
+   * is used. [[akka.actor.PoisonPill]] is used as `handOffStopMessage`.
+   *
+   * Some settings can be configured as described in the `akka.cluster.sharding` section
+   * of the `reference.conf`.
+   *
+   * @param typeName the name of the entity type
+   * @param entityProps the `Props` of the entity actors that will be created by the `ShardRegion`
+   * @param settings configuration settings, see [[ClusterShardingSettings]]
+   * @param extractEntityId partial function to extract the entity id and the message to send to the
+   *   entity from the incoming message, if the partial function does not match the message will
+   *   be `unhandled`, i.e. posted as `Unhandled` messages on the event stream
+   * @param extractShardId function to determine the shard id for an incoming message, only messages
+   *   that passed the `extractEntityId` will be used
+   * @return the actor ref of the [[ShardRegion]] that is to be responsible for the shard
+   */</span>
+  def <a title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId)akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.start(816114e5b2)">start</a><span class="delimiter">(</span>
+    <a title="String" id="akka.cluster.sharding;ClusterSharding.start(816114e5b2).typeName">typeName</a>: <span title="String">String</span>,
+    <a title="akka.actor.Props" id="akka.cluster.sharding;ClusterSharding.start(816114e5b2).entityProps">entityProps</a>: <a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props" title="akka.actor.Props">Props</a>,
+    <a title="akka.cluster.sharding.ClusterShardingSettings" id="akka.cluster.sharding;ClusterSharding.start(816114e5b2).settings">settings</a>: <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings" title="akka.cluster.sharding.ClusterShardingSettings">ClusterShardingSettings</a>,
+    <a title="akka.cluster.sharding.ShardRegion.ExtractEntityId" id="akka.cluster.sharding;ClusterSharding.start(816114e5b2).extractEntityId">extractEntityId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">ExtractEntityId</span>,
+    <a title="akka.cluster.sharding.ShardRegion.ExtractShardId" id="akka.cluster.sharding;ClusterSharding.start(816114e5b2).extractShardId">extractShardId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractShardId">ExtractShardId</span><span class="delimiter">)</span>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a> = <span class="delimiter">{</span>
+
+    val <a title="akka.cluster.sharding.ShardCoordinator.LeastShardAllocationStrategy" id="akka.cluster.sharding;ClusterSharding.start(816114e5b2).allocationStrategy">allocationStrategy</a> = new <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator;LeastShardAllocationStrategy" title="akka.cluster.sharding.ShardCoordinator.LeastShardAllocationStrategy">LeastShardAllocationStrategy</a><span class="delimiter">(</span>
+      <a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.tuningParameters" title="=&gt; akka.cluster.sharding.ClusterShardingSettings.TuningParameters">tuningParameters</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding.ClusterShardingSettings;TuningParameters.leastShardAllocationRebalanceThreshold" title="=&gt; Int">leastShardAllocationRebalanceThreshold</a>,
+      <a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.tuningParameters" title="=&gt; akka.cluster.sharding.ClusterShardingSettings.TuningParameters">tuningParameters</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding.ClusterShardingSettings;TuningParameters.leastShardAllocationMaxSimultaneousRebalance" title="=&gt; Int">leastShardAllocationMaxSimultaneousRebalance</a><span class="delimiter">)</span>
+
+    <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf)" title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy, handOffStopMessage: Any)akka.actor.ActorRef">start</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).typeName" title="String">typeName</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).entityProps" title="akka.actor.Props">entityProps</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).extractEntityId" title="akka.cluster.sharding.ShardRegion.ExtractEntityId">extractEntityId</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).extractShardId" title="akka.cluster.sharding.ShardRegion.ExtractShardId">extractShardId</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(816114e5b2).allocationStrategy" title="akka.cluster.sharding.ShardCoordinator.LeastShardAllocationStrategy">allocationStrategy</a>, <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor.PoisonPill" title="akka.actor.PoisonPill.type">PoisonPill</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Java/Scala API: Register a named entity type by defining the [[akka.actor.Props]] of the entity actor
+   * and functions to extract entity and shard identifier from messages. The [[ShardRegion]] actor
+   * for this type can later be retrieved with the [[#shardRegion]] method.
+   *
+   * Some settings can be configured as described in the `akka.cluster.sharding` section
+   * of the `reference.conf`.
+   *
+   * @param typeName the name of the entity type
+   * @param entityProps the `Props` of the entity actors that will be created by the `ShardRegion`
+   * @param settings configuration settings, see [[ClusterShardingSettings]]
+   * @param messageExtractor functions to extract the entity id, shard id, and the message to send to the
+   *   entity from the incoming message
+   * @param allocationStrategy possibility to use a custom shard allocation and
+   *   rebalancing logic
+   * @param handOffStopMessage the message that will be sent to entities when they are to be stopped
+   *   for a rebalance or graceful shutdown of a `ShardRegion`, e.g. `PoisonPill`.
+   * @return the actor ref of the [[ShardRegion]] that is to be responsible for the shard
+   */</span>
+  def <a title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, messageExtractor: akka.cluster.sharding.ShardRegion.MessageExtractor, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy, handOffStopMessage: Any)akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21)">start</a><span class="delimiter">(</span>
+    <a title="String" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21).typeName">typeName</a>: <span title="String">String</span>,
+    <a title="akka.actor.Props" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21).entityProps">entityProps</a>: <a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props" title="akka.actor.Props">Props</a>,
+    <a title="akka.cluster.sharding.ClusterShardingSettings" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21).settings">settings</a>: <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings" title="akka.cluster.sharding.ClusterShardingSettings">ClusterShardingSettings</a>,
+    <a title="akka.cluster.sharding.ShardRegion.MessageExtractor" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21).messageExtractor">messageExtractor</a>: ShardRegion.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">MessageExtractor</a>,
+    <a title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21).allocationStrategy">allocationStrategy</a>: <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator;ShardAllocationStrategy" title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy">ShardAllocationStrategy</a>,
+    <a title="Any" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21).handOffStopMessage">handOffStopMessage</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a> = <span class="delimiter">{</span>
+
+    <a href="#akka.cluster.sharding;ClusterSharding.start(cdde771edf)" title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy, handOffStopMessage: Any)akka.actor.ActorRef">start</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).typeName" title="String">typeName</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).entityProps" title="akka.actor.Props">entityProps</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>,
+      extractEntityId = <a title="&lt;$anon: akka.cluster.sharding.ShardRegion.Msg =&gt; (akka.cluster.sharding.ShardRegion.EntityId, akka.cluster.sharding.ShardRegion.Msg)&gt; extends scala.runtime.AbstractPartialFunction[akka.cluster.sharding.ShardRegion.Msg,(akka.cluster.sharding.ShardRegion.EntityId, akka.cluster.sharding.ShardRegion.Msg)] with Serializable" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21);$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+        case <a title="akka.cluster.sharding.ShardRegion.Msg" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21);$anonfun.isDefinedAt.msg">msg</a> if <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.entityId" title="(message: Any)String">entityId</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21);$anonfun.isDefinedAt.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span> <span title="(x$1: AnyRef)Boolean">ne</span> null ⇒
+          <span title="(_1: String, _2: Any)(String, Any)" class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.entityId" title="(message: Any)String">entityId</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21);$anonfun.isDefinedAt.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span>, <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.entityMessage" title="(message: Any)Any">entityMessage</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21);$anonfun.isDefinedAt.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>,
+      extractShardId = <a title="akka.cluster.sharding.ShardRegion.Msg" id="akka.cluster.sharding;ClusterSharding.start(96657e2d21).$anonfun.msg">msg</a> ⇒ <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.shardId" title="(message: Any)String">shardId</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).$anonfun.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span>,
+      allocationStrategy = <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).allocationStrategy" title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy">allocationStrategy</a>,
+      handOffStopMessage = <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21).handOffStopMessage" title="Any">handOffStopMessage</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Java/Scala API: Register a named entity type by defining the [[akka.actor.Props]] of the entity actor
+   * and functions to extract entity and shard identifier from messages. The [[ShardRegion]] actor
+   * for this type can later be retrieved with the [[#shardRegion]] method.
+   *
+   * The default shard allocation strategy [[ShardCoordinator.LeastShardAllocationStrategy]]
+   * is used. [[akka.actor.PoisonPill]] is used as `handOffStopMessage`.
+   *
+   * Some settings can be configured as described in the `akka.cluster.sharding` section
+   * of the `reference.conf`.
+   *
+   * @param typeName the name of the entity type
+   * @param entityProps the `Props` of the entity actors that will be created by the `ShardRegion`
+   * @param settings configuration settings, see [[ClusterShardingSettings]]
+   * @param messageExtractor functions to extract the entity id, shard id, and the message to send to the
+   *   entity from the incoming message
+   * @return the actor ref of the [[ShardRegion]] that is to be responsible for the shard
+   */</span>
+  def <a title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, messageExtractor: akka.cluster.sharding.ShardRegion.MessageExtractor)akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.start(97e1cf1e64)">start</a><span class="delimiter">(</span>
+    <a title="String" id="akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).typeName">typeName</a>: <span title="String">String</span>,
+    <a title="akka.actor.Props" id="akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).entityProps">entityProps</a>: <a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props" title="akka.actor.Props">Props</a>,
+    <a title="akka.cluster.sharding.ClusterShardingSettings" id="akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).settings">settings</a>: <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings" title="akka.cluster.sharding.ClusterShardingSettings">ClusterShardingSettings</a>,
+    <a title="akka.cluster.sharding.ShardRegion.MessageExtractor" id="akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).messageExtractor">messageExtractor</a>: ShardRegion.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">MessageExtractor</a><span class="delimiter">)</span>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a> = <span class="delimiter">{</span>
+
+    val <a title="akka.cluster.sharding.ShardCoordinator.LeastShardAllocationStrategy" id="akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).allocationStrategy">allocationStrategy</a> = new <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator;LeastShardAllocationStrategy" title="akka.cluster.sharding.ShardCoordinator.LeastShardAllocationStrategy">LeastShardAllocationStrategy</a><span class="delimiter">(</span>
+      <a href="#akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.tuningParameters" title="=&gt; akka.cluster.sharding.ClusterShardingSettings.TuningParameters">tuningParameters</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding.ClusterShardingSettings;TuningParameters.leastShardAllocationRebalanceThreshold" title="=&gt; Int">leastShardAllocationRebalanceThreshold</a>,
+      <a href="#akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.tuningParameters" title="=&gt; akka.cluster.sharding.ClusterShardingSettings.TuningParameters">tuningParameters</a>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding.ClusterShardingSettings;TuningParameters.leastShardAllocationMaxSimultaneousRebalance" title="=&gt; Int">leastShardAllocationMaxSimultaneousRebalance</a><span class="delimiter">)</span>
+
+    <a href="#akka.cluster.sharding;ClusterSharding.start(96657e2d21)" title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, messageExtractor: akka.cluster.sharding.ShardRegion.MessageExtractor, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy, handOffStopMessage: Any)akka.actor.ActorRef">start</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).typeName" title="String">typeName</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).entityProps" title="akka.actor.Props">entityProps</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>, <a href="#akka.cluster.sharding;ClusterSharding.start(97e1cf1e64).allocationStrategy" title="akka.cluster.sharding.ShardCoordinator.LeastShardAllocationStrategy">allocationStrategy</a>, <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor.PoisonPill" title="akka.actor.PoisonPill.type">PoisonPill</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Scala API: Register a named entity type `ShardRegion` on this node that will run in proxy only mode,
+   * i.e. it will delegate messages to other `ShardRegion` actors on other nodes, but not host any
+   * entity actors itself. The [[ShardRegion]] actor for this type can later be retrieved with the
+   * [[#shardRegion]] method.
+   *
+   * Some settings can be configured as described in the `akka.cluster.sharding` section
+   * of the `reference.conf`.
+   *
+   * @param typeName the name of the entity type
+   * @param role specifies that this entity type is located on cluster nodes with a specific role.
+   *   If the role is not specified all nodes in the cluster are used.
+   * @param extractEntityId partial function to extract the entity id and the message to send to the
+   *   entity from the incoming message, if the partial function does not match the message will
+   *   be `unhandled`, i.e. posted as `Unhandled` messages on the event stream
+   * @param extractShardId function to determine the shard id for an incoming message, only messages
+   *   that passed the `extractEntityId` will be used
+   * @return the actor ref of the [[ShardRegion]] that is to be responsible for the shard
+   */</span>
+  def <a title="(typeName: String, role: Option[String], extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId)akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff)">startProxy</a><span class="delimiter">(</span>
+    <a title="String" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).typeName">typeName</a>: <span title="String">String</span>,
+    <a title="Option[String]" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).role">role</a>: <span title="Option[String]">Option</span><span class="delimiter">[</span>String<span class="delimiter">]</span>,
+    <a title="akka.cluster.sharding.ShardRegion.ExtractEntityId" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).extractEntityId">extractEntityId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">ExtractEntityId</span>,
+    <a title="akka.cluster.sharding.ShardRegion.ExtractShardId" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).extractShardId">extractShardId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractShardId">ExtractShardId</span><span class="delimiter">)</span>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a> = <span class="delimiter">{</span>
+
+    implicit val <a title="akka.util.Timeout" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).timeout">timeout</a> = <a href="#akka.cluster.sharding;ClusterSharding.system" title="akka.actor.ExtendedActorSystem">system</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem.settings" title="=&gt; akka.actor.ActorSystem.Settings">settings</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor.ActorSystem;Settings.CreationTimeout" title="=&gt; akka.util.Timeout">CreationTimeout</a>
+    val <a title="akka.cluster.sharding.ClusterShardingSettings" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).settings">settings</a> = <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding.ClusterShardingSettings.apply(2a78e9ca56)" title="(system: akka.actor.ActorSystem)akka.cluster.sharding.ClusterShardingSettings">ClusterShardingSettings</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.system" title="akka.actor.ExtendedActorSystem">system</a><span class="delimiter">)</span>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.withRole(54b5bab28a)" title="(role: Option[String])akka.cluster.sharding.ClusterShardingSettings">withRole</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).role" title="Option[String]">role</a><span class="delimiter">)</span>
+    val <a title="akka.cluster.sharding.ClusterShardingGuardian.StartProxy" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).startMsg">startMsg</a> = <a href="#akka.cluster.sharding.ClusterShardingGuardian.StartProxy.readResolve" title="(typeName: String, settings: akka.cluster.sharding.ClusterShardingSettings, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId)akka.cluster.sharding.ClusterShardingGuardian.StartProxy">StartProxy</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).typeName" title="String">typeName</a>, <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).settings" title="akka.cluster.sharding.ClusterShardingSettings">settings</a>, <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).extractEntityId" title="akka.cluster.sharding.ShardRegion.ExtractEntityId">extractEntityId</a>, <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).extractShardId" title="akka.cluster.sharding.ShardRegion.ExtractShardId">extractShardId</a><span class="delimiter">)</span>
+    val Started<a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion.shardRegion" title="akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion.shardRegion">shardRegion</a><span class="delimiter">)</span> = <span title="scala.concurrent.Await.type">Await</span>.<span title="(awaitable: scala.concurrent.Awaitable[Any], atMost: scala.concurrent.duration.Duration)Any">result</span><span title="Any @unchecked" class="delimiter">(</span><a href="../../../../actor/akka/pattern/AskSupport.scala.html#akka.pattern;AskSupport.ask(13940b1e32)" title="akka.pattern.AskableActorRef" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion.qual$2">guardian</a> <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).timeout" title="akka.util.Timeout" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion.x$6">?</a> <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).startMsg" title="akka.cluster.sharding.ClusterShardingGuardian.StartProxy" id="akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion.x$4">startMsg</a>, <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).timeout" title="akka.util.Timeout">timeout</a>.<a href="../../../../actor/akka/util/Timeout.scala.html#akka.util;Timeout.duration" title="=&gt; scala.concurrent.duration.FiniteDuration">duration</a><span class="delimiter">)</span>
+    <a href="#akka.cluster.sharding;ClusterSharding.regions" title="=&gt; java.util.concurrent.ConcurrentHashMap[String,akka.actor.ActorRef]">regions</a>.<span title="(x$1: String, x$2: akka.actor.ActorRef)akka.actor.ActorRef">put</span><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).typeName" title="String">typeName</a>, <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion" title="akka.actor.ActorRef">shardRegion</a><span class="delimiter">)</span>
+    <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff).shardRegion" title="akka.actor.ActorRef">shardRegion</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Java/Scala API: Register a named entity type `ShardRegion` on this node that will run in proxy only mode,
+   * i.e. it will delegate messages to other `ShardRegion` actors on other nodes, but not host any
+   * entity actors itself. The [[ShardRegion]] actor for this type can later be retrieved with the
+   * [[#shardRegion]] method.
+   *
+   * Some settings can be configured as described in the `akka.cluster.sharding` section
+   * of the `reference.conf`.
+   *
+   * @param typeName the name of the entity type
+   * @param role specifies that this entity type is located on cluster nodes with a specific role.
+   *   If the role is not specified all nodes in the cluster are used.
+   * @param messageExtractor functions to extract the entity id, shard id, and the message to send to the
+   *   entity from the incoming message
+   * @return the actor ref of the [[ShardRegion]] that is to be responsible for the shard
+   */</span>
+  def <a title="(typeName: String, role: java.util.Optional[String], messageExtractor: akka.cluster.sharding.ShardRegion.MessageExtractor)akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36)">startProxy</a><span class="delimiter">(</span>
+    <a title="String" id="akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).typeName">typeName</a>: <span title="String">String</span>,
+    <a title="java.util.Optional[String]" id="akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).role">role</a>: <span title="java.util.Optional[String]">Optional</span><span class="delimiter">[</span>String<span class="delimiter">]</span>,
+    <a title="akka.cluster.sharding.ShardRegion.MessageExtractor" id="akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).messageExtractor">messageExtractor</a>: ShardRegion.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">MessageExtractor</a><span class="delimiter">)</span>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a> = <span class="delimiter">{</span>
+
+    <a href="#akka.cluster.sharding;ClusterSharding.startProxy(92092d49ff)" title="(typeName: String, role: Option[String], extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId)akka.actor.ActorRef">startProxy</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).typeName" title="String">typeName</a>, <span title="(x: String)Option[String]">Option</span><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).role" title="java.util.Optional[String]">role</a>.<span title="(x$1: String)String">orElse</span><span class="delimiter">(</span>null<span class="delimiter">)</span><span class="delimiter">)</span>,
+      extractEntityId = <a title="&lt;$anon: akka.cluster.sharding.ShardRegion.Msg =&gt; (akka.cluster.sharding.ShardRegion.EntityId, akka.cluster.sharding.ShardRegion.Msg)&gt; extends scala.runtime.AbstractPartialFunction[akka.cluster.sharding.ShardRegion.Msg,(akka.cluster.sharding.ShardRegion.EntityId, akka.cluster.sharding.ShardRegion.Msg)] with Serializable" id="akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36);$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+        case <a title="akka.cluster.sharding.ShardRegion.Msg" id="akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36);$anonfun.isDefinedAt.msg">msg</a> if <a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.entityId" title="(message: Any)String">entityId</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36);$anonfun.isDefinedAt.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span> <span title="(x$1: AnyRef)Boolean">ne</span> null ⇒
+          <span title="(_1: String, _2: Any)(String, Any)" class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.entityId" title="(message: Any)String">entityId</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36);$anonfun.isDefinedAt.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span>, <a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.entityMessage" title="(message: Any)Any">entityMessage</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36);$anonfun.isDefinedAt.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>,
+      extractShardId = <a title="akka.cluster.sharding.ShardRegion.Msg" id="akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).$anonfun.msg">msg</a> ⇒ <a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).messageExtractor" title="akka.cluster.sharding.ShardRegion.MessageExtractor">messageExtractor</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion;MessageExtractor.shardId" title="(message: Any)String">shardId</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.startProxy(76cc7d6a36).$anonfun.msg" title="akka.cluster.sharding.ShardRegion.Msg">msg</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Retrieve the actor reference of the [[ShardRegion]] actor responsible for the named entity type.
+   * The entity type must be registered with the [[#start]] method before it can be used here.
+   * Messages to the entity is always sent via the `ShardRegion`.
+   */</span>
+  def <a title="(typeName: String)akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.shardRegion">shardRegion</a><span class="delimiter">(</span><a title="String" id="akka.cluster.sharding;ClusterSharding.shardRegion.typeName">typeName</a>: <span title="String">String</span><span class="delimiter">)</span>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a> = <a href="#akka.cluster.sharding;ClusterSharding.regions" title="=&gt; java.util.concurrent.ConcurrentHashMap[String,akka.actor.ActorRef]">regions</a>.<span title="(x$1: Any)akka.actor.ActorRef">get</span><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterSharding.shardRegion.typeName" title="String">typeName</a><span class="delimiter">)</span> match <span class="delimiter">{</span>
+    case null ⇒ throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;Shard type [&quot;)">Shard type [$</span><a href="#akka.cluster.sharding;ClusterSharding.shardRegion.typeName" title="String">typeName</a><span title="String(&quot;] must be started first&quot;)" class="string">] must be started first&quot;</span><span class="delimiter">)</span>
+    case <a title="akka.actor.ActorRef" id="akka.cluster.sharding;ClusterSharding.shardRegion.ref">ref</a>  ⇒ <a href="#akka.cluster.sharding;ClusterSharding.shardRegion.ref" title="akka.actor.ActorRef">ref</a>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API.
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> object <a title="akka.cluster.sharding.ClusterShardingGuardian.type" id="akka.cluster.sharding.ClusterShardingGuardian">ClusterShardingGuardian</a> <a href="#akka.cluster.sharding.ClusterShardingGuardian" title="akka.cluster.sharding.ClusterShardingGuardian.type" class="delimiter">{</a>
+  import <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator" title="akka.cluster.sharding.ShardCoordinator.type">ShardCoordinator</a>.ShardAllocationStrategy
+  final case class <a title="class Start extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.cluster.sharding.ClusterShardingGuardian.Start.readResolve">Start</a><span title="Product" class="delimiter">(</span><a title="String" id="akka.cluster.sharding.ClusterShardingGuardian;Start.typeName">typeName</a>: <span title="String">String</span>, <a title="akka.actor.Props" id="akka.cluster.sharding.ClusterShardingGuardian;Start.entityProps">entityProps</a>: <a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props" title="akka.actor.Props">Props</a>, <a title="akka.cluster.sharding.ClusterShardingSettings" id="akka.cluster.sharding.ClusterShardingGuardian;Start.settings">settings</a>: <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings" title="akka.cluster.sharding.ClusterShardingSettings">ClusterShardingSettings</a>,
+                         <a title="akka.cluster.sharding.ShardRegion.ExtractEntityId" id="akka.cluster.sharding.ClusterShardingGuardian;Start.extractEntityId">extractEntityId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">ExtractEntityId</span>, <a title="akka.cluster.sharding.ShardRegion.ExtractShardId" id="akka.cluster.sharding.ClusterShardingGuardian;Start.extractShardId">extractShardId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractShardId">ExtractShardId</span>,
+                         <a title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy" id="akka.cluster.sharding.ClusterShardingGuardian;Start.allocationStrategy">allocationStrategy</a>: <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator;ShardAllocationStrategy" title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy">ShardAllocationStrategy</a>, <a title="Any" id="akka.cluster.sharding.ClusterShardingGuardian;Start.handOffStopMessage">handOffStopMessage</a>: <span title="Any">Any</span><span class="delimiter">)</span>
+    extends <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a>
+  final case class <a title="class StartProxy extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.cluster.sharding.ClusterShardingGuardian.StartProxy.readResolve">StartProxy</a><span title="Product" class="delimiter">(</span><a title="String" id="akka.cluster.sharding.ClusterShardingGuardian;StartProxy.typeName">typeName</a>: <span title="String">String</span>, <a title="akka.cluster.sharding.ClusterShardingSettings" id="akka.cluster.sharding.ClusterShardingGuardian;StartProxy.settings">settings</a>: <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings" title="akka.cluster.sharding.ClusterShardingSettings">ClusterShardingSettings</a>,
+                              <a title="akka.cluster.sharding.ShardRegion.ExtractEntityId" id="akka.cluster.sharding.ClusterShardingGuardian;StartProxy.extractEntityId">extractEntityId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">ExtractEntityId</span>, <a title="akka.cluster.sharding.ShardRegion.ExtractShardId" id="akka.cluster.sharding.ClusterShardingGuardian;StartProxy.extractShardId">extractShardId</a>: ShardRegion.<span title="akka.cluster.sharding.ShardRegion.ExtractShardId">ExtractShardId</span><span class="delimiter">)</span>
+    extends <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a>
+  final case class <a title="class Started extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.cluster.sharding.ClusterShardingGuardian.Started.readResolve">Started</a><span title="Product" class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.cluster.sharding.ClusterShardingGuardian;Started.shardRegion">shardRegion</a>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a><span class="delimiter">)</span> extends <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API. [[ShardRegion]] and [[ShardCoordinator]] actors are created as children
+ * of this actor.
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> class <a title="class ClusterShardingGuardian extends AnyRef with akka.actor.Actor" id="akka.cluster.sharding;ClusterShardingGuardian">ClusterShardingGuardian</a> extends <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor" title="akka.actor.Actor">Actor</a> <span class="delimiter">{</span>
+  import <a href="#akka.cluster.sharding.ClusterShardingGuardian" title="akka.cluster.sharding.ClusterShardingGuardian.type">ClusterShardingGuardian</a>._
+
+  val <a title="akka.cluster.Cluster" id="akka.cluster.sharding;ClusterShardingGuardian.cluster">cluster</a> = <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.Cluster">Cluster</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span>
+  val <a title="akka.cluster.sharding.ClusterSharding" id="akka.cluster.sharding;ClusterShardingGuardian.sharding">sharding</a> = <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.sharding.ClusterSharding">ClusterSharding</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span>
+  lazy val <a title="akka.actor.ActorRef" id="akka.cluster.sharding;ClusterShardingGuardian.replicator">replicator</a> = <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.ddata.DistributedData">DistributedData</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span>.<a href="../../../../distributed-data-experimental/akka/cluster/ddata/DistributedData.scala.html#akka.cluster.ddata;DistributedData.replicator" title="=&gt; akka.actor.ActorRef">replicator</a>
+
+  private def <a title="(encName: String)String" id="akka.cluster.sharding;ClusterShardingGuardian.coordinatorSingletonManagerName">coordinatorSingletonManagerName</a><span class="delimiter">(</span><a title="String" id="akka.cluster.sharding;ClusterShardingGuardian.coordinatorSingletonManagerName.encName">encName</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> =
+    <a href="#akka.cluster.sharding;ClusterShardingGuardian.coordinatorSingletonManagerName.encName" title="String">encName</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;Coordinator&quot;)" class="string">&quot;Coordinator&quot;</span>
+
+  private def <a title="(encName: String)String" id="akka.cluster.sharding;ClusterShardingGuardian.coordinatorPath">coordinatorPath</a><span class="delimiter">(</span><a title="String" id="akka.cluster.sharding;ClusterShardingGuardian.coordinatorPath.encName">encName</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="String">String</span> =
+    <span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>.<a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef.path" title="=&gt; akka.actor.ActorPath">path</a> <a href="../../../../actor/akka/actor/ActorPath.scala.html#akka.actor;ActorPath./(833cf8d176)" title="(child: String)akka.actor.ActorPath">/</a> <a href="#akka.cluster.sharding;ClusterShardingGuardian.coordinatorSingletonManagerName" title="(encName: String)String">coordinatorSingletonManagerName</a><span class="delimiter">(</span><a href="#akka.cluster.sharding;ClusterShardingGuardian.coordinatorPath.encName" title="String">encName</a><span class="delimiter">)</span> <a href="../../../../actor/akka/actor/ActorPath.scala.html#akka.actor;ActorPath./(833cf8d176)" title="(child: String)akka.actor.ActorPath">/</a> <span title="String(&quot;singleton&quot;)" class="string">&quot;singleton&quot;</span> <a href="../../../../actor/akka/actor/ActorPath.scala.html#akka.actor;ActorPath./(833cf8d176)" title="(child: String)akka.actor.ActorPath">/</a> <span title="String(&quot;coordinator&quot;)" class="string">&quot;coordinator&quot;</span><span class="delimiter">)</span>.<a href="../../../../actor/akka/actor/ActorPath.scala.html#akka.actor;ActorPath.toStringWithoutAddress" title="=&gt; String">toStringWithoutAddress</a>
+
+  def <a title="=&gt; PartialFunction[Any,Unit]" id="akka.cluster.sharding;ClusterShardingGuardian.receive">receive</a> = <a title="&lt;$anon: Any =&gt; Unit&gt; extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    case Start<span class="delimiter">(</span><span title="String">typeName</span>, <a title="akka.actor.Props" id="akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.entityProps">entityProps</a>, <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>, <span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">extractEntityId</span>, <span title="akka.cluster.sharding.ShardRegion.ExtractShardId">extractShardId</span>, <a title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy" id="akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.allocationStrategy">allocationStrategy</a>, <a title="Any" id="akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.handOffStopMessage">handOffStopMessage</a><span class="delimiter">)</span> ⇒
+      import <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>.role
+      import <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.tuningParameters" title="=&gt; akka.cluster.sharding.ClusterShardingSettings.TuningParameters">tuningParameters</a>.coordinatorFailureBackoff
+
+      val <span title="String">encName</span> = <span title="java.net.URLEncoder.type">URLEncoder</span>.<span title="(x$1: String, x$2: String)String">encode</span><span class="delimiter">(</span><span title="String">typeName</span>, <a href="../../../../actor/akka/util/ByteString.scala.html#akka.util.ByteString" title="akka.util.ByteString.type">ByteString</a>.<a href="../../../../actor/akka/util/ByteString.scala.html#akka.util.ByteString.UTF_8" title="=&gt; String">UTF_8</a><span class="delimiter">)</span>
+      val <span title="String">cName</span> = <a href="#akka.cluster.sharding;ClusterShardingGuardian.coordinatorSingletonManagerName" title="(encName: String)String">coordinatorSingletonManagerName</a><span class="delimiter">(</span><span title="String">encName</span><span class="delimiter">)</span>
+      val <span title="String">cPath</span> = <a href="#akka.cluster.sharding;ClusterShardingGuardian.coordinatorPath" title="(encName: String)String">coordinatorPath</a><span class="delimiter">(</span><span title="String">encName</span><span class="delimiter">)</span>
+      val <span title="akka.actor.ActorRef">shardRegion</span> = <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.child" title="(name: String)Option[akka.actor.ActorRef]">child</a><span class="delimiter">(</span><span title="String">encName</span><span class="delimiter">)</span>.<span title="(default: =&gt; akka.actor.ActorRef)akka.actor.ActorRef">getOrElse</span> <span class="delimiter">{</span>
+        if <span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.child" title="(name: String)Option[akka.actor.ActorRef]">child</a><span class="delimiter">(</span><span title="String">cName</span><span class="delimiter">)</span>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          val <a title="akka.actor.Props" id="akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.applyOrElse.shardRegion.coordinatorProps">coordinatorProps</a> =
+            if <span class="delimiter">(</span><span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.stateStoreMode" title="=&gt; String">stateStoreMode</a> <span title="(x$1: Any)Boolean">==</span> <span title="String(&quot;persistence&quot;)" class="string">&quot;persistence&quot;</span><span class="delimiter">)</span>
+              <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator" title="akka.cluster.sharding.ShardCoordinator.type">ShardCoordinator</a>.<a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator.props(194b2a4f2c)" title="(typeName: String, settings: akka.cluster.sharding.ClusterShardingSettings, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy)akka.actor.Props">props</a><span class="delimiter">(</span><span title="String">typeName</span>, <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>, <a href="#akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.allocationStrategy" title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy">allocationStrategy</a><span class="delimiter">)</span>
+            else
+              <a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator" title="akka.cluster.sharding.ShardCoordinator.type">ShardCoordinator</a>.<a href="ShardCoordinator.scala.html#akka.cluster.sharding.ShardCoordinator.props(8d56e222bb)" title="(typeName: String, settings: akka.cluster.sharding.ClusterShardingSettings, allocationStrategy: akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy, replicator: akka.actor.ActorRef)akka.actor.Props">props</a><span class="delimiter">(</span><span title="String">typeName</span>, <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>, <a href="#akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.allocationStrategy" title="akka.cluster.sharding.ShardCoordinator.ShardAllocationStrategy">allocationStrategy</a>, <a href="#akka.cluster.sharding;ClusterShardingGuardian.replicator" title="=&gt; akka.actor.ActorRef">replicator</a><span class="delimiter">)</span>
+          val <a title="akka.actor.Props" id="akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.applyOrElse.shardRegion.singletonProps">singletonProps</a> = <a href="../../../../actor/akka/pattern/BackoffSupervisor.scala.html#akka.pattern.BackoffSupervisor" title="akka.pattern.BackoffSupervisor.type">BackoffSupervisor</a>.<a href="../../../../actor/akka/pattern/BackoffSupervisor.scala.html#akka.pattern.BackoffSupervisor.props" title="(childProps: akka.actor.Props, childName: String, minBackoff: scala.concurrent.duration.FiniteDuration, maxBackoff: scala.concurrent.duration.FiniteDuration, randomFactor: Double)akka.actor.Props">props</a><span class="delimiter">(</span>
+            childProps = <a href="#akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.applyOrElse.shardRegion.coordinatorProps" title="akka.actor.Props">coordinatorProps</a>,
+            childName = <span title="String(&quot;coordinator&quot;)" class="string">&quot;coordinator&quot;</span>,
+            minBackoff = <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding.ClusterShardingSettings;TuningParameters.coordinatorFailureBackoff" title="=&gt; scala.concurrent.duration.FiniteDuration">coordinatorFailureBackoff</a>,
+            maxBackoff = <a href="ClusterShardingSettings.scala.html#akka.cluster.sharding.ClusterShardingSettings;TuningParameters.coordinatorFailureBackoff" title="=&gt; scala.concurrent.duration.FiniteDuration">coordinatorFailureBackoff</a> <span title="(factor: Long)scala.concurrent.duration.FiniteDuration">*</span> <span title="Long(5L)" class="int">5</span>,
+            randomFactor = <span title="Double(0.2)" class="double">0.2</span><span class="delimiter">)</span>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.withDeploy" title="(d: akka.actor.Deploy)akka.actor.Props">withDeploy</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Deployer.scala.html#akka.actor.Deploy" title="akka.actor.Deploy.type">Deploy</a>.<a href="../../../../actor/akka/actor/Deployer.scala.html#akka.actor.Deploy.local" title="=&gt; akka.actor.Deploy">local</a><span class="delimiter">)</span>
+          val <a title="akka.cluster.singleton.ClusterSingletonManagerSettings" id="akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.applyOrElse.shardRegion.singletonSettings">singletonSettings</a> = <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>.<a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.coordinatorSingletonSettings" title="=&gt; akka.cluster.singleton.ClusterSingletonManagerSettings">coordinatorSingletonSettings</a>
+            .<a href="../../../../cluster-tools/akka/cluster/singleton/ClusterSingletonManager.scala.html#akka.cluster.singleton;ClusterSingletonManagerSettings.withSingletonName" title="(name: String)akka.cluster.singleton.ClusterSingletonManagerSettings">withSingletonName</a><span class="delimiter">(</span><span title="String(&quot;singleton&quot;)" class="string">&quot;singleton&quot;</span><span class="delimiter">)</span>.<a href="../../../../cluster-tools/akka/cluster/singleton/ClusterSingletonManager.scala.html#akka.cluster.singleton;ClusterSingletonManagerSettings.withRole(628b78fa60)" title="(role: Option[String])akka.cluster.singleton.ClusterSingletonManagerSettings">withRole</a><span class="delimiter">(</span><a href="ClusterShardingSettings.scala.html#akka.cluster.sharding;ClusterShardingSettings.role" title="=&gt; Option[String]">role</a><span class="delimiter">)</span>
+          <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorRefProvider.scala.html#akka.actor;ActorRefFactory.actorOf(874c98419a)" title="(props: akka.actor.Props, name: String)akka.actor.ActorRef">actorOf</a><span class="delimiter">(</span><a href="../../../../cluster-tools/akka/cluster/singleton/ClusterSingletonManager.scala.html#akka.cluster.singleton.ClusterSingletonManager" title="akka.cluster.singleton.ClusterSingletonManager.type">ClusterSingletonManager</a>.<a href="../../../../cluster-tools/akka/cluster/singleton/ClusterSingletonManager.scala.html#akka.cluster.singleton.ClusterSingletonManager.props" title="(singletonProps: akka.actor.Props, terminationMessage: Any, settings: akka.cluster.singleton.ClusterSingletonManagerSettings)akka.actor.Props">props</a><span class="delimiter">(</span>
+            <a href="#akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.applyOrElse.shardRegion.singletonProps" title="akka.actor.Props">singletonProps</a>,
+            terminationMessage = <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor.PoisonPill" title="akka.actor.PoisonPill.type">PoisonPill</a>,
+            <a href="#akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.applyOrElse.shardRegion.singletonSettings" title="akka.cluster.singleton.ClusterSingletonManagerSettings">singletonSettings</a><span class="delimiter">)</span>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.withDispatcher" title="(d: String)akka.actor.Props">withDispatcher</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.props" title="=&gt; akka.actor.Props">props</a>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.dispatcher" title="=&gt; String">dispatcher</a><span class="delimiter">)</span>,
+            name = <span title="String">cName</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+
+        <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorRefProvider.scala.html#akka.actor;ActorRefFactory.actorOf(874c98419a)" title="(props: akka.actor.Props, name: String)akka.actor.ActorRef">actorOf</a><span class="delimiter">(</span><a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion" title="akka.cluster.sharding.ShardRegion.type">ShardRegion</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion.props" title="(typeName: String, entityProps: akka.actor.Props, settings: akka.cluster.sharding.ClusterShardingSettings, coordinatorPath: String, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId, handOffStopMessage: Any)akka.actor.Props">props</a><span class="delimiter">(</span>
+          typeName = <span title="String">typeName</span>,
+          entityProps = <a href="#akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.entityProps" title="akka.actor.Props">entityProps</a>,
+          settings = <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>,
+          coordinatorPath = <span title="String">cPath</span>,
+          extractEntityId = <span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">extractEntityId</span>,
+          extractShardId = <span title="akka.cluster.sharding.ShardRegion.ExtractShardId">extractShardId</span>,
+          handOffStopMessage = <a href="#akka.cluster.sharding;ClusterShardingGuardian.receive;$anonfun.isDefinedAt.handOffStopMessage" title="Any">handOffStopMessage</a><span class="delimiter">)</span>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.withDispatcher" title="(d: String)akka.actor.Props">withDispatcher</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.props" title="=&gt; akka.actor.Props">props</a>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.dispatcher" title="=&gt; String">dispatcher</a><span class="delimiter">)</span>,
+          name = <span title="String">encName</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.sender" title="()akka.actor.ActorRef">sender</a><a href="../../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef" class="delimiter">(</a><span class="delimiter">)</span> <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="#akka.cluster.sharding.ClusterShardingGuardian.Started.readResolve" title="(shardRegion: akka.actor.ActorRef)akka.cluster.sharding.ClusterShardingGuardian.Started">Started</a><span class="delimiter">(</span><span title="akka.actor.ActorRef">shardRegion</span><span class="delimiter">)</span>
+
+    case StartProxy<span class="delimiter">(</span><span title="String">typeName</span>, <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>, <span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">extractEntityId</span>, <span title="akka.cluster.sharding.ShardRegion.ExtractShardId">extractShardId</span><span class="delimiter">)</span> ⇒
+      val <span title="String">encName</span> = <span title="java.net.URLEncoder.type">URLEncoder</span>.<span title="(x$1: String, x$2: String)String">encode</span><span class="delimiter">(</span><span title="String">typeName</span>, <a href="../../../../actor/akka/util/ByteString.scala.html#akka.util.ByteString" title="akka.util.ByteString.type">ByteString</a>.<a href="../../../../actor/akka/util/ByteString.scala.html#akka.util.ByteString.UTF_8" title="=&gt; String">UTF_8</a><span class="delimiter">)</span>
+      val <span title="String">cName</span> = <a href="#akka.cluster.sharding;ClusterShardingGuardian.coordinatorSingletonManagerName" title="(encName: String)String">coordinatorSingletonManagerName</a><span class="delimiter">(</span><span title="String">encName</span><span class="delimiter">)</span>
+      val <span title="String">cPath</span> = <a href="#akka.cluster.sharding;ClusterShardingGuardian.coordinatorPath" title="(encName: String)String">coordinatorPath</a><span class="delimiter">(</span><span title="String">encName</span><span class="delimiter">)</span>
+      val <span title="akka.actor.ActorRef">shardRegion</span> = <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.child" title="(name: String)Option[akka.actor.ActorRef]">child</a><span class="delimiter">(</span><span title="String">encName</span><span class="delimiter">)</span>.<span title="(default: =&gt; akka.actor.ActorRef)akka.actor.ActorRef">getOrElse</span> <span class="delimiter">{</span>
+        <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorRefProvider.scala.html#akka.actor;ActorRefFactory.actorOf(874c98419a)" title="(props: akka.actor.Props, name: String)akka.actor.ActorRef">actorOf</a><span class="delimiter">(</span><a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion" title="akka.cluster.sharding.ShardRegion.type">ShardRegion</a>.<a href="ShardRegion.scala.html#akka.cluster.sharding.ShardRegion.proxyProps" title="(typeName: String, settings: akka.cluster.sharding.ClusterShardingSettings, coordinatorPath: String, extractEntityId: akka.cluster.sharding.ShardRegion.ExtractEntityId, extractShardId: akka.cluster.sharding.ShardRegion.ExtractShardId)akka.actor.Props">proxyProps</a><span class="delimiter">(</span>
+          typeName = <span title="String">typeName</span>,
+          settings = <span title="akka.cluster.sharding.ClusterShardingSettings">settings</span>,
+          coordinatorPath = <span title="String">cPath</span>,
+          extractEntityId = <span title="akka.cluster.sharding.ShardRegion.ExtractEntityId">extractEntityId</span>,
+          extractShardId = <span title="akka.cluster.sharding.ShardRegion.ExtractShardId">extractShardId</span><span class="delimiter">)</span>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.withDispatcher" title="(d: String)akka.actor.Props">withDispatcher</a><span class="delimiter">(</span><a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.props" title="=&gt; akka.actor.Props">props</a>.<a href="../../../../actor/akka/actor/Props.scala.html#akka.actor;Props.dispatcher" title="=&gt; String">dispatcher</a><span class="delimiter">)</span>,
+          name = <span title="String">encName</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+      <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.sender" title="()akka.actor.ActorRef">sender</a><a href="../../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef" class="delimiter">(</a><span class="delimiter">)</span> <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="#akka.cluster.sharding.ClusterShardingGuardian.Started.readResolve" title="(shardRegion: akka.actor.ActorRef)akka.cluster.sharding.ClusterShardingGuardian.Started">Started</a><span class="delimiter">(</span><span title="akka.actor.ActorRef">shardRegion</span><span class="delimiter">)</span>
+
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+
+        </pre>
+    </body>
+</html>

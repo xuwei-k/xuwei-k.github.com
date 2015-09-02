@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>remote/akka/remote/PhiAccrualFailureDetector.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+package akka.remote
+
+import akka.remote.<a href="FailureDetector.scala.html#akka.remote.FailureDetector" title="akka.remote.FailureDetector.type">FailureDetector</a>.Clock
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.<span title="java.util.concurrent.TimeUnit.type">TimeUnit</span>.MILLISECONDS
+import scala.annotation.tailrec
+import scala.concurrent.duration.Duration
+import scala.concurrent.duration.FiniteDuration
+import scala.collection.immutable
+import com.typesafe.config.Config
+import akka.event.EventStream
+import akka.util.<a href="../../../actor/akka/util/Helpers.scala.html#akka.util.Helpers" title="akka.util.Helpers.type">Helpers</a>.ConfigOps
+
+<span class="comment">/**
+ * Implementation of 'The Phi Accrual Failure Detector' by Hayashibara et al. as defined in their paper:
+ * [http://ddg.jaist.ac.jp/pub/HDY+04.pdf]
+ *
+ * The suspicion level of failure is given by a value called φ (phi).
+ * The basic idea of the φ failure detector is to express the value of φ on a scale that
+ * is dynamically adjusted to reflect current network conditions. A configurable
+ * threshold is used to decide if φ is considered to be a failure.
+ *
+ * The value of φ is calculated as:
+ *
+ * {{{
+ * φ = -log10(1 - F(timeSinceLastHeartbeat)
+ * }}}
+ * where F is the cumulative distribution function of a normal distribution with mean
+ * and standard deviation estimated from historical heartbeat inter-arrival times.
+ *
+ * @param threshold A low threshold is prone to generate many wrong suspicions but ensures a quick detection in the event
+ *   of a real crash. Conversely, a high threshold generates fewer mistakes but needs more time to detect
+ *   actual crashes
+ *
+ * @param maxSampleSize Number of samples to use for calculation of mean and standard deviation of
+ *   inter-arrival times.
+ *
+ * @param minStdDeviation Minimum standard deviation to use for the normal distribution used when calculating phi.
+ *   Too low standard deviation might result in too much sensitivity for sudden, but normal, deviations
+ *   in heartbeat inter arrival times.
+ *
+ * @param acceptableHeartbeatPause Duration corresponding to number of potentially lost/delayed
+ *   heartbeats that will be accepted before considering it to be an anomaly.
+ *   This margin is important to be able to survive sudden, occasional, pauses in heartbeat
+ *   arrivals, due to for example garbage collect or network drop.
+ *
+ * @param firstHeartbeatEstimate Bootstrap the stats with heartbeats that corresponds to
+ *   to this duration, with a with rather high standard deviation (since environment is unknown
+ *   in the beginning)
+ *
+ * @param clock The clock, returning current time in milliseconds, but can be faked for testing
+ *   purposes. It is only used for measuring intervals (duration).
+ */</span>
+class <a title="class PhiAccrualFailureDetector extends AnyRef with akka.remote.FailureDetector" id="akka.remote;PhiAccrualFailureDetector">PhiAccrualFailureDetector</a><a href="#akka.remote;PhiAccrualFailureDetector" title="akka.remote.PhiAccrualFailureDetector" class="delimiter">(</a>
+  val <a title="Double" id="akka.remote;PhiAccrualFailureDetector.threshold">threshold</a>: <span title="Double">Double</span>,
+  val <a title="Int" id="akka.remote;PhiAccrualFailureDetector.maxSampleSize">maxSampleSize</a>: <span title="Int">Int</span>,
+  val <a title="scala.concurrent.duration.FiniteDuration" id="akka.remote;PhiAccrualFailureDetector.minStdDeviation">minStdDeviation</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span>,
+  val <a title="scala.concurrent.duration.FiniteDuration" id="akka.remote;PhiAccrualFailureDetector.acceptableHeartbeatPause">acceptableHeartbeatPause</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span>,
+  val <a title="scala.concurrent.duration.FiniteDuration" id="akka.remote;PhiAccrualFailureDetector.firstHeartbeatEstimate">firstHeartbeatEstimate</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span><span class="delimiter">(</span>
+    implicit <a title="akka.remote.FailureDetector.Clock" id="akka.remote;PhiAccrualFailureDetector.clock">clock</a>: <a href="FailureDetector.scala.html#akka.remote.FailureDetector;Clock" title="akka.remote.FailureDetector.Clock">Clock</a><span class="delimiter">)</span> extends <a href="FailureDetector.scala.html#akka.remote;FailureDetector" title="akka.remote.FailureDetector">FailureDetector</a> <span class="delimiter">{</span>
+
+  <span class="comment">/**
+   * Constructor that reads parameters from config.
+   * Expecting config properties named `threshold`, `max-sample-size`,
+   * `min-std-deviation`, `acceptable-heartbeat-pause` and
+   * `heartbeat-interval`.
+   */</span>
+  def this<span class="delimiter">(</span><a title="com.typesafe.config.Config" id="akka.remote;PhiAccrualFailureDetector.<init>(67441826b2).config">config</a>: <span title="com.typesafe.config.Config">Config</span>, <a title="akka.event.EventStream" id="akka.remote;PhiAccrualFailureDetector.<init>(67441826b2).ev">ev</a>: <a href="../../../actor/akka/event/EventStream.scala.html#akka.event;EventStream" title="akka.event.EventStream">EventStream</a><span class="delimiter">)</span> =
+    this<span class="delimiter">(</span>
+      threshold = <a href="#akka.remote;PhiAccrualFailureDetector.<init>(67441826b2).config" title="com.typesafe.config.Config">config</a>.<span title="(x$1: String)Double">getDouble</span><span class="delimiter">(</span><span title="String(&quot;threshold&quot;)" class="string">&quot;threshold&quot;</span><span class="delimiter">)</span>,
+      maxSampleSize = <a href="#akka.remote;PhiAccrualFailureDetector.<init>(67441826b2).config" title="com.typesafe.config.Config">config</a>.<span title="(x$1: String)Int">getInt</span><span class="delimiter">(</span><span title="String(&quot;max-sample-size&quot;)" class="string">&quot;max-sample-size&quot;</span><span class="delimiter">)</span>,
+      minStdDeviation = <a href="../../../actor/akka/util/Helpers.scala.html#akka.util.Helpers.ConfigOps(7001b1cdb7)" title="implicit akka.util.Helpers.ConfigOps : (config: com.typesafe.config.Config)akka.util.Helpers.ConfigOps">config</a>.<a href="../../../actor/akka/util/Helpers.scala.html#akka.util.Helpers;ConfigOps.getMillisDuration" title="(path: String)scala.concurrent.duration.FiniteDuration">getMillisDuration</a><span class="delimiter">(</span><span title="String(&quot;min-std-deviation&quot;)" class="string">&quot;min-std-deviation&quot;</span><span class="delimiter">)</span>,
+      acceptableHeartbeatPause = <a href="../../../actor/akka/util/Helpers.scala.html#akka.util.Helpers.ConfigOps(7001b1cdb7)" title="implicit akka.util.Helpers.ConfigOps : (config: com.typesafe.config.Config)akka.util.Helpers.ConfigOps">config</a>.<a href="../../../actor/akka/util/Helpers.scala.html#akka.util.Helpers;ConfigOps.getMillisDuration" title="(path: String)scala.concurrent.duration.FiniteDuration">getMillisDuration</a><span class="delimiter">(</span><span title="String(&quot;acceptable-heartbeat-pause&quot;)" class="string">&quot;acceptable-heartbeat-pause&quot;</span><span class="delimiter">)</span>,
+      firstHeartbeatEstimate = <a href="../../../actor/akka/util/Helpers.scala.html#akka.util.Helpers.ConfigOps(7001b1cdb7)" title="implicit akka.util.Helpers.ConfigOps : (config: com.typesafe.config.Config)akka.util.Helpers.ConfigOps">config</a>.<a href="../../../actor/akka/util/Helpers.scala.html#akka.util.Helpers;ConfigOps.getMillisDuration" title="(path: String)scala.concurrent.duration.FiniteDuration">getMillisDuration</a><span class="delimiter">(</span><span title="String(&quot;heartbeat-interval&quot;)" class="string">&quot;heartbeat-interval&quot;</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.threshold" title="=&gt; Double">threshold</a> <span title="(x: Double)Boolean">&gt;</span> <span title="Double(0.0)" class="double">0.0</span>, <span title="String(&quot;failure-detector.threshold must be &gt; 0&quot;)" class="string">&quot;failure-detector.threshold must be &gt; 0&quot;</span><span class="delimiter">)</span>
+  <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.maxSampleSize" title="=&gt; Int">maxSampleSize</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span>, <span title="String(&quot;failure-detector.max-sample-size must be &gt; 0&quot;)" class="string">&quot;failure-detector.max-sample-size must be &gt; 0&quot;</span><span class="delimiter">)</span>
+  <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.minStdDeviation" title="=&gt; scala.concurrent.duration.FiniteDuration">minStdDeviation</a> <span title="(that: scala.concurrent.duration.Duration)Boolean">&gt;</span> <span title="scala.concurrent.duration.Duration.type">Duration</span>.<span title="=&gt; scala.concurrent.duration.FiniteDuration">Zero</span>, <span title="String(&quot;failure-detector.min-std-deviation must be &gt; 0&quot;)" class="string">&quot;failure-detector.min-std-deviation must be &gt; 0&quot;</span><span class="delimiter">)</span>
+  <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.acceptableHeartbeatPause" title="=&gt; scala.concurrent.duration.FiniteDuration">acceptableHeartbeatPause</a> <span title="(that: scala.concurrent.duration.Duration)Boolean">&gt;=</span> <span title="scala.concurrent.duration.Duration.type">Duration</span>.<span title="=&gt; scala.concurrent.duration.FiniteDuration">Zero</span>, <span title="String(&quot;failure-detector.acceptable-heartbeat-pause must be &gt;= 0&quot;)" class="string">&quot;failure-detector.acceptable-heartbeat-pause must be &gt;= 0&quot;</span><span class="delimiter">)</span>
+  <span title="(requirement: Boolean, message: =&gt; Any)Unit">require</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeatEstimate" title="=&gt; scala.concurrent.duration.FiniteDuration">firstHeartbeatEstimate</a> <span title="(that: scala.concurrent.duration.Duration)Boolean">&gt;</span> <span title="scala.concurrent.duration.Duration.type">Duration</span>.<span title="=&gt; scala.concurrent.duration.FiniteDuration">Zero</span>, <span title="String(&quot;failure-detector.heartbeat-interval must be &gt; 0&quot;)" class="string">&quot;failure-detector.heartbeat-interval must be &gt; 0&quot;</span><span class="delimiter">)</span>
+
+  <span class="comment">// guess statistics for first heartbeat,</span>
+  <span class="comment">// important so that connections with only one heartbeat becomes unavailable</span>
+  private val <a title="akka.remote.HeartbeatHistory" id="akka.remote;PhiAccrualFailureDetector.firstHeartbeat">firstHeartbeat</a>: <a href="#akka.remote;HeartbeatHistory.equals" title="akka.remote.HeartbeatHistory">HeartbeatHistory</a> = <span class="delimiter">{</span>
+    <span class="comment">// bootstrap with 2 entries with rather high standard deviation</span>
+    val <a title="Long" id="akka.remote;PhiAccrualFailureDetector.firstHeartbeat.mean">mean</a> = <a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeatEstimate" title="=&gt; scala.concurrent.duration.FiniteDuration">firstHeartbeatEstimate</a>.<span title="=&gt; Long">toMillis</span>
+    val stdDeviation = <a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeat.mean" title="Long">mean</a> <a title="Long" id="akka.remote;PhiAccrualFailureDetector.firstHeartbeat.stdDeviation">/</a> <span title="Int(4)" class="int">4</span>
+    <a href="#akka.remote.HeartbeatHistory.apply(5f1bade374)" title="(maxSampleSize: Int)akka.remote.HeartbeatHistory">HeartbeatHistory</a><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.maxSampleSize" title="=&gt; Int">maxSampleSize</a><span class="delimiter">)</span> <a href="#akka.remote;HeartbeatHistory.:+" title="(interval: Long)akka.remote.HeartbeatHistory">:+</a> <span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeat.mean" title="Long">mean</a> <span title="(x: Long)Long">-</span> <a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeat.stdDeviation" title="Long">stdDeviation</a><span class="delimiter">)</span> <a href="#akka.remote;HeartbeatHistory.:+" title="(interval: Long)akka.remote.HeartbeatHistory">:+</a> <span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeat.mean" title="Long">mean</a> <span title="(x: Long)Long">+</span> <a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeat.stdDeviation" title="Long">stdDeviation</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private val <a title="Long" id="akka.remote;PhiAccrualFailureDetector.acceptableHeartbeatPauseMillis">acceptableHeartbeatPauseMillis</a> = <a href="#akka.remote;PhiAccrualFailureDetector.acceptableHeartbeatPause" title="=&gt; scala.concurrent.duration.FiniteDuration">acceptableHeartbeatPause</a>.<span title="=&gt; Long">toMillis</span>
+
+  <span class="comment">/**
+   * Implement using optimistic lockless concurrency, all state is represented
+   * by this immutable case class and managed by an AtomicReference.
+   */</span>
+  private final case class <a title="class State extends AnyRef with Product with Serializable" id="akka.remote;PhiAccrualFailureDetector.State.readResolve">State</a><a href="#akka.remote;PhiAccrualFailureDetector.State.readResolve" title="Product" class="delimiter">(</a><a title="akka.remote.HeartbeatHistory" id="akka.remote;PhiAccrualFailureDetector;State.history">history</a>: <a href="#akka.remote;HeartbeatHistory.equals" title="akka.remote.HeartbeatHistory">HeartbeatHistory</a>, <a title="Option[Long]" id="akka.remote;PhiAccrualFailureDetector;State.timestamp">timestamp</a>: <span title="Option[Long]">Option</span><span class="delimiter">[</span>Long<span class="delimiter">]</span><span class="delimiter">)</span>
+
+  private val <a title="java.util.concurrent.atomic.AtomicReference[PhiAccrualFailureDetector.this.State]" id="akka.remote;PhiAccrualFailureDetector.state">state</a> = new <span title="java.util.concurrent.atomic.AtomicReference[PhiAccrualFailureDetector.this.State]">AtomicReference</span><span class="delimiter">[</span>State<span class="delimiter">]</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.State.readResolve" title="(history: akka.remote.HeartbeatHistory, timestamp: Option[Long])PhiAccrualFailureDetector.this.State">State</a><span class="delimiter">(</span>history = <a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeat" title="=&gt; akka.remote.HeartbeatHistory">firstHeartbeat</a>, timestamp = <span title="None.type">None</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  override def <a title="=&gt; Boolean" id="akka.remote;PhiAccrualFailureDetector.isAvailable(2a880db3f6)">isAvailable</a>: <span title="Boolean">Boolean</span> = <a href="#akka.remote;PhiAccrualFailureDetector.isAvailable(aff92766cb)" title="(timestamp: Long)Boolean">isAvailable</a><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.clock" title="()Long">clock</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  private def <a title="(timestamp: Long)Boolean" id="akka.remote;PhiAccrualFailureDetector.isAvailable(aff92766cb)">isAvailable</a><span class="delimiter">(</span><a title="Long" id="akka.remote;PhiAccrualFailureDetector.isAvailable(aff92766cb).timestamp">timestamp</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b)" title="(timestamp: Long)Double">phi</a><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.isAvailable(aff92766cb).timestamp" title="Long">timestamp</a><span class="delimiter">)</span> <span title="(x: Double)Boolean">&lt;</span> <a href="#akka.remote;PhiAccrualFailureDetector.threshold" title="=&gt; Double">threshold</a>
+
+  override def <a title="=&gt; Boolean" id="akka.remote;PhiAccrualFailureDetector.isMonitoring">isMonitoring</a>: <span title="Boolean">Boolean</span> = <a href="#akka.remote;PhiAccrualFailureDetector.state" title="=&gt; java.util.concurrent.atomic.AtomicReference[PhiAccrualFailureDetector.this.State]">state</a>.<span title="()PhiAccrualFailureDetector.this.State">get</span>.<a href="#akka.remote;PhiAccrualFailureDetector;State.timestamp" title="=&gt; Option[Long]">timestamp</a>.<span title="=&gt; Boolean">nonEmpty</span>
+
+  @tailrec
+  final override def <a title="()Unit" id="akka.remote;PhiAccrualFailureDetector.heartbeat">heartbeat</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+
+    val <a title="Long" id="akka.remote;PhiAccrualFailureDetector.heartbeat.timestamp">timestamp</a> = <a href="#akka.remote;PhiAccrualFailureDetector.clock" title="()Long">clock</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    val <a title="PhiAccrualFailureDetector.this.State" id="akka.remote;PhiAccrualFailureDetector.heartbeat.oldState">oldState</a> = <a href="#akka.remote;PhiAccrualFailureDetector.state" title="=&gt; java.util.concurrent.atomic.AtomicReference[PhiAccrualFailureDetector.this.State]">state</a>.<span title="()PhiAccrualFailureDetector.this.State">get</span>
+
+    val <a title="akka.remote.HeartbeatHistory" id="akka.remote;PhiAccrualFailureDetector.heartbeat.newHistory">newHistory</a> = <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.oldState" title="PhiAccrualFailureDetector.this.State">oldState</a>.<a href="#akka.remote;PhiAccrualFailureDetector;State.timestamp" title="=&gt; Option[Long]">timestamp</a> match <span class="delimiter">{</span>
+      case <span title="None.type">None</span> ⇒
+        <span class="comment">// this is heartbeat from a new resource</span>
+        <span class="comment">// add starter records for this new resource</span>
+        <a href="#akka.remote;PhiAccrualFailureDetector.firstHeartbeat" title="=&gt; akka.remote.HeartbeatHistory">firstHeartbeat</a>
+      case Some<span class="delimiter">(</span><a title="Long" id="akka.remote;PhiAccrualFailureDetector.heartbeat.newHistory.latestTimestamp">latestTimestamp</a><span class="delimiter">)</span> ⇒
+        <span class="comment">// this is a known connection</span>
+        val interval = <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.timestamp" title="Long">timestamp</a> <a title="Long" id="akka.remote;PhiAccrualFailureDetector.heartbeat.newHistory.interval">-</a> <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.newHistory.latestTimestamp" title="Long">latestTimestamp</a>
+        <span class="comment">// don't use the first heartbeat after failure for the history, since a long pause will skew the stats</span>
+        if <span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.isAvailable(aff92766cb)" title="(timestamp: Long)Boolean">isAvailable</a><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.timestamp" title="Long">timestamp</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.oldState" title="PhiAccrualFailureDetector.this.State">oldState</a>.<a href="#akka.remote;PhiAccrualFailureDetector;State.history" title="=&gt; akka.remote.HeartbeatHistory">history</a> <a href="#akka.remote;HeartbeatHistory.:+" title="(interval: Long)akka.remote.HeartbeatHistory">:+</a> <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.newHistory.interval" title="Long">interval</a>
+        else <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.oldState" title="PhiAccrualFailureDetector.this.State">oldState</a>.<a href="#akka.remote;PhiAccrualFailureDetector;State.history" title="=&gt; akka.remote.HeartbeatHistory">history</a>
+    <span class="delimiter">}</span>
+
+    val <a title="PhiAccrualFailureDetector.this.State" id="akka.remote;PhiAccrualFailureDetector.heartbeat.newState">newState</a> = <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.oldState" title="PhiAccrualFailureDetector.this.State">oldState</a>.<a href="#akka.remote;PhiAccrualFailureDetector.State.readResolve" title="(history: akka.remote.HeartbeatHistory, timestamp: Option[Long])PhiAccrualFailureDetector.this.State">copy</a><span class="delimiter">(</span>history = <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.newHistory" title="akka.remote.HeartbeatHistory">newHistory</a>, timestamp = <span title="(x: Long)Some[Long]">Some</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.timestamp" title="Long">timestamp</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="comment">// record new timestamp</span>
+
+    <span class="comment">// if we won the race then update else try again</span>
+    if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.remote;PhiAccrualFailureDetector.state" title="=&gt; java.util.concurrent.atomic.AtomicReference[PhiAccrualFailureDetector.this.State]">state</a>.<span title="(x$1: PhiAccrualFailureDetector.this.State, x$2: PhiAccrualFailureDetector.this.State)Boolean">compareAndSet</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.oldState" title="PhiAccrualFailureDetector.this.State">oldState</a>, <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat.newState" title="PhiAccrualFailureDetector.this.State">newState</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#akka.remote;PhiAccrualFailureDetector.heartbeat" title="()Unit">heartbeat</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="comment">// recur</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * The suspicion level of the accrual failure detector.
+   *
+   * If a connection does not have any records in failure detector then it is
+   * considered healthy.
+   */</span>
+  def <a title="=&gt; Double" id="akka.remote;PhiAccrualFailureDetector.phi(7bc43a12dd)">phi</a>: <span title="Double">Double</span> = <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b)" title="(timestamp: Long)Double">phi</a><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.clock" title="()Long">clock</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  private def <a title="(timestamp: Long)Double" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b)">phi</a><span class="delimiter">(</span><a title="Long" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).timestamp">timestamp</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Double">Double</span> = <span class="delimiter">{</span>
+    val <a title="PhiAccrualFailureDetector.this.State" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).oldState">oldState</a> = <a href="#akka.remote;PhiAccrualFailureDetector.state" title="=&gt; java.util.concurrent.atomic.AtomicReference[PhiAccrualFailureDetector.this.State]">state</a>.<span title="()PhiAccrualFailureDetector.this.State">get</span>
+    val <a title="Option[Long]" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).oldTimestamp">oldTimestamp</a> = <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).oldState" title="PhiAccrualFailureDetector.this.State">oldState</a>.<a href="#akka.remote;PhiAccrualFailureDetector;State.timestamp" title="=&gt; Option[Long]">timestamp</a>
+
+    if <span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).oldTimestamp" title="Option[Long]">oldTimestamp</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <span title="Double(0.0)" class="double">0.0</span> <span class="comment">// treat unmanaged connections, e.g. with zero heartbeats, as healthy connections</span>
+    else <span class="delimiter">{</span>
+      val timeDiff = <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).timestamp" title="Long">timestamp</a> <a title="Long" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).timeDiff">-</a> <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).oldTimestamp" title="Option[Long]">oldTimestamp</a>.<span title="=&gt; Long">get</span>
+
+      val <a title="akka.remote.HeartbeatHistory" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).history">history</a> = <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).oldState" title="PhiAccrualFailureDetector.this.State">oldState</a>.<a href="#akka.remote;PhiAccrualFailureDetector;State.history" title="=&gt; akka.remote.HeartbeatHistory">history</a>
+      val <a title="Double" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).mean">mean</a> = <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).history" title="akka.remote.HeartbeatHistory">history</a>.<a href="#akka.remote;HeartbeatHistory.mean" title="=&gt; Double">mean</a>
+      val <a title="Double" id="akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).stdDeviation">stdDeviation</a> = <a href="#akka.remote;PhiAccrualFailureDetector.ensureValidStdDeviation" title="(stdDeviation: Double)Double">ensureValidStdDeviation</a><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).history" title="akka.remote.HeartbeatHistory">history</a>.<a href="#akka.remote;HeartbeatHistory.stdDeviation" title="=&gt; Double">stdDeviation</a><span class="delimiter">)</span>
+
+      <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249)" title="(timeDiff: Long, mean: Double, stdDeviation: Double)Double">phi</a><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).timeDiff" title="Long">timeDiff</a>, <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).mean" title="Double">mean</a> <span title="(x: Long)Double">+</span> <a href="#akka.remote;PhiAccrualFailureDetector.acceptableHeartbeatPauseMillis" title="=&gt; Long">acceptableHeartbeatPauseMillis</a>, <a href="#akka.remote;PhiAccrualFailureDetector.phi(9509df6d4b).stdDeviation" title="Double">stdDeviation</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Calculation of phi, derived from the Cumulative distribution function for
+   * N(mean, stdDeviation) normal distribution, given by
+   * 1.0 / (1.0 + math.exp(-y * (1.5976 + 0.070566 * y * y)))
+   * where y = (x - mean) / standard_deviation
+   * This is an approximation defined in β Mathematics Handbook (Logistic approximation).
+   * Error is 0.00014 at +- 3.16
+   * The calculated value is equivalent to -log10(1 - CDF(y))
+   */</span>
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(timeDiff: Long, mean: Double, stdDeviation: Double)Double" id="akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249)">phi</a><span class="delimiter">(</span><a title="Long" id="akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).timeDiff">timeDiff</a>: <span title="Long">Long</span>, <a title="Double" id="akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).mean">mean</a>: <span title="Double">Double</span>, <a title="Double" id="akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).stdDeviation">stdDeviation</a>: <span title="Double">Double</span><span class="delimiter">)</span>: <span title="Double">Double</span> = <span class="delimiter">{</span>
+    val y = <span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).timeDiff" title="Long">timeDiff</a> <span title="(x: Double)Double">-</span> <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).mean" title="Double">mean</a><span class="delimiter">)</span> <a title="Double" id="akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).y">/</a> <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).stdDeviation" title="Double">stdDeviation</a>
+    val <a title="Double" id="akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).e">e</a> = math.<span title="(x: Double)Double">exp</span><span class="delimiter">(</span><span title="=&gt; Double">-</span><a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).y" title="Double">y</a> <span title="(x: Double)Double">*</span> <span class="delimiter">(</span><span title="Double(1.5976)" class="double">1.5976</span> <span title="(x: Double)Double">+</span> <span title="Double(0.070566)" class="double">0.070566</span> <span title="(x: Double)Double">*</span> <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).y" title="Double">y</a> <span title="(x: Double)Double">*</span> <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).y" title="Double">y</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).timeDiff" title="Long">timeDiff</a> <span title="(x: Double)Boolean">&gt;</span> <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).mean" title="Double">mean</a><span class="delimiter">)</span>
+      <span title="=&gt; Double">-</span>math.<span title="(x: Double)Double">log10</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).e" title="Double">e</a> <span title="(x: Double)Double">/</span> <span class="delimiter">(</span><span title="Double(1.0)" class="double">1.0</span> <span title="(x: Double)Double">+</span> <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).e" title="Double">e</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    else
+      <span title="=&gt; Double">-</span>math.<span title="(x: Double)Double">log10</span><span class="delimiter">(</span><span title="Double(1.0)" class="double">1.0</span> <span title="(x: Double)Double">-</span> <span title="Double(1.0)" class="double">1.0</span> <span title="(x: Double)Double">/</span> <span class="delimiter">(</span><span title="Double(1.0)" class="double">1.0</span> <span title="(x: Double)Double">+</span> <a href="#akka.remote;PhiAccrualFailureDetector.phi(5ba8ea5249).e" title="Double">e</a><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private val <a title="Long" id="akka.remote;PhiAccrualFailureDetector.minStdDeviationMillis">minStdDeviationMillis</a> = <a href="#akka.remote;PhiAccrualFailureDetector.minStdDeviation" title="=&gt; scala.concurrent.duration.FiniteDuration">minStdDeviation</a>.<span title="=&gt; Long">toMillis</span>
+
+  private def <a title="(stdDeviation: Double)Double" id="akka.remote;PhiAccrualFailureDetector.ensureValidStdDeviation">ensureValidStdDeviation</a><span class="delimiter">(</span><a title="Double" id="akka.remote;PhiAccrualFailureDetector.ensureValidStdDeviation.stdDeviation">stdDeviation</a>: <span title="Double">Double</span><span class="delimiter">)</span>: <span title="Double">Double</span> = math.<span title="(x: Double, y: Double)Double">max</span><span class="delimiter">(</span><a href="#akka.remote;PhiAccrualFailureDetector.ensureValidStdDeviation.stdDeviation" title="Double">stdDeviation</a>, <a href="#akka.remote;PhiAccrualFailureDetector.minStdDeviationMillis" title="=&gt; Double">minStdDeviationMillis</a><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> object <a title="akka.remote.HeartbeatHistory.type" id="akka.remote.HeartbeatHistory.readResolve">HeartbeatHistory</a> <a href="#akka.remote.HeartbeatHistory.readResolve" title="akka.remote.HeartbeatHistory.type" class="delimiter">{</a>
+
+  <span class="comment">/**
+   * Create an empty HeartbeatHistory, without any history.
+   * Can only be used as starting point for appending intervals.
+   * The stats (mean, variance, stdDeviation) are not defined for
+   * for empty HeartbeatHistory, i.e. throws ArithmeticException.
+   */</span>
+  def <a title="(maxSampleSize: Int)akka.remote.HeartbeatHistory" id="akka.remote.HeartbeatHistory.apply(5f1bade374)">apply</a><span class="delimiter">(</span><a title="Int" id="akka.remote.HeartbeatHistory.apply(5f1bade374).maxSampleSize">maxSampleSize</a>: <span title="Int">Int</span><span class="delimiter">)</span>: <a href="#akka.remote;HeartbeatHistory.equals" title="akka.remote.HeartbeatHistory">HeartbeatHistory</a> = <a href="#akka.remote;HeartbeatHistory.equals" title="(maxSampleSize: Int, intervals: scala.collection.immutable.IndexedSeq[Long], intervalSum: Long, squaredIntervalSum: Long)akka.remote.HeartbeatHistory">HeartbeatHistory</a><span class="delimiter">(</span>
+    maxSampleSize = <a href="#akka.remote.HeartbeatHistory.apply(5f1bade374).maxSampleSize" title="Int">maxSampleSize</a>,
+    intervals = immutable.<span title="scala.collection.immutable.IndexedSeq.type">IndexedSeq</span>.<span title="scala.collection.immutable.IndexedSeq[Nothing]">empty</span>,
+    intervalSum = <span title="Long(0L)" class="long">0L</span>,
+    squaredIntervalSum = <span title="Long(0L)" class="long">0L</span><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Holds the heartbeat statistics for a specific node Address.
+ * It is capped by the number of samples specified in `maxSampleSize`.
+ *
+ * The stats (mean, variance, stdDeviation) are not defined for
+ * for empty HeartbeatHistory, i.e. throws ArithmeticException.
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> final case class <a title="(maxSampleSize: Int, intervals: scala.collection.immutable.IndexedSeq[Long], intervalSum: Long, squaredIntervalSum: Long)akka.remote.HeartbeatHistory" id="akka.remote;HeartbeatHistory.equals">HeartbeatHistory</a> private <span class="delimiter">(</span>
+  <a title="Int" id="akka.remote;HeartbeatHistory.copy$default$1">maxSampleSize</a>: <span title="Int">Int</span>,
+  <a title="scala.collection.immutable.IndexedSeq[Long]" id="akka.remote;HeartbeatHistory.copy$default$2">intervals</a>: immutable.<span title="scala.collection.immutable.IndexedSeq[Long]">IndexedSeq</span><span class="delimiter">[</span>Long<span class="delimiter">]</span>,
+  <a title="Long" id="akka.remote;HeartbeatHistory.copy$default$3">intervalSum</a>: <span title="Long">Long</span>,
+  <a title="Long" id="akka.remote;HeartbeatHistory.copy$default$4">squaredIntervalSum</a>: <span title="Long">Long</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+  <span class="comment">// Heartbeat histories are created trough the firstHeartbeat variable of the PhiAccrualFailureDetector</span>
+  <span class="comment">// which always have intervals.size &gt; 0.</span>
+  if <span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.copy$default$1" title="=&gt; Int">maxSampleSize</a> <span title="(x: Int)Boolean">&lt;</span> <span title="Int(1)" class="int">1</span><span class="delimiter">)</span>
+    throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;maxSampleSize must be &gt;= 1, got [&quot;)">maxSampleSize must be &gt;= 1, got [$</span><a href="#akka.remote;HeartbeatHistory.copy$default$1" title="=&gt; Int">maxSampleSize</a><span title="String(&quot;]&quot;)" class="string">]&quot;</span><span class="delimiter">)</span>
+  if <span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.copy$default$3" title="=&gt; Long">intervalSum</a> <span title="(x: Long)Boolean">&lt;</span> <span title="Long(0L)" class="long">0L</span><span class="delimiter">)</span>
+    throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;intervalSum must be &gt;= 0, got [&quot;)">intervalSum must be &gt;= 0, got [$</span><a href="#akka.remote;HeartbeatHistory.copy$default$3" title="=&gt; Long">intervalSum</a><span title="String(&quot;]&quot;)" class="string">]&quot;</span><span class="delimiter">)</span>
+  if <span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.copy$default$4" title="=&gt; Long">squaredIntervalSum</a> <span title="(x: Long)Boolean">&lt;</span> <span title="Long(0L)" class="long">0L</span><span class="delimiter">)</span>
+    throw new <span title="IllegalArgumentException">IllegalArgumentException</span><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;squaredIntervalSum must be &gt;= 0, got [&quot;)">squaredIntervalSum must be &gt;= 0, got [$</span><a href="#akka.remote;HeartbeatHistory.copy$default$4" title="=&gt; Long">squaredIntervalSum</a><span title="String(&quot;]&quot;)" class="string">]&quot;</span><span class="delimiter">)</span>
+
+  def <a title="=&gt; Double" id="akka.remote;HeartbeatHistory.mean">mean</a>: <span title="Double">Double</span> = <a href="#akka.remote;HeartbeatHistory.copy$default$3" title="=&gt; Long">intervalSum</a>.<span title="=&gt; Double">toDouble</span> <span title="(x: Int)Double">/</span> <a href="#akka.remote;HeartbeatHistory.copy$default$2" title="=&gt; scala.collection.immutable.IndexedSeq[Long]">intervals</a>.<span title="=&gt; Int">size</span>
+
+  def <a title="=&gt; Double" id="akka.remote;HeartbeatHistory.variance">variance</a>: <span title="Double">Double</span> = <span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.copy$default$4" title="=&gt; Long">squaredIntervalSum</a>.<span title="=&gt; Double">toDouble</span> <span title="(x: Int)Double">/</span> <a href="#akka.remote;HeartbeatHistory.copy$default$2" title="=&gt; scala.collection.immutable.IndexedSeq[Long]">intervals</a>.<span title="=&gt; Int">size</span><span class="delimiter">)</span> <span title="(x: Double)Double">-</span> <span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.mean" title="=&gt; Double">mean</a> <span title="(x: Double)Double">*</span> <a href="#akka.remote;HeartbeatHistory.mean" title="=&gt; Double">mean</a><span class="delimiter">)</span>
+
+  def <a title="=&gt; Double" id="akka.remote;HeartbeatHistory.stdDeviation">stdDeviation</a>: <span title="Double">Double</span> = math.<span title="(x: Double)Double">sqrt</span><span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.variance" title="=&gt; Double">variance</a><span class="delimiter">)</span>
+
+  @tailrec
+  final def <a title="(interval: Long)akka.remote.HeartbeatHistory" id="akka.remote;HeartbeatHistory.:+">:+</a><span class="delimiter">(</span><a title="Long" id="akka.remote;HeartbeatHistory.:+.interval">interval</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <a href="#akka.remote;HeartbeatHistory.equals" title="akka.remote.HeartbeatHistory">HeartbeatHistory</a> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.copy$default$2" title="=&gt; scala.collection.immutable.IndexedSeq[Long]">intervals</a>.<span title="=&gt; Int">size</span> <span title="(x: Int)Boolean">&lt;</span> <a href="#akka.remote;HeartbeatHistory.copy$default$1" title="=&gt; Int">maxSampleSize</a><span class="delimiter">)</span>
+      <a href="#akka.remote;HeartbeatHistory.equals" title="(maxSampleSize: Int, intervals: scala.collection.immutable.IndexedSeq[Long], intervalSum: Long, squaredIntervalSum: Long)akka.remote.HeartbeatHistory">HeartbeatHistory</a><span class="delimiter">(</span>
+        <a href="#akka.remote;HeartbeatHistory.copy$default$1" title="=&gt; Int">maxSampleSize</a>,
+        intervals = <a href="#akka.remote;HeartbeatHistory.copy$default$2" title="=&gt; scala.collection.immutable.IndexedSeq[Long]">intervals</a> <span title="(elem: Long)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.IndexedSeq[Long],Long,scala.collection.immutable.IndexedSeq[Long]])scala.collection.immutable.IndexedSeq[Long]">:+</span> <a href="#akka.remote;HeartbeatHistory.:+.interval" title="Long">interval</a>,
+        intervalSum = <a href="#akka.remote;HeartbeatHistory.copy$default$3" title="=&gt; Long">intervalSum</a> <span title="(x: Long)Long">+</span> <a href="#akka.remote;HeartbeatHistory.:+.interval" title="Long">interval</a>,
+        squaredIntervalSum = <a href="#akka.remote;HeartbeatHistory.copy$default$4" title="=&gt; Long">squaredIntervalSum</a> <span title="(x: Long)Long">+</span> <a href="#akka.remote;HeartbeatHistory.pow2" title="(x: Long)Long">pow2</a><span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.:+.interval" title="Long">interval</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    else
+      <a href="#akka.remote;HeartbeatHistory.dropOldest" title="=&gt; akka.remote.HeartbeatHistory">dropOldest</a> <a href="#akka.remote;HeartbeatHistory.:+" title="(interval: Long)akka.remote.HeartbeatHistory">:+</a> <a href="#akka.remote;HeartbeatHistory.:+.interval" title="Long">interval</a> <span class="comment">// recur</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="=&gt; akka.remote.HeartbeatHistory" id="akka.remote;HeartbeatHistory.dropOldest">dropOldest</a>: <a href="#akka.remote;HeartbeatHistory.equals" title="akka.remote.HeartbeatHistory">HeartbeatHistory</a> = <a href="#akka.remote;HeartbeatHistory.equals" title="(maxSampleSize: Int, intervals: scala.collection.immutable.IndexedSeq[Long], intervalSum: Long, squaredIntervalSum: Long)akka.remote.HeartbeatHistory">HeartbeatHistory</a><span class="delimiter">(</span>
+    <a href="#akka.remote;HeartbeatHistory.copy$default$1" title="=&gt; Int">maxSampleSize</a>,
+    intervals = <a href="#akka.remote;HeartbeatHistory.copy$default$2" title="=&gt; scala.collection.immutable.IndexedSeq[Long]">intervals</a> <span title="(n: Int)scala.collection.immutable.IndexedSeq[Long]">drop</span> <span title="Int(1)" class="int">1</span>,
+    intervalSum = <a href="#akka.remote;HeartbeatHistory.copy$default$3" title="=&gt; Long">intervalSum</a> <span title="(x: Long)Long">-</span> <a href="#akka.remote;HeartbeatHistory.copy$default$2" title="=&gt; scala.collection.immutable.IndexedSeq[Long]">intervals</a>.<span title="=&gt; Long">head</span>,
+    squaredIntervalSum = <a href="#akka.remote;HeartbeatHistory.copy$default$4" title="=&gt; Long">squaredIntervalSum</a> <span title="(x: Long)Long">-</span> <a href="#akka.remote;HeartbeatHistory.pow2" title="(x: Long)Long">pow2</a><span class="delimiter">(</span><a href="#akka.remote;HeartbeatHistory.copy$default$2" title="=&gt; scala.collection.immutable.IndexedSeq[Long]">intervals</a>.<span title="=&gt; Long">head</span><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  private def <a title="(x: Long)Long" id="akka.remote;HeartbeatHistory.pow2">pow2</a><span class="delimiter">(</span><a title="Long" id="akka.remote;HeartbeatHistory.pow2.x">x</a>: <span title="Long">Long</span><span class="delimiter">)</span> = <a href="#akka.remote;HeartbeatHistory.pow2.x" title="Long">x</a> <span title="(x: Long)Long">*</span> <a href="#akka.remote;HeartbeatHistory.pow2.x" title="Long">x</a>
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

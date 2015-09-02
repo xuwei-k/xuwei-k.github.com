@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>persistence/akka/persistence/PersistentView.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+package akka.persistence
+
+import scala.concurrent.duration._
+import scala.util.control.NonFatal
+import akka.actor.AbstractActor
+import akka.actor.Actor
+import akka.actor.Cancellable
+import akka.actor.Stash
+import akka.actor.StashFactory
+import akka.actor.UntypedActor
+import akka.dispatch.Envelope
+import akka.actor.ActorLogging
+
+<span class="comment">/**
+ * Instructs a [[PersistentView]] to update itself. This will run a single incremental message replay with
+ * all messages from the corresponding persistent id's journal that have not yet been consumed by the view.
+ * To update a view with messages that have been written after handling this request, another `Update`
+ * request must be sent to the view.
+ *
+ * @param await if `true`, processing of further messages sent to the view will be delayed until the
+ *              incremental message replay, triggered by this update request, completes. If `false`,
+ *              any message sent to the view may interleave with replayed persistent event stream.
+ * @param replayMax maximum number of messages to replay when handling this update request. Defaults
+ *                  to `Long.MaxValue` (i.e. no limit).
+ */</span>
+@SerialVersionUID<span class="delimiter">(</span><span class="long">1L</span><span class="delimiter">)</span>
+final case class <a title="class Update extends AnyRef with Product with Serializable" id="akka.persistence;Update">Update</a><a href="#akka.persistence;Update" title="Product" class="delimiter">(</a><a title="Boolean" id="akka.persistence.Update.apply$default$1">await</a>: <span title="Boolean">Boolean</span> = false, <a title="Long" id="akka.persistence.Update.apply$default$2">replayMax</a>: <span title="Long">Long</span> = Long.<span title="Long(9223372036854775807L)">MaxValue</span><span class="delimiter">)</span>
+
+object <a title="akka.persistence.Update.type" id="akka.persistence.Update.readResolve">Update</a> <a href="#akka.persistence.Update.readResolve" title="akka.persistence.Update.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Java API.
+   */</span>
+  def <a title="()akka.persistence.Update" id="akka.persistence.Update.create(6df157e621)">create</a><span class="delimiter">(</span><span class="delimiter">)</span> =
+    <a href="#akka.persistence;Update" title="(await: Boolean, replayMax: Long)akka.persistence.Update">Update</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API.
+   */</span>
+  def <a title="(await: Boolean)akka.persistence.Update" id="akka.persistence.Update.create(b339afed30)">create</a><span class="delimiter">(</span><a title="Boolean" id="akka.persistence.Update.create(b339afed30).await">await</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> =
+    <a href="#akka.persistence;Update" title="(await: Boolean, replayMax: Long)akka.persistence.Update">Update</a><span class="delimiter">(</span><a href="#akka.persistence.Update.create(b339afed30).await" title="Boolean">await</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Java API.
+   */</span>
+  def <a title="(await: Boolean, replayMax: Long)akka.persistence.Update" id="akka.persistence.Update.create(aed6ab255c)">create</a><span class="delimiter">(</span><a title="Boolean" id="akka.persistence.Update.create(aed6ab255c).await">await</a>: <span title="Boolean">Boolean</span>, <a title="Long" id="akka.persistence.Update.create(aed6ab255c).replayMax">replayMax</a>: <span title="Long">Long</span><span class="delimiter">)</span> =
+    <a href="#akka.persistence;Update" title="(await: Boolean, replayMax: Long)akka.persistence.Update">Update</a><span class="delimiter">(</span><a href="#akka.persistence.Update.create(aed6ab255c).await" title="Boolean">await</a>, <a href="#akka.persistence.Update.create(aed6ab255c).replayMax" title="Long">replayMax</a><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ */</span>
+private<span class="delimiter">[</span>akka<span class="delimiter">]</span> object <a title="akka.persistence.PersistentView.type" id="akka.persistence.PersistentView">PersistentView</a> <a href="#akka.persistence.PersistentView" title="akka.persistence.PersistentView.type" class="delimiter">{</a>
+  private final case class <a title="class ScheduledUpdate extends AnyRef with Product with Serializable" id="akka.persistence.PersistentView.ScheduledUpdate.readResolve">ScheduledUpdate</a><a href="#akka.persistence.PersistentView.ScheduledUpdate.readResolve" title="Product" class="delimiter">(</a><a title="Long" id="akka.persistence.PersistentView;ScheduledUpdate.replayMax">replayMax</a>: <span title="Long">Long</span><span class="delimiter">)</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * A view replicates the persistent message stream of a [[PersistentActor]]. Implementation classes receive
+ * the message stream directly from the Journal. These messages can be processed to update internal state
+ * in order to maintain an (eventual consistent) view of the state of the corresponding persistent actor. A
+ * persistent view can also run on a different node, provided that a replicated journal is used.
+ *
+ * Implementation classes refer to a persistent actors' message stream by implementing `persistenceId`
+ * with the corresponding (shared) identifier value.
+ *
+ * Views can also store snapshots of internal state by calling [[autoUpdate]]. The snapshots of a view
+ * are independent of those of the referenced persistent actor. During recovery, a saved snapshot is offered
+ * to the view with a [[SnapshotOffer]] message, followed by replayed messages, if any, that are younger
+ * than the snapshot. Default is to offer the latest saved snapshot.
+ *
+ * By default, a view automatically updates itself with an interval returned by `autoUpdateInterval`.
+ * This method can be overridden by implementation classes to define a view instance-specific update
+ * interval. The default update interval for all views of an actor system can be configured with the
+ * `akka.persistence.view.auto-update-interval` configuration key. Applications may trigger additional
+ * view updates by sending the view [[Update]] requests. See also methods
+ *
+ *  - [[autoUpdate]] for turning automated updates on or off
+ *  - [[autoUpdateReplayMax]] for limiting the number of replayed messages per view update cycle
+ *
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;use Persistence Query instead&quot;</span>, <span class="string">&quot;2.4&quot;</span><span class="delimiter">)</span>
+trait <a title="trait PersistentView extends AnyRef with akka.actor.Actor with akka.persistence.Snapshotter with akka.actor.Stash with akka.actor.StashFactory with akka.persistence.PersistenceIdentity with akka.persistence.PersistenceRecovery with akka.actor.ActorLogging" id="akka.persistence;PersistentView">PersistentView</a> extends <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor" title="akka.actor.Actor">Actor</a> with <a href="Snapshotter.scala.html#akka.persistence;Snapshotter" title="akka.persistence.Snapshotter">Snapshotter</a> with <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;Stash" title="akka.actor.Stash">Stash</a> with <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashFactory" title="akka.actor.StashFactory">StashFactory</a>
+  with <a href="Persistence.scala.html#akka.persistence;PersistenceIdentity" title="akka.persistence.PersistenceIdentity">PersistenceIdentity</a> with <a href="Persistence.scala.html#akka.persistence;PersistenceRecovery" title="akka.persistence.PersistenceRecovery">PersistenceRecovery</a>
+  with <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;ActorLogging" title="akka.actor.ActorLogging">ActorLogging</a> <span class="delimiter">{</span>
+  import <a href="#akka.persistence.PersistentView" title="akka.persistence.PersistentView.type">PersistentView</a>._
+  import <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol" title="akka.persistence.JournalProtocol.type">JournalProtocol</a>._
+  import <a href="SnapshotProtocol.scala.html#akka.persistence.SnapshotProtocol" title="akka.persistence.SnapshotProtocol.type">SnapshotProtocol</a>.LoadSnapshotResult
+  import <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.dispatcher
+
+  private val <a title="akka.persistence.Persistence" id="akka.persistence;PersistentView.extension">extension</a> = <a href="../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.persistence.Persistence">Persistence</a><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a><span class="delimiter">)</span>
+  private val <a title="PersistentView.this.extension.settings.view.type" id="akka.persistence;PersistentView.viewSettings">viewSettings</a> = <a href="#akka.persistence;PersistentView.extension" title="=&gt; akka.persistence.Persistence">extension</a>.<a href="Persistence.scala.html#akka.persistence;Persistence.settings" title="=&gt; akka.persistence.PersistenceSettings">settings</a>.<a href="Persistence.scala.html#akka.persistence;PersistenceSettings.view" title="PersistentView.this.extension.settings.view.type">view</a>
+
+  private<span class="delimiter">[</span>persistence<span class="delimiter">]</span> lazy val <a title="akka.actor.ActorRef" id="akka.persistence;PersistentView.journal">journal</a> = <a href="#akka.persistence;PersistentView.extension" title="=&gt; akka.persistence.Persistence">extension</a>.<a href="Persistence.scala.html#akka.persistence;Persistence.journalFor" title="(journalPluginId: String)akka.actor.ActorRef">journalFor</a><span class="delimiter">(</span><a href="Persistence.scala.html#akka.persistence;PersistenceIdentity.journalPluginId" title="=&gt; String">journalPluginId</a><span class="delimiter">)</span>
+  private<span class="delimiter">[</span>persistence<span class="delimiter">]</span> lazy val <a title="akka.actor.ActorRef" id="akka.persistence;PersistentView.snapshotStore">snapshotStore</a> = <a href="#akka.persistence;PersistentView.extension" title="=&gt; akka.persistence.Persistence">extension</a>.<a href="Persistence.scala.html#akka.persistence;Persistence.snapshotStoreFor" title="(snapshotPluginId: String)akka.actor.ActorRef">snapshotStoreFor</a><span class="delimiter">(</span><a href="Persistence.scala.html#akka.persistence;PersistenceIdentity.snapshotPluginId" title="=&gt; String">snapshotPluginId</a><span class="delimiter">)</span>
+
+  private var <a title="Option[akka.actor.Cancellable]" id="akka.persistence;PersistentView.schedule_=">schedule</a>: <span title="Option[akka.actor.Cancellable]">Option</span><span class="delimiter">[</span>Cancellable<span class="delimiter">]</span> = <span title="None.type">None</span>
+
+  private var <a title="Long" id="akka.persistence;PersistentView._lastSequenceNr_=">_lastSequenceNr</a>: <span title="Long">Long</span> = <span title="Long(0L)" class="long">0L</span>
+  private val <a title="akka.actor.StashSupport" id="akka.persistence;PersistentView.internalStash">internalStash</a> = <a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashFactory.createStash" title="()(implicit ctx: akka.actor.ActorContext, implicit ref: akka.actor.ActorRef)akka.actor.StashSupport">createStash</a><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext" class="delimiter">(</a><span class="delimiter">)</span>
+  private var <a title="PersistentView.this.State" id="akka.persistence;PersistentView.currentState_=">currentState</a>: <a href="#akka.persistence;PersistentView;State" title="PersistentView.this.State">State</a> = <a href="#akka.persistence;PersistentView.recoveryStarted" title="(replayMax: Long)PersistentView.this.State">recoveryStarted</a><span class="delimiter">(</span>Long.<span title="Long(9223372036854775807L)">MaxValue</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * View id is used as identifier for snapshots performed by this [[PersistentView]].
+   * This allows the View to keep separate snapshots of data than the [[PersistentActor]] originating the message stream.
+   *
+   *
+   * The usual case is to have a *different* id set as `viewId` than `persistenceId`,
+   * although it is possible to share the same id with an [[PersistentActor]] - for example to decide about snapshots
+   * based on some average or sum, calculated by this view.
+   *
+   * Example:
+   * {{{
+   *    class SummingView extends PersistentView {
+   *      override def persistenceId = &quot;count-123&quot;
+   *      override def viewId        = &quot;count-123-sum&quot; // this view is performing summing,
+   *                                                   // so this view's snapshots reside under the &quot;-sum&quot; suffixed id
+   *
+   *      // ...
+   *    }
+   * }}}
+   */</span>
+  def <a title="=&gt; String" id="akka.persistence;PersistentView.viewId">viewId</a>: <span title="String">String</span>
+
+  <span class="comment">/**
+   * Returns `viewId`.
+   */</span>
+  def <a title="=&gt; String" id="akka.persistence;PersistentView.snapshotterId">snapshotterId</a>: <span title="String">String</span> = <a href="#akka.persistence;PersistentView.viewId" title="=&gt; String">viewId</a>
+
+  <span class="comment">/**
+   * If `true`, the currently processed message was persisted (is sent from the Journal).
+   * If `false`, the currently processed message comes from another actor (from &quot;user-land&quot;).
+   */</span>
+  def <a title="=&gt; Boolean" id="akka.persistence;PersistentView.isPersistent">isPersistent</a>: <span title="Boolean">Boolean</span> = <a href="#akka.persistence;PersistentView.currentState_=" title="=&gt; PersistentView.this.State">currentState</a>.<a href="#akka.persistence;PersistentView;State.recoveryRunning" title="=&gt; Boolean">recoveryRunning</a>
+
+  <span class="comment">/**
+   * If `true`, this view automatically updates itself with an interval specified by `autoUpdateInterval`.
+   * If `false`, applications must explicitly update this view by sending [[Update]] requests. The default
+   * value can be configured with the `akka.persistence.view.auto-update` configuration key. This method
+   * can be overridden by implementation classes to return non-default values.
+   */</span>
+  def <a title="=&gt; Boolean" id="akka.persistence;PersistentView.autoUpdate">autoUpdate</a>: <span title="Boolean">Boolean</span> =
+    <a href="#akka.persistence;PersistentView.viewSettings" title="=&gt; PersistentView.this.extension.settings.view.type">viewSettings</a>.<a href="Persistence.scala.html#akka.persistence;PersistenceSettings.view.autoUpdate" title="=&gt; Boolean">autoUpdate</a>
+
+  <span class="comment">/**
+   * The interval for automated updates. The default value can be configured with the
+   * `akka.persistence.view.auto-update-interval` configuration key. This method can be
+   * overridden by implementation classes to return non-default values.
+   */</span>
+  def <a title="=&gt; scala.concurrent.duration.FiniteDuration" id="akka.persistence;PersistentView.autoUpdateInterval">autoUpdateInterval</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span> =
+    <a href="#akka.persistence;PersistentView.viewSettings" title="=&gt; PersistentView.this.extension.settings.view.type">viewSettings</a>.<a href="Persistence.scala.html#akka.persistence;PersistenceSettings.view.autoUpdateInterval" title="=&gt; scala.concurrent.duration.FiniteDuration">autoUpdateInterval</a>
+
+  <span class="comment">/**
+   * The maximum number of messages to replay per update. The default value can be configured with the
+   * `akka.persistence.view.auto-update-replay-max` configuration key. This method can be overridden by
+   * implementation classes to return non-default values.
+   */</span>
+  def <a title="=&gt; Long" id="akka.persistence;PersistentView.autoUpdateReplayMax">autoUpdateReplayMax</a>: <span title="Long">Long</span> =
+    <a href="#akka.persistence;PersistentView.viewSettings" title="=&gt; PersistentView.this.extension.settings.view.type">viewSettings</a>.<a href="Persistence.scala.html#akka.persistence;PersistenceSettings.view.autoUpdateReplayMax" title="=&gt; Long">autoUpdateReplayMax</a> match <span class="delimiter">{</span>
+      case <span title="Int(-1)">-</span><span class="int">1</span>    ⇒ Long.<span title="Long(9223372036854775807L)">MaxValue</span>
+      case <a title="Long" id="akka.persistence;PersistentView.autoUpdateReplayMax.value">value</a> ⇒ <a href="#akka.persistence;PersistentView.autoUpdateReplayMax.value" title="Long">value</a>
+    <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Highest received sequence number so far or `0L` if this actor hasn't replayed
+   * any persistent events yet.
+   */</span>
+  def <a title="=&gt; Long" id="akka.persistence;PersistentView.lastSequenceNr">lastSequenceNr</a>: <span title="Long">Long</span> = <a href="#akka.persistence;PersistentView._lastSequenceNr_=" title="=&gt; Long">_lastSequenceNr</a>
+
+  <span class="comment">/**
+   * Returns `lastSequenceNr`.
+   */</span>
+  def <a title="=&gt; Long" id="akka.persistence;PersistentView.snapshotSequenceNr">snapshotSequenceNr</a>: <span title="Long">Long</span> = <a href="#akka.persistence;PersistentView.lastSequenceNr" title="=&gt; Long">lastSequenceNr</a>
+
+  private def <a title="(value: Long)Unit" id="akka.persistence;PersistentView.setLastSequenceNr">setLastSequenceNr</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;PersistentView.setLastSequenceNr.value">value</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;PersistentView._lastSequenceNr_=" title="(x$1: Long)Unit">_lastSequenceNr</a> = <a href="#akka.persistence;PersistentView.setLastSequenceNr.value" title="Long">value</a>
+
+  private def <a title="(persistent: akka.persistence.PersistentRepr)Unit" id="akka.persistence;PersistentView.updateLastSequenceNr">updateLastSequenceNr</a><span class="delimiter">(</span><a title="akka.persistence.PersistentRepr" id="akka.persistence;PersistentView.updateLastSequenceNr.persistent">persistent</a>: <a href="Persistent.scala.html#akka.persistence;PersistentRepr" title="akka.persistence.PersistentRepr">PersistentRepr</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    if <span class="delimiter">(</span><a href="#akka.persistence;PersistentView.updateLastSequenceNr.persistent" title="akka.persistence.PersistentRepr">persistent</a>.<a href="Persistent.scala.html#akka.persistence;PersistentRepr.sequenceNr" title="=&gt; Long">sequenceNr</a> <span title="(x: Long)Boolean">&gt;</span> <a href="#akka.persistence;PersistentView._lastSequenceNr_=" title="=&gt; Long">_lastSequenceNr</a><span class="delimiter">)</span> <a href="#akka.persistence;PersistentView._lastSequenceNr_=" title="(x$1: Long)Unit">_lastSequenceNr</a> = <a href="#akka.persistence;PersistentView.updateLastSequenceNr.persistent" title="akka.persistence.PersistentRepr">persistent</a>.<a href="Persistent.scala.html#akka.persistence;PersistentRepr.sequenceNr" title="=&gt; Long">sequenceNr</a>
+
+  override def <a title="=&gt; akka.persistence.Recovery" id="akka.persistence;PersistentView.recovery">recovery</a> = <a href="PersistentActor.scala.html#akka.persistence.Recovery.apply$default$1" title="akka.persistence.SnapshotSelectionCriteria" id="akka.persistence;PersistentView.recovery.x$4">Recovery</a><span class="delimiter">(</span>replayMax = <a href="#akka.persistence;PersistentView.autoUpdateReplayMax" title="Long" id="akka.persistence;PersistentView.recovery.x$2">autoUpdateReplayMax</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Triggers an initial recovery, starting form a snapshot, if any, and replaying at most `autoUpdateReplayMax`
+   * messages (following that snapshot).
+   */</span>
+  override def <a title="()Unit" id="akka.persistence;PersistentView.preStart">preStart</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;PersistentView.startRecovery" title="(recovery: akka.persistence.Recovery)Unit">startRecovery</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.recovery" title="=&gt; akka.persistence.Recovery">recovery</a><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#akka.persistence;PersistentView.autoUpdate" title="=&gt; Boolean">autoUpdate</a><span class="delimiter">)</span>
+      <a href="#akka.persistence;PersistentView.schedule_=" title="(x$1: Option[akka.actor.Cancellable])Unit">schedule</a> = <span title="(x: akka.actor.Cancellable)Some[akka.actor.Cancellable]">Some</span><span class="delimiter">(</span><a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a>.<a href="../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>.<a href="../../../actor/akka/actor/Scheduler.scala.html#akka.actor;Scheduler.schedule(abf8206fc2)" title="(initialDelay: scala.concurrent.duration.FiniteDuration, interval: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">schedule</a><a href="../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.dispatcher" title="=&gt; scala.concurrent.ExecutionContextExecutor" class="delimiter">(</a><a href="#akka.persistence;PersistentView.autoUpdateInterval" title="=&gt; scala.concurrent.duration.FiniteDuration">autoUpdateInterval</a>, <a href="#akka.persistence;PersistentView.autoUpdateInterval" title="=&gt; scala.concurrent.duration.FiniteDuration">autoUpdateInterval</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.persistence.PersistentView.ScheduledUpdate.readResolve" title="(replayMax: Long)akka.persistence.PersistentView.ScheduledUpdate">ScheduledUpdate</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.autoUpdateReplayMax" title="=&gt; Long">autoUpdateReplayMax</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="(recovery: akka.persistence.Recovery)Unit" id="akka.persistence;PersistentView.startRecovery">startRecovery</a><span class="delimiter">(</span><a title="akka.persistence.Recovery" id="akka.persistence;PersistentView.startRecovery.recovery">recovery</a>: <a href="PersistentActor.scala.html#akka.persistence;Recovery" title="akka.persistence.Recovery">Recovery</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;PersistentView.changeState" title="(state: PersistentView.this.State)Unit">changeState</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.recoveryStarted" title="(replayMax: Long)PersistentView.this.State">recoveryStarted</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.startRecovery.recovery" title="akka.persistence.Recovery">recovery</a>.<a href="PersistentActor.scala.html#akka.persistence;Recovery.replayMax" title="=&gt; Long">replayMax</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <a href="Snapshotter.scala.html#akka.persistence;Snapshotter.loadSnapshot" title="(persistenceId: String, criteria: akka.persistence.SnapshotSelectionCriteria, toSequenceNr: Long)Unit">loadSnapshot</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.snapshotterId" title="=&gt; String">snapshotterId</a>, <a href="#akka.persistence;PersistentView.startRecovery.recovery" title="akka.persistence.Recovery">recovery</a>.<a href="PersistentActor.scala.html#akka.persistence;Recovery.fromSnapshot" title="=&gt; akka.persistence.SnapshotSelectionCriteria">fromSnapshot</a>, <a href="#akka.persistence;PersistentView.startRecovery.recovery" title="akka.persistence.Recovery">recovery</a>.<a href="PersistentActor.scala.html#akka.persistence;Recovery.toSequenceNr" title="=&gt; Long">toSequenceNr</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/** INTERNAL API. */</span>
+  override protected<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(receive: PersistentView.this.Receive, message: Any)Unit" id="akka.persistence;PersistentView.aroundReceive">aroundReceive</a><span class="delimiter">(</span><a title="PersistentView.this.Receive" id="akka.persistence;PersistentView.aroundReceive.receive">receive</a>: <span title="PersistentView.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;PersistentView.aroundReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.persistence;PersistentView.currentState_=" title="=&gt; PersistentView.this.State">currentState</a>.<a href="#akka.persistence;PersistentView;State.stateReceive" title="(receive: PersistentView.this.Receive, message: Any)Unit">stateReceive</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.aroundReceive.receive" title="PersistentView.this.Receive">receive</a>, <a href="#akka.persistence;PersistentView.aroundReceive.message" title="Any">message</a><span class="delimiter">)</span>
+
+  <span class="comment">/** INTERNAL API. */</span>
+  override protected<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="()Unit" id="akka.persistence;PersistentView.aroundPreStart">aroundPreStart</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="comment">// Fail fast on missing plugins.</span>
+    val <a title="akka.actor.ActorRef" id="akka.persistence;PersistentView.aroundPreStart.j">j</a> = <a href="#akka.persistence;PersistentView.journal" title="=&gt; akka.actor.ActorRef">journal</a>; val <a title="akka.actor.ActorRef" id="akka.persistence;PersistentView.aroundPreStart.s">s</a> = <a href="#akka.persistence;PersistentView.snapshotStore" title="=&gt; akka.actor.ActorRef">snapshotStore</a>
+    super.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.aroundPreStart" title="()Unit">aroundPreStart</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  override def <a title="(reason: Throwable, message: Option[Any])Unit" id="akka.persistence;PersistentView.preRestart">preRestart</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;PersistentView.preRestart.reason">reason</a>: <span title="Throwable">Throwable</span>, <a title="Option[Any]" id="akka.persistence;PersistentView.preRestart.message">message</a>: <span title="Option[Any]">Option</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    try <a href="#akka.persistence;PersistentView.internalStash" title="=&gt; akka.actor.StashSupport">internalStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(aa97cb1b3d)" title="()Unit">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span> finally super.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;UnrestrictedStash.preRestart" title="(reason: Throwable, message: Option[Any])Unit">preRestart</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.preRestart.reason" title="Throwable">reason</a>, <a href="#akka.persistence;PersistentView.preRestart.message" title="Option[Any]">message</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  override def <a title="()Unit" id="akka.persistence;PersistentView.postStop">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;PersistentView.schedule_=" title="=&gt; Option[akka.actor.Cancellable]">schedule</a>.<span title="(f: akka.actor.Cancellable =&gt; Boolean)Unit">foreach</span><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.postStop.$anonfun.x$1" title="akka.actor.Cancellable">_</a>.<a href="../../../actor/akka/actor/Scheduler.scala.html#akka.actor;Cancellable.cancel" title="()Boolean">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    super.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;UnrestrictedStash.postStop" title="()Unit">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Called whenever a message replay fails. By default it logs the error.
+   * Subclass may override to customize logging.
+   * The `PersistentView` will not stop or throw exception due to this.
+   * It will try again on next update.
+   */</span>
+  protected def <a title="(cause: Throwable)Unit" id="akka.persistence;PersistentView.onReplayError">onReplayError</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;PersistentView.onReplayError.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../../../actor/akka/event/Logging.scala.html#akka.event;LoggingAdapter.error(41f64575e3)" title="(cause: Throwable, template: String, arg1: Any, arg2: Any)Unit">error</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.onReplayError.cause" title="Throwable">cause</a>, <span class="string">&quot;Persistence view failure when replaying events for persistenceId [{}]. &quot;</span> <span title="String(&quot;Persistence view failure when replaying events for persistenceId [{}]. Last known sequence number [{}]&quot;)">+</span>
+      <span class="string">&quot;Last known sequence number [{}]&quot;</span>, <a href="Persistence.scala.html#akka.persistence;PersistenceIdentity.persistenceId" title="=&gt; String">persistenceId</a>, <a href="#akka.persistence;PersistentView.lastSequenceNr" title="=&gt; Long">lastSequenceNr</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="(state: PersistentView.this.State)Unit" id="akka.persistence;PersistentView.changeState">changeState</a><span class="delimiter">(</span><a title="PersistentView.this.State" id="akka.persistence;PersistentView.changeState.state">state</a>: <a href="#akka.persistence;PersistentView;State" title="PersistentView.this.State">State</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.persistence;PersistentView.currentState_=" title="(x$1: PersistentView.this.State)Unit">currentState</a> = <a href="#akka.persistence;PersistentView.changeState.state" title="PersistentView.this.State">state</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">// TODO There are some duplication of the recovery state management here and in Eventsourced.scala,</span>
+  <span class="comment">//      but the enhanced PersistentView will not be based on recovery infrastructure, and</span>
+  <span class="comment">//      therefore this code will be replaced anyway</span>
+
+  private trait <a title="trait State extends AnyRef" id="akka.persistence;PersistentView;State">State</a> <span class="delimiter">{</span>
+    def <a title="(receive: PersistentView.this.Receive, message: Any)Unit" id="akka.persistence;PersistentView;State.stateReceive">stateReceive</a><span class="delimiter">(</span><a title="PersistentView.this.Receive" id="akka.persistence;PersistentView;State.stateReceive.receive">receive</a>: <span title="PersistentView.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;PersistentView;State.stateReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span>
+    def <a title="=&gt; Boolean" id="akka.persistence;PersistentView;State.recoveryRunning">recoveryRunning</a>: <span title="Boolean">Boolean</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Processes a loaded snapshot, if any. A loaded snapshot is offered with a `SnapshotOffer`
+   * message to the actor's `receive`. Then initiates a message replay, either starting
+   * from the loaded snapshot or from scratch, and switches to `replayStarted` state.
+   * All incoming messages are stashed.
+   *
+   * @param replayMax maximum number of messages to replay.
+   */</span>
+  private def <a title="(replayMax: Long)PersistentView.this.State" id="akka.persistence;PersistentView.recoveryStarted">recoveryStarted</a><span class="delimiter">(</span><a title="Long" id="akka.persistence;PersistentView.recoveryStarted.replayMax">replayMax</a>: <span title="Long">Long</span><span class="delimiter">)</span> = new <a title="&lt;$anon: PersistentView.this.State&gt; extends AnyRef with PersistentView.this.State" id="akka.persistence;PersistentView.recoveryStarted;$anon">State</a> <span class="delimiter">{</span>
+
+    override def <a title="()String" id="akka.persistence;PersistentView.recoveryStarted;$anon.toString">toString</a>: <span title="String">String</span> = <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;recovery started (replayMax = [&quot;)">recovery started (replayMax = [$</span><span class="delimiter">{</span><a href="#akka.persistence;PersistentView.recoveryStarted.replayMax" title="Long">replayMax</a><span class="delimiter">}</span><span title="String(&quot;])&quot;)" class="string">])&quot;</span>
+    override def <a title="=&gt; Boolean" id="akka.persistence;PersistentView.recoveryStarted;$anon.recoveryRunning">recoveryRunning</a>: <span title="Boolean">Boolean</span> = true
+
+    override def <a title="(receive: PersistentView.this.Receive, message: Any)Unit" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive">stateReceive</a><span class="delimiter">(</span><a title="PersistentView.this.Receive" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.receive">receive</a>: <span title="PersistentView.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.message" title="Any">message</a> match <span class="delimiter">{</span>
+      case LoadSnapshotResult<span class="delimiter">(</span><a title="Option[akka.persistence.SelectedSnapshot]" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.sso">sso</a>, <a title="Long" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.toSnr">toSnr</a><span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.sso" title="Option[akka.persistence.SelectedSnapshot]">sso</a>.<span title="(f: akka.persistence.SelectedSnapshot =&gt; Unit)Unit">foreach</span> <a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.$anonfun.x0$1" title="Unit" class="delimiter">{</a>
+          case SelectedSnapshot<span class="delimiter">(</span><a title="akka.persistence.SnapshotMetadata" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.$anonfun.metadata">metadata</a>, <a title="Any" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.$anonfun.snapshot">snapshot</a><span class="delimiter">)</span> ⇒
+            <a href="#akka.persistence;PersistentView.setLastSequenceNr" title="(value: Long)Unit">setLastSequenceNr</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.$anonfun.metadata" title="akka.persistence.SnapshotMetadata">metadata</a>.<a href="SnapshotProtocol.scala.html#akka.persistence;SnapshotMetadata.sequenceNr" title="=&gt; Long">sequenceNr</a><span class="delimiter">)</span>
+            <a href="#akka.persistence;PersistentView" title="akka.persistence.PersistentView">PersistentView</a>.super.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.aroundReceive" title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.receive" title="PersistentView.this.Receive">receive</a>, <a href="SnapshotProtocol.scala.html#akka.persistence;SnapshotOffer" title="(metadata: akka.persistence.SnapshotMetadata, snapshot: Any)akka.persistence.SnapshotOffer">SnapshotOffer</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.$anonfun.metadata" title="akka.persistence.SnapshotMetadata">metadata</a>, <a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.$anonfun.snapshot" title="Any">snapshot</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+        <a href="#akka.persistence;PersistentView.changeState" title="(state: PersistentView.this.State)Unit">changeState</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted" title="(await: Boolean)PersistentView.this.State">replayStarted</a><span class="delimiter">(</span>await = true<span class="delimiter">)</span><span class="delimiter">)</span>
+        <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;ReplayMessages" title="(fromSequenceNr: Long, toSequenceNr: Long, max: Long, persistenceId: String, persistentActor: akka.actor.ActorRef)akka.persistence.JournalProtocol.ReplayMessages">ReplayMessages</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.lastSequenceNr" title="=&gt; Long">lastSequenceNr</a> <span title="(x: Long)Long">+</span> <span title="Long(1L)" class="long">1L</span>, <a href="#akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.toSnr" title="Long">toSnr</a>, <a href="#akka.persistence;PersistentView.recoveryStarted.replayMax" title="Long">replayMax</a>, <a href="Persistence.scala.html#akka.persistence;PersistenceIdentity.persistenceId" title="=&gt; String">persistenceId</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+      case <a title="Any" id="akka.persistence;PersistentView.recoveryStarted;$anon.stateReceive.other">other</a> ⇒ <a href="#akka.persistence;PersistentView.internalStash" title="=&gt; akka.actor.StashSupport">internalStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Processes replayed messages, if any. The actor's `receive` is invoked with the replayed
+   * events.
+   *
+   * If replay succeeds it switches to `initializing` state and requests the highest stored sequence
+   * number from the journal.
+   *
+   * If replay succeeds the `onReplaySuccess` callback method is called, otherwise `onReplayError` is called and
+   * remaining replay events are consumed (ignored).
+   *
+   * If processing of a replayed event fails, the exception is caught and
+   * stored for later and state is changed to `recoveryFailed`.
+   *
+   * All incoming messages are stashed when `await` is true.
+   */</span>
+  private def <a title="(await: Boolean)PersistentView.this.State" id="akka.persistence;PersistentView.replayStarted">replayStarted</a><span class="delimiter">(</span><a title="Boolean" id="akka.persistence;PersistentView.replayStarted.await">await</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span> = new <a title="&lt;$anon: PersistentView.this.State&gt; extends AnyRef with PersistentView.this.State" id="akka.persistence;PersistentView.replayStarted;$anon">State</a> <span class="delimiter">{</span>
+    override def <a title="()String" id="akka.persistence;PersistentView.replayStarted;$anon.toString">toString</a>: <span title="String">String</span> = <span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;replay started&quot;)" class="string">replay started&quot;</span>
+    override def <a title="=&gt; Boolean" id="akka.persistence;PersistentView.replayStarted;$anon.recoveryRunning">recoveryRunning</a>: <span title="Boolean">Boolean</span> = true
+
+    override def <a title="(receive: PersistentView.this.Receive, message: Any)Unit" id="akka.persistence;PersistentView.replayStarted;$anon.stateReceive">stateReceive</a><span class="delimiter">(</span><a title="PersistentView.this.Receive" id="akka.persistence;PersistentView.replayStarted;$anon.stateReceive.receive">receive</a>: <span title="PersistentView.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;PersistentView.replayStarted;$anon.stateReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.message" title="Any">message</a> match <span class="delimiter">{</span>
+      case ReplayedMessage<span class="delimiter">(</span><a title="akka.persistence.PersistentRepr" id="akka.persistence;PersistentView.replayStarted;$anon.stateReceive.p">p</a><span class="delimiter">)</span> ⇒
+        try <span class="delimiter">{</span>
+          <a href="#akka.persistence;PersistentView.updateLastSequenceNr" title="(persistent: akka.persistence.PersistentRepr)Unit">updateLastSequenceNr</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.p" title="akka.persistence.PersistentRepr">p</a><span class="delimiter">)</span>
+          <a href="#akka.persistence;PersistentView" title="akka.persistence.PersistentView">PersistentView</a>.super.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.aroundReceive" title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.receive" title="PersistentView.this.Receive">receive</a>, <a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.p" title="akka.persistence.PersistentRepr">p</a>.<a href="Persistent.scala.html#akka.persistence;PersistentRepr.payload" title="=&gt; Any">payload</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+          case <a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.<unapply-selector>" title="(t: Throwable)Option[Throwable]">NonFatal</a><span class="delimiter">(</span><span title="Throwable">t</span><span class="delimiter">)</span> ⇒
+            <a href="#akka.persistence;PersistentView.changeState" title="(state: PersistentView.this.State)Unit">changeState</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.ignoreRemainingReplay" title="(cause: Throwable)PersistentView.this.State{def replayCompleted(receive: PersistentView.this.Receive): Unit}">ignoreRemainingReplay</a><span class="delimiter">(</span><span title="Throwable">t</span><span class="delimiter">)</span><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      case _: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;RecoverySuccess" title="akka.persistence.JournalProtocol.RecoverySuccess">RecoverySuccess</a> ⇒
+        <a href="#akka.persistence;PersistentView.replayStarted;$anon.onReplayComplete" title="()Unit">onReplayComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      case ReplayMessagesFailure<span class="delimiter">(</span><a title="Throwable" id="akka.persistence;PersistentView.replayStarted;$anon.stateReceive.cause">cause</a><span class="delimiter">)</span> ⇒
+        try <a href="#akka.persistence;PersistentView.onReplayError" title="(cause: Throwable)Unit">onReplayError</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.cause" title="Throwable">cause</a><span class="delimiter">)</span> finally <a href="#akka.persistence;PersistentView.replayStarted;$anon.onReplayComplete" title="()Unit">onReplayComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      case ScheduledUpdate<span class="delimiter">(</span>_<span class="delimiter">)</span> ⇒ <span class="comment">// ignore</span>
+      case Update<span class="delimiter">(</span><a title="Boolean" id="akka.persistence;PersistentView.replayStarted;$anon.stateReceive.a">a</a>, _<span class="delimiter">)</span> ⇒
+        if <span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.a" title="Boolean">a</a><span class="delimiter">)</span>
+          <a href="#akka.persistence;PersistentView.internalStash" title="=&gt; akka.actor.StashSupport">internalStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      case <a title="Any" id="akka.persistence;PersistentView.replayStarted;$anon.stateReceive.other">other</a> ⇒
+        if <span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted.await" title="Boolean">await</a><span class="delimiter">)</span>
+          <a href="#akka.persistence;PersistentView.internalStash" title="=&gt; akka.actor.StashSupport">internalStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        else <span class="delimiter">{</span>
+          try <span class="delimiter">{</span>
+            <a href="#akka.persistence;PersistentView" title="akka.persistence.PersistentView">PersistentView</a>.super.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.aroundReceive" title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.receive" title="PersistentView.this.Receive">receive</a>, <a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.other" title="Any">other</a><span class="delimiter">)</span>
+          <span class="delimiter">}</span> catch <span class="delimiter">{</span>
+            case <a href="#akka.persistence;PersistentView.replayStarted;$anon.stateReceive.<unapply-selector>" title="(t: Throwable)Option[Throwable]">NonFatal</a><span class="delimiter">(</span><span title="Throwable">t</span><span class="delimiter">)</span> ⇒
+              <a href="#akka.persistence;PersistentView.changeState" title="(state: PersistentView.this.State)Unit">changeState</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.ignoreRemainingReplay" title="(cause: Throwable)PersistentView.this.State{def replayCompleted(receive: PersistentView.this.Receive): Unit}">ignoreRemainingReplay</a><span class="delimiter">(</span><span title="Throwable">t</span><span class="delimiter">)</span><span class="delimiter">)</span>
+          <span class="delimiter">}</span>
+        <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Switches to `idle`
+     */</span>
+    private def <a title="()Unit" id="akka.persistence;PersistentView.replayStarted;$anon.onReplayComplete">onReplayComplete</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;PersistentView.changeState" title="(state: PersistentView.this.State)Unit">changeState</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.idle" title="=&gt; PersistentView.this.State">idle</a><span class="delimiter">)</span>
+      <a href="#akka.persistence;PersistentView.internalStash" title="=&gt; akka.actor.StashSupport">internalStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(aa97cb1b3d)" title="()Unit">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Consumes remaining replayed messages and then throw the exception.
+   */</span>
+  private def <a title="(cause: Throwable)PersistentView.this.State{def replayCompleted(receive: PersistentView.this.Receive): Unit}" id="akka.persistence;PersistentView.ignoreRemainingReplay">ignoreRemainingReplay</a><span class="delimiter">(</span><a title="Throwable" id="akka.persistence;PersistentView.ignoreRemainingReplay.cause">cause</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span> = new <a title="&lt;$anon: PersistentView.this.State&gt; extends AnyRef with PersistentView.this.State" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon">State</a> <span class="delimiter">{</span>
+
+    override def <a title="()String" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;replay failed&quot;)" class="string">&quot;replay failed&quot;</span>
+    override def <a title="=&gt; Boolean" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.recoveryRunning">recoveryRunning</a>: <span title="Boolean">Boolean</span> = true
+
+    override def <a title="(receive: PersistentView.this.Receive, message: Any)Unit" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.stateReceive">stateReceive</a><span class="delimiter">(</span><a title="PersistentView.this.Receive" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.stateReceive.receive">receive</a>: <span title="PersistentView.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.stateReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span> = <a href="#akka.persistence;PersistentView.ignoreRemainingReplay;$anon.stateReceive.message" title="Any">message</a> match <span class="delimiter">{</span>
+      case ReplayedMessage<span class="delimiter">(</span><a title="akka.persistence.PersistentRepr" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.stateReceive.p">p</a><span class="delimiter">)</span> ⇒
+      case ReplayMessagesFailure<span class="delimiter">(</span>_<span class="delimiter">)</span> ⇒
+        <a href="#akka.persistence;PersistentView.ignoreRemainingReplay;$anon.replayCompleted" title="(receive: PersistentView.this.Receive)Unit">replayCompleted</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.ignoreRemainingReplay;$anon.stateReceive.receive" title="PersistentView.this.Receive">receive</a><span class="delimiter">)</span>
+        <span class="comment">// journal couldn't tell the maximum stored sequence number, hence the next</span>
+        <span class="comment">// replay must be a full replay (up to the highest stored sequence number)</span>
+        <span class="comment">// Recover(lastSequenceNr) is sent by preRestart</span>
+        <a href="#akka.persistence;PersistentView.setLastSequenceNr" title="(value: Long)Unit">setLastSequenceNr</a><span class="delimiter">(</span>Long.<span title="Long(9223372036854775807L)">MaxValue</span><span class="delimiter">)</span>
+      case _: <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;RecoverySuccess" title="akka.persistence.JournalProtocol.RecoverySuccess">RecoverySuccess</a> ⇒ <a href="#akka.persistence;PersistentView.ignoreRemainingReplay;$anon.replayCompleted" title="(receive: PersistentView.this.Receive)Unit">replayCompleted</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.ignoreRemainingReplay;$anon.stateReceive.receive" title="PersistentView.this.Receive">receive</a><span class="delimiter">)</span>
+      case _                  ⇒ <a href="#akka.persistence;PersistentView.internalStash" title="=&gt; akka.actor.StashSupport">internalStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.stash" title="()Unit">stash</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    def <a title="(receive: PersistentView.this.Receive)Unit" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.replayCompleted">replayCompleted</a><span class="delimiter">(</span><a title="PersistentView.this.Receive" id="akka.persistence;PersistentView.ignoreRemainingReplay;$anon.replayCompleted.receive">receive</a>: <span title="PersistentView.this.Receive">Receive</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <span class="comment">// in case the actor resumes the state must be `idle`</span>
+      <a href="#akka.persistence;PersistentView.changeState" title="(state: PersistentView.this.State)Unit">changeState</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.idle" title="=&gt; PersistentView.this.State">idle</a><span class="delimiter">)</span>
+      <a href="#akka.persistence;PersistentView.internalStash" title="=&gt; akka.actor.StashSupport">internalStash</a>.<a href="../../../actor/akka/actor/Stash.scala.html#akka.actor;StashSupport.unstashAll(aa97cb1b3d)" title="()Unit">unstashAll</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      throw <a href="#akka.persistence;PersistentView.ignoreRemainingReplay.cause" title="Throwable">cause</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * When receiving an [[Update]] request, switches to `replayStarted` state and triggers
+   * an incremental message replay. Invokes the actor's current behavior for any other
+   * received message.
+   */</span>
+  private val <a title="PersistentView.this.State" id="akka.persistence;PersistentView.idle">idle</a>: <a href="#akka.persistence;PersistentView;State" title="PersistentView.this.State">State</a> = new <a title="&lt;$anon: PersistentView.this.State&gt; extends AnyRef with PersistentView.this.State" id="akka.persistence;PersistentView.idle;$anon">State</a> <span class="delimiter">{</span>
+    override def <a title="()String" id="akka.persistence;PersistentView.idle;$anon.toString">toString</a>: <span title="String">String</span> = <span title="String(&quot;idle&quot;)" class="string">&quot;idle&quot;</span>
+    override def <a title="=&gt; Boolean" id="akka.persistence;PersistentView.idle;$anon.recoveryRunning">recoveryRunning</a>: <span title="Boolean">Boolean</span> = false
+
+    override def <a title="(receive: PersistentView.this.Receive, message: Any)Unit" id="akka.persistence;PersistentView.idle;$anon.stateReceive">stateReceive</a><span class="delimiter">(</span><a title="PersistentView.this.Receive" id="akka.persistence;PersistentView.idle;$anon.stateReceive.receive">receive</a>: <span title="PersistentView.this.Receive">Receive</span>, <a title="Any" id="akka.persistence;PersistentView.idle;$anon.stateReceive.message">message</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.persistence;PersistentView.idle;$anon.stateReceive.message" title="Any">message</a> match <span class="delimiter">{</span>
+      case ReplayedMessage<span class="delimiter">(</span><a title="akka.persistence.PersistentRepr" id="akka.persistence;PersistentView.idle;$anon.stateReceive.p">p</a><span class="delimiter">)</span> ⇒
+        <span class="comment">// we can get ReplayedMessage here if it was stashed by user during replay</span>
+        <span class="comment">// unwrap the payload</span>
+        <a href="#akka.persistence;PersistentView" title="akka.persistence.PersistentView">PersistentView</a>.super.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.aroundReceive" title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.idle;$anon.stateReceive.receive" title="PersistentView.this.Receive">receive</a>, <a href="#akka.persistence;PersistentView.idle;$anon.stateReceive.p" title="akka.persistence.PersistentRepr">p</a>.<a href="Persistent.scala.html#akka.persistence;PersistentRepr.payload" title="=&gt; Any">payload</a><span class="delimiter">)</span>
+      case ScheduledUpdate<span class="delimiter">(</span><span title="Long">replayMax</span><span class="delimiter">)</span>     ⇒ <a href="#akka.persistence;PersistentView.idle;$anon.changeStateToReplayStarted" title="(await: Boolean, replayMax: Long)Unit">changeStateToReplayStarted</a><span class="delimiter">(</span>await = false, <span title="Long">replayMax</span><span class="delimiter">)</span>
+      case Update<span class="delimiter">(</span><a title="Boolean" id="akka.persistence;PersistentView.idle;$anon.stateReceive.awaitUpdate">awaitUpdate</a>, <span title="Long">replayMax</span><span class="delimiter">)</span> ⇒ <a href="#akka.persistence;PersistentView.idle;$anon.changeStateToReplayStarted" title="(await: Boolean, replayMax: Long)Unit">changeStateToReplayStarted</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.idle;$anon.stateReceive.awaitUpdate" title="Boolean">awaitUpdate</a>, <span title="Long">replayMax</span><span class="delimiter">)</span>
+      case <a title="Any" id="akka.persistence;PersistentView.idle;$anon.stateReceive.other">other</a>                          ⇒ <a href="#akka.persistence;PersistentView" title="akka.persistence.PersistentView">PersistentView</a>.super.<a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.aroundReceive" title="(receive: akka.actor.Actor.Receive, msg: Any)Unit">aroundReceive</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.idle;$anon.stateReceive.receive" title="PersistentView.this.Receive">receive</a>, <a href="#akka.persistence;PersistentView.idle;$anon.stateReceive.other" title="Any">other</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    def <a title="(await: Boolean, replayMax: Long)Unit" id="akka.persistence;PersistentView.idle;$anon.changeStateToReplayStarted">changeStateToReplayStarted</a><span class="delimiter">(</span><a title="Boolean" id="akka.persistence;PersistentView.idle;$anon.changeStateToReplayStarted.await">await</a>: <span title="Boolean">Boolean</span>, <a title="Long" id="akka.persistence;PersistentView.idle;$anon.changeStateToReplayStarted.replayMax">replayMax</a>: <span title="Long">Long</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence;PersistentView.changeState" title="(state: PersistentView.this.State)Unit">changeState</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.replayStarted" title="(await: Boolean)PersistentView.this.State">replayStarted</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.idle;$anon.changeStateToReplayStarted.await" title="Boolean">await</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      <a href="../../../actor/akka/actor/package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">journal</a> <a href="../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="JournalProtocol.scala.html#akka.persistence.JournalProtocol;ReplayMessages" title="(fromSequenceNr: Long, toSequenceNr: Long, max: Long, persistenceId: String, persistentActor: akka.actor.ActorRef)akka.persistence.JournalProtocol.ReplayMessages">ReplayMessages</a><span class="delimiter">(</span><a href="#akka.persistence;PersistentView.lastSequenceNr" title="=&gt; Long">lastSequenceNr</a> <span title="(x: Long)Long">+</span> <span title="Long(1L)" class="long">1L</span>, Long.<span title="Long(9223372036854775807L)">MaxValue</span>, <a href="#akka.persistence;PersistentView.idle;$anon.changeStateToReplayStarted.replayMax" title="Long">replayMax</a>, <a href="Persistence.scala.html#akka.persistence;PersistenceIdentity.persistenceId" title="=&gt; String">persistenceId</a>, <a href="../../../actor/akka/actor/Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API.
+ *
+ * @see [[PersistentView]]
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;use Persistence Query instead&quot;</span>, <span class="string">&quot;2.4&quot;</span><span class="delimiter">)</span>
+abstract class <a title="class UntypedPersistentView extends akka.actor.UntypedActor with akka.persistence.PersistentView" id="akka.persistence;UntypedPersistentView">UntypedPersistentView</a> extends <a href="../../../actor/akka/actor/UntypedActor.scala.html#akka.actor;UntypedActor" title="akka.actor.UntypedActor">UntypedActor</a> with <a href="#akka.persistence;PersistentView" title="akka.persistence.PersistentView">PersistentView</a>
+
+<span class="comment">/**
+ * Java API: compatible with lambda expressions (to be used with [[akka.japi.pf.ReceiveBuilder]])
+ *
+ * @see [[PersistentView]]
+ */</span>
+@deprecated<span class="delimiter">(</span><span class="string">&quot;use Persistence Query instead&quot;</span>, <span class="string">&quot;2.4&quot;</span><span class="delimiter">)</span>
+abstract class <a title="class AbstractPersistentView extends akka.actor.AbstractActor with akka.persistence.PersistentView" id="akka.persistence;AbstractPersistentView">AbstractPersistentView</a> extends <a href="../../../actor/akka/actor/AbstractActor.scala.html#akka.actor;AbstractActor" title="akka.actor.AbstractActor">AbstractActor</a> with <a href="#akka.persistence;PersistentView" title="akka.persistence.PersistentView">PersistentView</a>
+
+        </pre>
+    </body>
+</html>

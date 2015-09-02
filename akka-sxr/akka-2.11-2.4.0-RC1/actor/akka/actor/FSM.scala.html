@@ -1,0 +1,827 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>actor/akka/actor/FSM.scala</title>
+        <script type="text/javascript" src="../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+package akka.actor
+
+import <span title="language.type">language</span>.implicitConversions
+import scala.concurrent.duration.Duration
+import scala.collection.mutable
+import akka.routing.<span class="delimiter">{</span> Deafen, Listen, Listeners <span class="delimiter">}</span>
+import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration._
+
+object <a title="akka.actor.FSM.type" id="akka.actor.FSM">FSM</a> <a href="#akka.actor.FSM" title="akka.actor.FSM.type" class="delimiter">{</a>
+
+  <span class="comment">/**
+   * A partial function value which does not match anything and can be used to
+   * “reset” `whenUnhandled` and `onTermination` handlers.
+   *
+   * {{{
+   * onTermination(FSM.NullFunction)
+   * }}}
+   */</span>
+  object <a title="akka.actor.FSM.NullFunction.type" id="akka.actor.FSM.NullFunction">NullFunction</a> extends <span title="PartialFunction[Any,Nothing]">PartialFunction</span><span class="delimiter">[</span>Any, Nothing<span class="delimiter">]</span> <span class="delimiter">{</span>
+    def <a title="(o: Any)Boolean" id="akka.actor.FSM.NullFunction.isDefinedAt">isDefinedAt</a><span class="delimiter">(</span><a title="Any" id="akka.actor.FSM.NullFunction.isDefinedAt.o">o</a>: <span title="Any">Any</span><span class="delimiter">)</span> = false
+    def <a title="(o: Any)Nothing" id="akka.actor.FSM.NullFunction.apply">apply</a><span class="delimiter">(</span><a title="Any" id="akka.actor.FSM.NullFunction.apply.o">o</a>: <span title="Any">Any</span><span class="delimiter">)</span> = sys.<span title="(message: String)Nothing">error</span><span class="delimiter">(</span><span title="String(&quot;undefined&quot;)" class="string">&quot;undefined&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Message type which is sent directly to the subscribed actor in
+   * [[akka.actor.FSM.SubscribeTransitionCallBack]] before sending any
+   * [[akka.actor.FSM.Transition]] messages.
+   */</span>
+  final case class <a href="#akka.actor.FSM;CurrentState.productElement.x$1" title="class CurrentState[S] extends AnyRef with Product with Serializable" id="akka.actor.FSM.CurrentState.readResolve">CurrentState</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM;CurrentState;S">S</a><span class="delimiter">]</span><a href="#akka.actor.FSM.CurrentState.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.actor.FSM;CurrentState.fsmRef">fsmRef</a>: <a href="ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>, <a title="S" id="akka.actor.FSM;CurrentState.state">state</a>: <a href="#akka.actor.FSM;CurrentState;S" title="S">S</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Message type which is used to communicate transitions between states to
+   * all subscribed listeners (use [[akka.actor.FSM.SubscribeTransitionCallBack]]).
+   */</span>
+  final case class <a href="#akka.actor.FSM;Transition.productElement.x$1" title="class Transition[S] extends AnyRef with Product with Serializable" id="akka.actor.FSM.Transition.readResolve">Transition</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM;Transition;S">S</a><span class="delimiter">]</span><a href="#akka.actor.FSM.Transition.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.actor.FSM;Transition.fsmRef">fsmRef</a>: <a href="ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>, <a title="S" id="akka.actor.FSM;Transition.from">from</a>: <a href="#akka.actor.FSM;Transition;S" title="S">S</a>, <a title="S" id="akka.actor.FSM;Transition.to">to</a>: <a href="#akka.actor.FSM;Transition;S" title="S">S</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Send this to an [[akka.actor.FSM]] to request first the [[FSM.CurrentState]]
+   * and then a series of [[FSM.Transition]] updates. Cancel the subscription
+   * using [[FSM.UnsubscribeTransitionCallBack]].
+   */</span>
+  final case class <a title="class SubscribeTransitionCallBack extends AnyRef with Product with Serializable" id="akka.actor.FSM.SubscribeTransitionCallBack.readResolve">SubscribeTransitionCallBack</a><a href="#akka.actor.FSM.SubscribeTransitionCallBack.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.actor.FSM;SubscribeTransitionCallBack.actorRef">actorRef</a>: <a href="ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Unsubscribe from [[akka.actor.FSM.Transition]] notifications which was
+   * effected by sending the corresponding [[akka.actor.FSM.SubscribeTransitionCallBack]].
+   */</span>
+  final case class <a title="class UnsubscribeTransitionCallBack extends AnyRef with Product with Serializable" id="akka.actor.FSM.UnsubscribeTransitionCallBack.readResolve">UnsubscribeTransitionCallBack</a><a href="#akka.actor.FSM.UnsubscribeTransitionCallBack.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.actor.FSM;UnsubscribeTransitionCallBack.actorRef">actorRef</a>: <a href="ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Reason why this [[akka.actor.FSM]] is shutting down.
+   */</span>
+  sealed trait <a title="trait Reason extends AnyRef" id="akka.actor.FSM;Reason">Reason</a>
+
+  <span class="comment">/**
+   * Default reason if calling `stop()`.
+   */</span>
+  case object <a href="#akka.actor.FSM.Normal.productElement.x$1" title="akka.actor.FSM.Normal.type" id="akka.actor.FSM.Normal.readResolve">Normal</a> extends <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a>
+
+  <span class="comment">/**
+   * Reason given when someone was calling `system.stop(fsm)` from outside;
+   * also applies to `Stop` supervision directive.
+   */</span>
+  case object <a href="#akka.actor.FSM.Shutdown.productElement.x$1" title="akka.actor.FSM.Shutdown.type" id="akka.actor.FSM.Shutdown.readResolve">Shutdown</a> extends <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a>
+
+  <span class="comment">/**
+   * Signifies that the [[akka.actor.FSM]] is shutting itself down because of
+   * an error, e.g. if the state to transition into does not exist. You can use
+   * this to communicate a more precise cause to the `onTermination` block.
+   */</span>
+  final case class <a title="class Failure extends AnyRef with akka.actor.FSM.Reason with Product with Serializable" id="akka.actor.FSM.Failure.readResolve">Failure</a><span title="Product" class="delimiter">(</span><a title="Any" id="akka.actor.FSM;Failure.cause">cause</a>: <span title="Any">Any</span><span class="delimiter">)</span> extends <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a>
+
+  <span class="comment">/**
+   * This case object is received in case of a state timeout.
+   */</span>
+  case object <a href="#akka.actor.FSM.StateTimeout.productElement.x$1" title="akka.actor.FSM.StateTimeout.type" id="akka.actor.FSM.StateTimeout.readResolve">StateTimeout</a>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  private final case class <a title="class TimeoutMarker extends AnyRef with Product with Serializable" id="akka.actor.FSM.TimeoutMarker.readResolve">TimeoutMarker</a><a href="#akka.actor.FSM.TimeoutMarker.readResolve" title="Product" class="delimiter">(</a><a title="Long" id="akka.actor.FSM;TimeoutMarker.generation">generation</a>: <span title="Long">Long</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="comment">// FIXME: what about the cancellable?</span>
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> final case class <a title="class Timer extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.actor.FSM.Timer.readResolve">Timer</a><span title="Product" class="delimiter">(</span><a title="String" id="akka.actor.FSM;Timer.name">name</a>: <span title="String">String</span>, <a title="Any" id="akka.actor.FSM;Timer.msg">msg</a>: <span title="Any">Any</span>, <a title="Boolean" id="akka.actor.FSM;Timer.repeat">repeat</a>: <span title="Boolean">Boolean</span>, <a title="Int" id="akka.actor.FSM;Timer.generation">generation</a>: <span title="Int">Int</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.actor.ActorContext" id="akka.actor.FSM;Timer.context">context</a>: <a href="ActorCell.scala.html#akka.actor;ActorContext" title="akka.actor.ActorContext">ActorContext</a><span class="delimiter">)</span>
+    extends <a href="Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a> <span class="delimiter">{</span>
+    private var <a title="Option[akka.actor.Cancellable]" id="akka.actor.FSM;Timer.ref_=">ref</a>: <span title="Option[akka.actor.Cancellable]">Option</span><span class="delimiter">[</span>Cancellable<span class="delimiter">]</span> = _
+    private val <a title="akka.actor.Scheduler" id="akka.actor.FSM;Timer.scheduler">scheduler</a> = <a href="#akka.actor.FSM;Timer.context" title="akka.actor.ActorContext">context</a>.<a href="ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a>.<a href="ActorSystem.scala.html#akka.actor;ActorSystem.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>
+    private implicit val <a title="scala.concurrent.ExecutionContextExecutor" id="akka.actor.FSM;Timer.executionContext">executionContext</a> = <a href="#akka.actor.FSM;Timer.context" title="akka.actor.ActorContext">context</a>.<a href="ActorCell.scala.html#akka.actor;ActorContext.dispatcher" title="=&gt; scala.concurrent.ExecutionContextExecutor">dispatcher</a>
+
+    def <a title="(actor: akka.actor.ActorRef, timeout: scala.concurrent.duration.FiniteDuration)Unit" id="akka.actor.FSM;Timer.schedule">schedule</a><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.actor.FSM;Timer.schedule.actor">actor</a>: <a href="ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>, <a title="scala.concurrent.duration.FiniteDuration" id="akka.actor.FSM;Timer.schedule.timeout">timeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+      <a href="#akka.actor.FSM;Timer.ref_=" title="(x$1: Option[akka.actor.Cancellable])Unit">ref</a> = <span title="(x: akka.actor.Cancellable)Some[akka.actor.Cancellable]">Some</span><span class="delimiter">(</span>
+        if <span class="delimiter">(</span><a href="#akka.actor.FSM;Timer.repeat" title="=&gt; Boolean">repeat</a><span class="delimiter">)</span> <a href="#akka.actor.FSM;Timer.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>.<a href="Scheduler.scala.html#akka.actor;Scheduler.schedule(abf8206fc2)" title="(initialDelay: scala.concurrent.duration.FiniteDuration, interval: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">schedule</a><a href="#akka.actor.FSM;Timer.executionContext" title="scala.concurrent.ExecutionContextExecutor" id="akka.actor.FSM;Timer.schedule.x$9" class="delimiter">(</a><a href="#akka.actor.FSM;Timer.schedule.timeout" title="scala.concurrent.duration.FiniteDuration" id="akka.actor.FSM;Timer.schedule.x$4">timeout</a>, <a href="#akka.actor.FSM;Timer.schedule.timeout" title="scala.concurrent.duration.FiniteDuration" id="akka.actor.FSM;Timer.schedule.x$5">timeout</a>, <a href="#akka.actor.FSM;Timer.schedule.actor" title="akka.actor.ActorRef" id="akka.actor.FSM;Timer.schedule.x$6">actor</a>, this<span class="delimiter">)</span>
+        else <a href="#akka.actor.FSM;Timer.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>.<a href="Scheduler.scala.html#akka.actor;Scheduler.scheduleOnce(a2d55b51db)" title="(delay: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">scheduleOnce</a><a href="#akka.actor.FSM;Timer.executionContext" title="scala.concurrent.ExecutionContextExecutor" id="akka.actor.FSM;Timer.schedule.x$14" class="delimiter">(</a><a href="#akka.actor.FSM;Timer.schedule.timeout" title="scala.concurrent.duration.FiniteDuration" id="akka.actor.FSM;Timer.schedule.x$10">timeout</a>, <a href="#akka.actor.FSM;Timer.schedule.actor" title="akka.actor.ActorRef" id="akka.actor.FSM;Timer.schedule.x$11">actor</a>, this<span class="delimiter">)</span><span class="delimiter">)</span>
+
+    def <a title="()Unit" id="akka.actor.FSM;Timer.cancel">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+      if <span class="delimiter">(</span><a href="#akka.actor.FSM;Timer.ref_=" title="=&gt; Option[akka.actor.Cancellable]">ref</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.actor.FSM;Timer.ref_=" title="=&gt; Option[akka.actor.Cancellable]">ref</a>.<span title="=&gt; akka.actor.Cancellable">get</span>.<a href="Scheduler.scala.html#akka.actor;Cancellable.cancel" title="()Boolean">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#akka.actor.FSM;Timer.ref_=" title="(x$1: Option[akka.actor.Cancellable])Unit">ref</a> = <span title="None.type">None</span>
+      <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * This extractor is just convenience for matching a (S, S) pair, including a
+   * reminder what the new state is.
+   */</span>
+  object <a title="akka.actor.FSM.-&gt;.type" id="akka.actor.FSM.->">-&gt;</a> <a href="#akka.actor.FSM.->" title="akka.actor.FSM.-&gt;.type" class="delimiter">{</a>
+    def <a title="[S](in: (S, S))Some[(S, S)]" id="akka.actor.FSM.->.unapply">unapply</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM.->.unapply;S">S</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="(S, S)" id="akka.actor.FSM.->.unapply.in">in</a>: <span title="(S, S)" class="delimiter">(</span>S, S<span class="delimiter">)</span><span class="delimiter">)</span> = <span title="(x: (S, S))Some[(S, S)]">Some</span><span class="delimiter">(</span><a href="#akka.actor.FSM.->.unapply.in" title="(S, S)">in</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Log Entry of the [[akka.actor.LoggingFSM]], can be obtained by calling `getLog`.
+   */</span>
+  final case class <a href="#akka.actor.FSM;LogEntry.productElement.x$1" title="class LogEntry[S, D] extends AnyRef with Product with Serializable" id="akka.actor.FSM.LogEntry.readResolve">LogEntry</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM;LogEntry;S">S</a>, <a title="" id="akka.actor.FSM;LogEntry;D">D</a><span class="delimiter">]</span><a href="#akka.actor.FSM.LogEntry.readResolve" title="Product" class="delimiter">(</a><a title="S" id="akka.actor.FSM;LogEntry.stateName">stateName</a>: <a href="#akka.actor.FSM;LogEntry;S" title="S">S</a>, <a title="D" id="akka.actor.FSM;LogEntry.stateData">stateData</a>: <a href="#akka.actor.FSM;LogEntry;D" title="D">D</a>, <a title="Any" id="akka.actor.FSM;LogEntry.event">event</a>: <span title="Any">Any</span><span class="delimiter">)</span>
+
+  <span class="comment">/** Used by `forMax` to signal &quot;cancel stateTimeout&quot; */</span>
+  private final val <a title="Some[scala.concurrent.duration.FiniteDuration]" id="akka.actor.FSM.SomeMaxFiniteDuration">SomeMaxFiniteDuration</a> = <span title="(x: scala.concurrent.duration.FiniteDuration)Some[scala.concurrent.duration.FiniteDuration]">Some</span><span class="delimiter">(</span>Long.<span title="implicit scala.concurrent.duration.package.DurationLong : (n: Long)concurrent.duration.DurationLong">MaxValue</span>.<span title="=&gt; scala.concurrent.duration.FiniteDuration">nanos</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   * Using a subclass for binary compatibility reasons
+   */</span>
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> class <a title="class SilentState[S, D] extends akka.actor.FSM.State[S,D]" id="akka.actor.FSM;SilentState">SilentState</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM;SilentState;S">S</a>, <a title="" id="akka.actor.FSM;SilentState;D">D</a><span class="delimiter">]</span><a href="#akka.actor.FSM;SilentState" title="akka.actor.FSM.SilentState[S,D]" class="delimiter">(</a><a title="S" id="akka.actor.FSM;SilentState._stateName">_stateName</a>: <a href="#akka.actor.FSM;SilentState;S" title="S">S</a>, <a title="D" id="akka.actor.FSM;SilentState._stateData">_stateData</a>: <a href="#akka.actor.FSM;SilentState;D" title="D">D</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.actor.FSM;SilentState._timeout">_timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span>, <a title="Option[akka.actor.FSM.Reason]" id="akka.actor.FSM;SilentState._stopReason">_stopReason</a>: <span title="Option[akka.actor.FSM.Reason]">Option</span><span class="delimiter">[</span>Reason<span class="delimiter">]</span>, <a title="List[Any]" id="akka.actor.FSM;SilentState._replies">_replies</a>: <span title="List[Any]">List</span><span class="delimiter">[</span>Any<span class="delimiter">]</span><span class="delimiter">)</span>
+    extends <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span><span class="delimiter">(</span><a href="#akka.actor.FSM;SilentState._stateName" title="S">_stateName</a>, <a href="#akka.actor.FSM;SilentState._stateData" title="D">_stateData</a>, <a href="#akka.actor.FSM;SilentState._timeout" title="Option[scala.concurrent.duration.FiniteDuration]">_timeout</a>, <a href="#akka.actor.FSM;SilentState._stopReason" title="Option[akka.actor.FSM.Reason]">_stopReason</a>, <a href="#akka.actor.FSM;SilentState._replies" title="List[Any]">_replies</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="comment">/**
+     * INTERNAL API
+     */</span>
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> override def <a title="=&gt; Boolean" id="akka.actor.FSM;SilentState.notifies">notifies</a>: <span title="Boolean">Boolean</span> = false
+
+    override def <a title="(stateName: S, stateData: D, timeout: Option[scala.concurrent.duration.FiniteDuration], stopReason: Option[akka.actor.FSM.Reason], replies: List[Any])akka.actor.FSM.State[S,D]" id="akka.actor.FSM;SilentState.copy">copy</a><span class="delimiter">(</span><a title="S" id="akka.actor.FSM;SilentState.copy$default$1">stateName</a>: <a href="#akka.actor.FSM;SilentState;S" title="S">S</a> = <a href="#akka.actor.FSM;SilentState.copy$default$1" title="S">stateName</a>, <a title="D" id="akka.actor.FSM;SilentState.copy$default$2">stateData</a>: <a href="#akka.actor.FSM;SilentState;D" title="D">D</a> = <a href="#akka.actor.FSM;SilentState.copy$default$2" title="D">stateData</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.actor.FSM;SilentState.copy$default$3">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span> = <a href="#akka.actor.FSM;SilentState.copy$default$3" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a title="Option[akka.actor.FSM.Reason]" id="akka.actor.FSM;SilentState.copy$default$4">stopReason</a>: <span title="Option[akka.actor.FSM.Reason]">Option</span><span class="delimiter">[</span>Reason<span class="delimiter">]</span> = <a href="#akka.actor.FSM;SilentState.copy$default$4" title="Option[akka.actor.FSM.Reason]">stopReason</a>, <a title="List[Any]" id="akka.actor.FSM;SilentState.copy$default$5">replies</a>: <span title="List[Any]">List</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> = <a href="#akka.actor.FSM;SilentState.copy$default$5" title="List[Any]">replies</a><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      new <a href="#akka.actor.FSM;SilentState" title="akka.actor.FSM.SilentState[S,D]">SilentState</a><span class="delimiter">(</span><a href="#akka.actor.FSM;SilentState.copy$default$1" title="S">stateName</a>, <a href="#akka.actor.FSM;SilentState.copy$default$2" title="D">stateData</a>, <a href="#akka.actor.FSM;SilentState.copy$default$3" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a href="#akka.actor.FSM;SilentState.copy$default$4" title="Option[akka.actor.FSM.Reason]">stopReason</a>, <a href="#akka.actor.FSM;SilentState.copy$default$5" title="List[Any]">replies</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * This captures all of the managed state of the [[akka.actor.FSM]]: the state
+   * name, the state data, possibly custom timeout, stop reason and replies
+   * accumulated while processing the last message.
+   */</span>
+  case class <a href="#akka.actor.FSM;State.productElement.x$1" title="class State[S, D] extends AnyRef with Product with Serializable" id="akka.actor.FSM.State.readResolve">State</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM.State.apply$default$5;S">S</a>, <a title="" id="akka.actor.FSM.State.apply$default$5;D">D</a><span class="delimiter">]</span><a href="#akka.actor.FSM.State.readResolve" title="Product" class="delimiter">(</a><a title="S" id="akka.actor.FSM;State.stateName">stateName</a>: <a href="#akka.actor.FSM.State.apply$default$5;S" title="S">S</a>, <a title="D" id="akka.actor.FSM;State.stateData">stateData</a>: <a href="#akka.actor.FSM.State.apply$default$5;D" title="D">D</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.actor.FSM.State.apply$default$3">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span> = <span title="None.type">None</span>, <a title="Option[akka.actor.FSM.Reason]" id="akka.actor.FSM.State.apply$default$4">stopReason</a>: <span title="Option[akka.actor.FSM.Reason]">Option</span><span class="delimiter">[</span>Reason<span class="delimiter">]</span> = <span title="None.type">None</span>, <a title="List[Any]" id="akka.actor.FSM.State.apply$default$5">replies</a>: <span title="List[Any]">List</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> = <span title="scala.collection.immutable.Nil.type">Nil</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="comment">/**
+     * INTERNAL API
+     */</span>
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="=&gt; Boolean" id="akka.actor.FSM;State.notifies">notifies</a>: <span title="Boolean">Boolean</span> = true
+
+    <span class="comment">// defined here to be able to override it in SilentState</span>
+    def <a title="(stateName: S, stateData: D, timeout: Option[scala.concurrent.duration.FiniteDuration], stopReason: Option[akka.actor.FSM.Reason], replies: List[Any])akka.actor.FSM.State[S,D]" id="akka.actor.FSM;State.copy">copy</a><span class="delimiter">(</span><a title="S" id="akka.actor.FSM;State.copy$default$1">stateName</a>: <a href="#akka.actor.FSM.State.apply$default$5;S" title="S">S</a> = <a href="#akka.actor.FSM;State.copy$default$1" title="S">stateName</a>, <a title="D" id="akka.actor.FSM;State.copy$default$2">stateData</a>: <a href="#akka.actor.FSM.State.apply$default$5;D" title="D">D</a> = <a href="#akka.actor.FSM;State.copy$default$2" title="D">stateData</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.actor.FSM;State.copy$default$3">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span> = <a href="#akka.actor.FSM;State.copy$default$3" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a title="Option[akka.actor.FSM.Reason]" id="akka.actor.FSM;State.copy$default$4">stopReason</a>: <span title="Option[akka.actor.FSM.Reason]">Option</span><span class="delimiter">[</span>Reason<span class="delimiter">]</span> = <a href="#akka.actor.FSM;State.copy$default$4" title="Option[akka.actor.FSM.Reason]">stopReason</a>, <a title="List[Any]" id="akka.actor.FSM;State.copy$default$5">replies</a>: <span title="List[Any]">List</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> = <a href="#akka.actor.FSM;State.copy$default$5" title="List[Any]">replies</a><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      new <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">(</span><a href="#akka.actor.FSM;State.copy$default$1" title="S">stateName</a>, <a href="#akka.actor.FSM;State.copy$default$2" title="D">stateData</a>, <a href="#akka.actor.FSM;State.copy$default$3" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a href="#akka.actor.FSM;State.copy$default$4" title="Option[akka.actor.FSM.Reason]">stopReason</a>, <a href="#akka.actor.FSM;State.copy$default$5" title="List[Any]">replies</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Modify state transition descriptor to include a state timeout for the
+     * next state. This timeout overrides any default timeout set for the next
+     * state.
+     *
+     * Use Duration.Inf to deactivate an existing timeout.
+     */</span>
+    def <a title="(timeout: scala.concurrent.duration.Duration)akka.actor.FSM.State[S,D]" id="akka.actor.FSM;State.forMax">forMax</a><span class="delimiter">(</span><a title="scala.concurrent.duration.Duration" id="akka.actor.FSM;State.forMax.timeout">timeout</a>: <span title="scala.concurrent.duration.Duration">Duration</span><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> = <a href="#akka.actor.FSM;State.forMax.timeout" title="scala.concurrent.duration.Duration">timeout</a> match <span class="delimiter">{</span>
+      case <a title="scala.concurrent.duration.FiniteDuration" id="akka.actor.FSM;State.forMax.f">f</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span> ⇒ <a href="#akka.actor.FSM;State.copy$default$1" title="S" id="akka.actor.FSM;State.forMax.x$19">copy</a><span class="delimiter">(</span>timeout = <span title="(x: scala.concurrent.duration.FiniteDuration)Some[scala.concurrent.duration.FiniteDuration]">Some</span><a title="Some[scala.concurrent.duration.FiniteDuration] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.actor.FSM;State.forMax.x$15" class="delimiter">(</a><a href="#akka.actor.FSM;State.forMax.f" title="scala.concurrent.duration.FiniteDuration">f</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      case <span title="scala.concurrent.duration.Duration.type">Duration</span>.<span title="=&gt; scala.concurrent.duration.Duration.Infinite">Inf</span>      ⇒ <a href="#akka.actor.FSM;State.copy$default$1" title="S" id="akka.actor.FSM;State.forMax.x$24">copy</a><span class="delimiter">(</span>timeout = <a href="#akka.actor.FSM.SomeMaxFiniteDuration" title="Some[scala.concurrent.duration.FiniteDuration] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.actor.FSM;State.forMax.x$20">SomeMaxFiniteDuration</a><span class="delimiter">)</span> <span class="comment">// we map the Infinite duration to a special marker,</span>
+      case _                 ⇒ <a href="#akka.actor.FSM;State.copy$default$1" title="S" id="akka.actor.FSM;State.forMax.x$29">copy</a><span class="delimiter">(</span>timeout = <a title="None.type" id="akka.actor.FSM;State.forMax.x$25">None</a><span class="delimiter">)</span> <span class="comment">// that means &quot;cancel stateTimeout&quot;. This marker is needed</span>
+    <span class="delimiter">}</span> <span class="comment">// so we do not have to break source/binary compat.</span>
+    <span class="comment">// TODO: Can be removed once we can break State#timeout signature to `Option[Duration]`</span>
+
+    <span class="comment">/**
+     * Send reply to sender of the current message, if available.
+     *
+     * @return this state transition descriptor
+     */</span>
+    def <a title="(replyValue: Any)akka.actor.FSM.State[S,D]" id="akka.actor.FSM;State.replying">replying</a><span class="delimiter">(</span><a title="Any" id="akka.actor.FSM;State.replying.replyValue">replyValue</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.actor.FSM;State.copy$default$1" title="S" id="akka.actor.FSM;State.replying.x$34">copy</a><span class="delimiter">(</span>replies = <a href="#akka.actor.FSM;State.replying.replyValue" title="Any">replyValue</a> <a href="#akka.actor.FSM;State.replying.x$30.x$1" title="List[Any] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.actor.FSM;State.replying.x$30">::</a> <a href="#akka.actor.FSM.State.apply$default$5" title="=&gt; List[Any]">replies</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Modify state transition descriptor with new state data. The data will be
+     * set when transitioning to the new state.
+     */</span>
+    def <a title="(nextStateData: D)akka.actor.FSM.State[S,D]" id="akka.actor.FSM;State.using">using</a><span class="delimiter">(</span>@deprecatedName<span class="delimiter">(</span><span class="symbol">'nextStateDate</span><span class="delimiter">)</span> <a title="D" id="akka.actor.FSM;State.using.nextStateData">nextStateData</a>: <a href="#akka.actor.FSM.State.apply$default$5;D" title="D">D</a><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.actor.FSM;State.copy$default$1" title="S" id="akka.actor.FSM;State.using.x$39">copy</a><span class="delimiter">(</span>stateData = <a href="#akka.actor.FSM;State.using.nextStateData" title="D" id="akka.actor.FSM;State.using.x$35">nextStateData</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * INTERNAL API.
+     */</span>
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(reason: akka.actor.FSM.Reason)akka.actor.FSM.State[S,D]" id="akka.actor.FSM;State.withStopReason">withStopReason</a><span class="delimiter">(</span><a title="akka.actor.FSM.Reason" id="akka.actor.FSM;State.withStopReason.reason">reason</a>: <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.actor.FSM;State.copy$default$1" title="S" id="akka.actor.FSM;State.withStopReason.x$44">copy</a><span class="delimiter">(</span>stopReason = <span title="(x: akka.actor.FSM.Reason)Some[akka.actor.FSM.Reason]">Some</span><a title="Some[akka.actor.FSM.Reason] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.actor.FSM;State.withStopReason.x$40" class="delimiter">(</a><a href="#akka.actor.FSM;State.withStopReason.reason" title="akka.actor.FSM.Reason">reason</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * INTERNAL API.
+     */</span>
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(notifies: Boolean)akka.actor.FSM.State[S,D]" id="akka.actor.FSM;State.withNotification">withNotification</a><span class="delimiter">(</span><a title="Boolean" id="akka.actor.FSM;State.withNotification.notifies">notifies</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#akka.actor.FSM;State.withNotification.notifies" title="Boolean">notifies</a><span class="delimiter">)</span>
+        <a href="#akka.actor.FSM.State.readResolve" title="(stateName: S, stateData: D, timeout: Option[scala.concurrent.duration.FiniteDuration], stopReason: Option[akka.actor.FSM.Reason], replies: List[Any])akka.actor.FSM.State[S,D]">State</a><span class="delimiter">(</span><a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a>, <a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a>, <a href="#akka.actor.FSM.State.apply$default$3" title="=&gt; Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a href="#akka.actor.FSM.State.apply$default$4" title="=&gt; Option[akka.actor.FSM.Reason]">stopReason</a>, <a href="#akka.actor.FSM.State.apply$default$5" title="=&gt; List[Any]">replies</a><span class="delimiter">)</span>
+      else
+        new <a href="#akka.actor.FSM;SilentState" title="akka.actor.FSM.SilentState[S,D]">SilentState</a><span class="delimiter">(</span><a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a>, <a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a>, <a href="#akka.actor.FSM.State.apply$default$3" title="=&gt; Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a href="#akka.actor.FSM.State.apply$default$4" title="=&gt; Option[akka.actor.FSM.Reason]">stopReason</a>, <a href="#akka.actor.FSM.State.apply$default$5" title="=&gt; List[Any]">replies</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * All messages sent to the [[akka.actor.FSM]] will be wrapped inside an
+   * `Event`, which allows pattern matching to extract both state and data.
+   */</span>
+  final case class <a href="#akka.actor.FSM;Event.productElement.x$1" title="class Event[D] extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.actor.FSM.Event.readResolve">Event</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM;Event;D">D</a><span class="delimiter">]</span><span title="Product" class="delimiter">(</span><a title="Any" id="akka.actor.FSM;Event.event">event</a>: <span title="Any">Any</span>, <a title="D" id="akka.actor.FSM;Event.stateData">stateData</a>: <a href="#akka.actor.FSM;Event;D" title="D">D</a><span class="delimiter">)</span> extends <a href="Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a>
+
+  <span class="comment">/**
+   * Case class representing the state of the [[akka.actor.FSM]] within the
+   * `onTermination` block.
+   */</span>
+  final case class <a href="#akka.actor.FSM;StopEvent.productElement.x$1" title="class StopEvent[S, D] extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.actor.FSM.StopEvent.readResolve">StopEvent</a><span class="delimiter">[</span><a title="" id="akka.actor.FSM;StopEvent;S">S</a>, <a title="" id="akka.actor.FSM;StopEvent;D">D</a><span class="delimiter">]</span><span title="Product" class="delimiter">(</span><a title="akka.actor.FSM.Reason" id="akka.actor.FSM;StopEvent.reason">reason</a>: <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a>, <a title="S" id="akka.actor.FSM;StopEvent.currentState">currentState</a>: <a href="#akka.actor.FSM;StopEvent;S" title="S">S</a>, <a title="D" id="akka.actor.FSM;StopEvent.stateData">stateData</a>: <a href="#akka.actor.FSM;StopEvent;D" title="D">D</a><span class="delimiter">)</span> extends <a href="Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Finite State Machine actor trait. Use as follows:
+ *
+ * &lt;pre&gt;
+ *     trait State
+ *     case class One extends State
+ *     case class Two extends State
+ *
+ *     case class Data(i : Int)
+ *   }
+ *
+ *   class A extends Actor with FSM[A.State, A.Data] {
+ *     import A._
+ *
+ *     startWith(One, Data(42))
+ *     when(One) {
+ *         case Event(SomeMsg, Data(x)) =&gt; ...
+ *         case Ev(SomeMsg) =&gt; ... // convenience when data not needed
+ *     }
+ *     when(Two, stateTimeout = 5 seconds) { ... }
+ *     initialize()
+ *   }
+ * &lt;/pre&gt;
+ *
+ * Within the partial function the following values are returned for effecting
+ * state transitions:
+ *
+ *  - &lt;code&gt;stay&lt;/code&gt; for staying in the same state
+ *  - &lt;code&gt;stay using Data(...)&lt;/code&gt; for staying in the same state, but with
+ *    different data
+ *  - &lt;code&gt;stay forMax 5.millis&lt;/code&gt; for staying with a state timeout; can be
+ *    combined with &lt;code&gt;using&lt;/code&gt;
+ *  - &lt;code&gt;goto(...)&lt;/code&gt; for changing into a different state; also supports
+ *    &lt;code&gt;using&lt;/code&gt; and &lt;code&gt;forMax&lt;/code&gt;
+ *  - &lt;code&gt;stop&lt;/code&gt; for terminating this FSM actor
+ *
+ * Each of the above also supports the method &lt;code&gt;replying(AnyRef)&lt;/code&gt; for
+ * sending a reply before changing state.
+ *
+ * While changing state, custom handlers may be invoked which are registered
+ * using &lt;code&gt;onTransition&lt;/code&gt;. This is meant to enable concentrating
+ * different concerns in different places; you may choose to use
+ * &lt;code&gt;when&lt;/code&gt; for describing the properties of a state, including of
+ * course initiating transitions, but you can describe the transitions using
+ * &lt;code&gt;onTransition&lt;/code&gt; to avoid having to duplicate that code among
+ * multiple paths which lead to a transition:
+ *
+ * &lt;pre&gt;
+ * onTransition {
+ *   case Active -&amp;gt; _ =&amp;gt; cancelTimer(&quot;activeTimer&quot;)
+ * }
+ * &lt;/pre&gt;
+ *
+ * Multiple such blocks are supported and all of them will be called, not only
+ * the first matching one.
+ *
+ * Another feature is that other actors may subscribe for transition events by
+ * sending a &lt;code&gt;SubscribeTransitionCallback&lt;/code&gt; message to this actor.
+ * Stopping a listener without unregistering will not remove the listener from the
+ * subscription list; use &lt;code&gt;UnsubscribeTransitionCallback&lt;/code&gt; before stopping
+ * the listener.
+ *
+ * State timeouts set an upper bound to the time which may pass before another
+ * message is received in the current state. If no external message is
+ * available, then upon expiry of the timeout a StateTimeout message is sent.
+ * Note that this message will only be received in the state for which the
+ * timeout was set and that any message received will cancel the timeout
+ * (possibly to be started again by the next transition).
+ *
+ * Another feature is the ability to install and cancel single-shot as well as
+ * repeated timers which arrange for the sending of a user-specified message:
+ *
+ * &lt;pre&gt;
+ *   setTimer(&quot;tock&quot;, TockMsg, 1 second, true) // repeating
+ *   setTimer(&quot;lifetime&quot;, TerminateMsg, 1 hour, false) // single-shot
+ *   cancelTimer(&quot;tock&quot;)
+ *   isTimerActive(&quot;tock&quot;)
+ * &lt;/pre&gt;
+ */</span>
+trait <a title="trait FSM[S, D] extends AnyRef with akka.actor.Actor with akka.routing.Listeners with akka.actor.ActorLogging" id="akka.actor;FSM">FSM</a><span class="delimiter">[</span><a title="" id="akka.actor;FSM;S">S</a>, <a title="" id="akka.actor;FSM;D">D</a><span class="delimiter">]</span> extends <a href="Actor.scala.html#akka.actor;Actor" title="akka.actor.Actor">Actor</a> with <a href="../routing/Listeners.scala.html#akka.routing;Listeners" title="akka.routing.Listeners">Listeners</a> with <a href="Actor.scala.html#akka.actor;ActorLogging" title="akka.actor.ActorLogging">ActorLogging</a> <span class="delimiter">{</span>
+
+  import <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>._
+
+  type <a title="akka.actor.FSM.State[S,D]" id="akka.actor;FSM;State">State</a> = FSM.<a href="#akka.actor.FSM.State.readResolve" title="akka.actor.FSM.State[S,D]">State</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span>
+  type <a title="akka.actor.FSM.Event[D]" id="akka.actor;FSM;Event">Event</a> = FSM.<a href="#akka.actor.FSM.Event.readResolve" title="akka.actor.FSM.Event[D]">Event</a><span class="delimiter">[</span>D<span class="delimiter">]</span>
+  type <a title="akka.actor.FSM.StopEvent[S,D]" id="akka.actor;FSM;StopEvent">StopEvent</a> = FSM.<a href="#akka.actor.FSM.StopEvent.readResolve" title="akka.actor.FSM.StopEvent[S,D]">StopEvent</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span>
+  type <a title="PartialFunction[FSM.this.Event,FSM.this.State]" id="akka.actor;FSM;StateFunction">StateFunction</a> = scala.<span title="PartialFunction[FSM.this.Event,FSM.this.State]">PartialFunction</span><span class="delimiter">[</span>Event, State<span class="delimiter">]</span>
+  type <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.actor;FSM;Timeout">Timeout</a> = <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span>
+  type <a title="PartialFunction[(S, S),Unit]" id="akka.actor;FSM;TransitionHandler">TransitionHandler</a> = <span title="PartialFunction[(S, S),Unit]">PartialFunction</span><span class="delimiter">[</span><span class="delimiter">(</span>S, S<span class="delimiter">)</span>, Unit<span class="delimiter">]</span>
+
+  <span class="comment">/*
+   * “import” so that these are visible without an import
+   */</span>
+  val <a title="akka.actor.FSM.Event.type" id="akka.actor;FSM.Event">Event</a>: FSM.Event.type = <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>.<a href="#akka.actor.FSM.Event.readResolve" title="akka.actor.FSM.Event.type">Event</a>
+  val <a title="akka.actor.FSM.StopEvent.type" id="akka.actor;FSM.StopEvent">StopEvent</a>: FSM.StopEvent.type = <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>.<a href="#akka.actor.FSM.StopEvent.readResolve" title="akka.actor.FSM.StopEvent.type">StopEvent</a>
+
+  <span class="comment">/**
+   * This extractor is just convenience for matching a (S, S) pair, including a
+   * reminder what the new state is.
+   */</span>
+  val <a title="akka.actor.FSM.-&gt;.type" id="akka.actor;FSM.->">-&gt;</a> = <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>.<a href="#akka.actor.FSM.->" title="akka.actor.FSM.-&gt;.type">-&gt;</a>
+
+  <span class="comment">/**
+   * This case object is received in case of a state timeout.
+   */</span>
+  val <a title="akka.actor.FSM.StateTimeout.type" id="akka.actor;FSM.StateTimeout">StateTimeout</a> = <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>.<a href="#akka.actor.FSM.StateTimeout.readResolve" title="akka.actor.FSM.StateTimeout.type">StateTimeout</a>
+
+  <span class="comment">/**
+   * ****************************************
+   *                 DSL
+   * ****************************************
+   */</span>
+
+  <span class="comment">/**
+   * Insert a new StateFunction at the end of the processing chain for the
+   * given state. If the stateTimeout parameter is set, entering this state
+   * without a differing explicit timeout setting will trigger a StateTimeout
+   * event; the same is true when using #stay.
+   *
+   * @param stateName designator for the state
+   * @param stateTimeout default state timeout for this state
+   * @param stateFunction partial function describing response to input
+   */</span>
+  final def <a title="(stateName: S, stateTimeout: scala.concurrent.duration.FiniteDuration)(stateFunction: FSM.this.StateFunction)Unit" id="akka.actor;FSM.when">when</a><span class="delimiter">(</span><a title="S" id="akka.actor;FSM.when.stateName">stateName</a>: <a href="#akka.actor;FSM;S" title="S">S</a>, <a title="scala.concurrent.duration.FiniteDuration" id="akka.actor;FSM.when$default$2">stateTimeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span> = null<span class="delimiter">)</span><span class="delimiter">(</span><a title="FSM.this.StateFunction" id="akka.actor;FSM.when.stateFunction">stateFunction</a>: <span title="FSM.this.StateFunction">StateFunction</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.actor;FSM.register" title="(name: S, function: FSM.this.StateFunction, timeout: FSM.this.Timeout)Unit">register</a><span class="delimiter">(</span><a href="#akka.actor;FSM.when.stateName" title="S">stateName</a>, <a href="#akka.actor;FSM.when.stateFunction" title="FSM.this.StateFunction">stateFunction</a>, <span title="(x: scala.concurrent.duration.FiniteDuration)Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">(</span><a href="#akka.actor;FSM.when$default$2" title="scala.concurrent.duration.FiniteDuration">stateTimeout</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Set initial state. Call this method from the constructor before the [[#initialize]] method.
+   * If different state is needed after a restart this method, followed by [[#initialize]], can
+   * be used in the actor life cycle hooks [[akka.actor.Actor#preStart]] and [[akka.actor.Actor#postRestart]].
+   *
+   * @param stateName initial state designator
+   * @param stateData initial state data
+   * @param timeout state timeout for the initial state, overriding the default timeout for that state
+   */</span>
+  final def <a title="(stateName: S, stateData: D, timeout: FSM.this.Timeout)Unit" id="akka.actor;FSM.startWith">startWith</a><span class="delimiter">(</span><a title="S" id="akka.actor;FSM.startWith.stateName">stateName</a>: <a href="#akka.actor;FSM;S" title="S">S</a>, <a title="D" id="akka.actor;FSM.startWith.stateData">stateData</a>: <a href="#akka.actor;FSM;D" title="D">D</a>, <a title="FSM.this.Timeout" id="akka.actor;FSM.startWith$default$3">timeout</a>: <span title="FSM.this.Timeout">Timeout</span> = <span title="None.type">None</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.actor;FSM.currentState_=" title="(x$1: FSM.this.State)Unit">currentState</a> = <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>.<a href="#akka.actor.FSM.State.readResolve" title="(stateName: S, stateData: D, timeout: Option[scala.concurrent.duration.FiniteDuration], stopReason: Option[akka.actor.FSM.Reason], replies: List[Any])akka.actor.FSM.State[S,D]">State</a><span class="delimiter">(</span><a href="#akka.actor;FSM.startWith.stateName" title="S">stateName</a>, <a href="#akka.actor;FSM.startWith.stateData" title="D">stateData</a>, <a href="#akka.actor;FSM.startWith$default$3" title="FSM.this.Timeout">timeout</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Produce transition to other state.
+   * Return this from a state function in order to effect the transition.
+   *
+   * This method always triggers transition events, even for `A -&gt; A` transitions.
+   * If you want to stay in the same state without triggering an state transition event use [[#stay]] instead.
+   *
+   * @param nextStateName state designator for the next state
+   * @return state transition descriptor
+   */</span>
+  final def <a title="(nextStateName: S)FSM.this.State" id="akka.actor;FSM.goto">goto</a><span class="delimiter">(</span><a title="S" id="akka.actor;FSM.goto.nextStateName">nextStateName</a>: <a href="#akka.actor;FSM;S" title="S">S</a><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a> = <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>.<a href="#akka.actor.FSM.State.readResolve" title="(stateName: S, stateData: D, timeout: Option[scala.concurrent.duration.FiniteDuration], stopReason: Option[akka.actor.FSM.Reason], replies: List[Any])akka.actor.FSM.State[S,D]">State</a><span class="delimiter">(</span><a href="#akka.actor;FSM.goto.nextStateName" title="S">nextStateName</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Produce &quot;empty&quot; transition descriptor.
+   * Return this from a state function when no state change is to be effected.
+   *
+   * No transition event will be triggered by [[#stay]].
+   * If you want to trigger an event like `S -&amp;gt; S` for `onTransition` to handle use `goto` instead.
+   *
+   * @return descriptor for staying in current state
+   */</span>
+  final def <a title="()FSM.this.State" id="akka.actor;FSM.stay">stay</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a> = <a href="#akka.actor;FSM.goto" title="(nextStateName: S)FSM.this.State">goto</a><span class="delimiter">(</span><a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span>.<a href="#akka.actor.FSM;State.withNotification" title="(notifies: Boolean)akka.actor.FSM.State[S,D]">withNotification</a><span class="delimiter">(</span>false<span class="delimiter">)</span> <span class="comment">// cannot directly use currentState because of the timeout field</span>
+
+  <span class="comment">/**
+   * Produce change descriptor to stop this FSM actor with reason &quot;Normal&quot;.
+   */</span>
+  final def <a title="()FSM.this.State" id="akka.actor;FSM.stop(65b4a2ce7c)">stop</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a> = <a href="#akka.actor;FSM.stop(56d0504ea6)" title="(reason: akka.actor.FSM.Reason)FSM.this.State">stop</a><span class="delimiter">(</span><a href="#akka.actor.FSM.Normal.readResolve" title="akka.actor.FSM.Normal.type">Normal</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Produce change descriptor to stop this FSM actor including specified reason.
+   */</span>
+  final def <a title="(reason: akka.actor.FSM.Reason)FSM.this.State" id="akka.actor;FSM.stop(56d0504ea6)">stop</a><span class="delimiter">(</span><a title="akka.actor.FSM.Reason" id="akka.actor;FSM.stop(56d0504ea6).reason">reason</a>: <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a> = <a href="#akka.actor;FSM.stop(0e3dcf2dd4)" title="(reason: akka.actor.FSM.Reason, stateData: D)FSM.this.State">stop</a><span class="delimiter">(</span><a href="#akka.actor;FSM.stop(56d0504ea6).reason" title="akka.actor.FSM.Reason">reason</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Produce change descriptor to stop this FSM actor including specified reason.
+   */</span>
+  final def <a title="(reason: akka.actor.FSM.Reason, stateData: D)FSM.this.State" id="akka.actor;FSM.stop(0e3dcf2dd4)">stop</a><span class="delimiter">(</span><a title="akka.actor.FSM.Reason" id="akka.actor;FSM.stop(0e3dcf2dd4).reason">reason</a>: <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a>, <a title="D" id="akka.actor;FSM.stop(0e3dcf2dd4).stateData">stateData</a>: <a href="#akka.actor;FSM;D" title="D">D</a><span class="delimiter">)</span>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a> = <a href="#akka.actor;FSM.stay" title="()FSM.this.State">stay</a> <a href="#akka.actor.FSM;State.using" title="(nextStateData: D)akka.actor.FSM.State[S,D]">using</a> <a href="#akka.actor;FSM.stop(0e3dcf2dd4).stateData" title="D">stateData</a> <a href="#akka.actor.FSM;State.withStopReason" title="(reason: akka.actor.FSM.Reason)akka.actor.FSM.State[S,D]">withStopReason</a> <span class="delimiter">(</span><a href="#akka.actor;FSM.stop(0e3dcf2dd4).reason" title="akka.actor.FSM.Reason">reason</a><span class="delimiter">)</span>
+
+  final class <a title="class TransformHelper extends AnyRef" id="akka.actor;FSM;TransformHelper">TransformHelper</a><a href="#akka.actor;FSM;TransformHelper" title="FSM.this.TransformHelper" class="delimiter">(</a><a title="FSM.this.StateFunction" id="akka.actor;FSM;TransformHelper.func">func</a>: <span title="FSM.this.StateFunction">StateFunction</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    def <a title="(andThen: PartialFunction[FSM.this.State,FSM.this.State])FSM.this.StateFunction" id="akka.actor;FSM;TransformHelper.using">using</a><span class="delimiter">(</span><a title="PartialFunction[FSM.this.State,FSM.this.State]" id="akka.actor;FSM;TransformHelper.using.andThen">andThen</a>: <span title="PartialFunction[FSM.this.State,FSM.this.State]">PartialFunction</span><span class="delimiter">[</span>State, State<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="FSM.this.StateFunction">StateFunction</span> =
+      <a href="#akka.actor;FSM;TransformHelper.func" title="FSM.this.StateFunction">func</a> <span title="(k: FSM.this.State =&gt; FSM.this.State)PartialFunction[FSM.this.Event,FSM.this.State]">andThen</span> <span class="delimiter">(</span><a href="#akka.actor;FSM;TransformHelper.using.andThen" title="PartialFunction[FSM.this.State,FSM.this.State]">andThen</a> <span title="(that: PartialFunction[FSM.this.State,FSM.this.State])PartialFunction[FSM.this.State,FSM.this.State]">orElse</span> <a title="&lt;$anon: FSM.this.State =&gt; FSM.this.State&gt; extends scala.runtime.AbstractPartialFunction[FSM.this.State,FSM.this.State] with Serializable" id="akka.actor;FSM;TransformHelper.using;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a> case <a title="FSM.this.State" id="akka.actor;FSM;TransformHelper.using;$anonfun.isDefinedAt.x">x</a> ⇒ <a href="#akka.actor;FSM;TransformHelper.using;$anonfun.isDefinedAt.x" title="FSM.this.State">x</a> <span class="delimiter">}</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  final def <a title="(func: FSM.this.StateFunction)FSM.this.TransformHelper" id="akka.actor;FSM.transform">transform</a><span class="delimiter">(</span><a title="FSM.this.StateFunction" id="akka.actor;FSM.transform.func">func</a>: <span title="FSM.this.StateFunction">StateFunction</span><span class="delimiter">)</span>: <a href="#akka.actor;FSM;TransformHelper" title="FSM.this.TransformHelper">TransformHelper</a> = new <a href="#akka.actor;FSM;TransformHelper" title="FSM.this.TransformHelper">TransformHelper</a><span class="delimiter">(</span><a href="#akka.actor;FSM.transform.func" title="FSM.this.StateFunction">func</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Schedule named timer to deliver message after given delay, possibly repeating.
+   * Any existing timer with the same name will automatically be canceled before
+   * adding the new timer.
+   * @param name identifier to be used with cancelTimer()
+   * @param msg message to be delivered
+   * @param timeout delay of first message delivery and between subsequent messages
+   * @param repeat send once if false, scheduleAtFixedRate if true
+   */</span>
+  final def <a title="(name: String, msg: Any, timeout: scala.concurrent.duration.FiniteDuration, repeat: Boolean)Unit" id="akka.actor;FSM.setTimer">setTimer</a><span class="delimiter">(</span><a title="String" id="akka.actor;FSM.setTimer.name">name</a>: <span title="String">String</span>, <a title="Any" id="akka.actor;FSM.setTimer.msg">msg</a>: <span title="Any">Any</span>, <a title="scala.concurrent.duration.FiniteDuration" id="akka.actor;FSM.setTimer.timeout">timeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span>, <a title="Boolean" id="akka.actor;FSM.setTimer$default$4">repeat</a>: <span title="Boolean">Boolean</span> = false<span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;FSM.debugEvent" title="=&gt; Boolean">debugEvent</a><span class="delimiter">)</span>
+      <a href="Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.debug(cc2e600322)" title="(message: String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;setting &quot;)" class="string">&quot;setting &quot;</span> <span title="(x$1: Any)String">+</span> <span class="delimiter">(</span>if <span class="delimiter">(</span><a href="#akka.actor;FSM.setTimer$default$4" title="Boolean">repeat</a><span class="delimiter">)</span> <span title="String(&quot;repeating &quot;)" class="string">&quot;repeating &quot;</span> else <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span><span class="delimiter">)</span> <span title="(x$1: Any)String">+</span> <span title="String(&quot;timer \'&quot;)" class="string">&quot;timer '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;FSM.setTimer.name" title="String">name</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'/&quot;)" class="string">&quot;'/&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;FSM.setTimer.timeout" title="scala.concurrent.duration.FiniteDuration">timeout</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;: &quot;)" class="string">&quot;: &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;FSM.setTimer.msg" title="Any">msg</a><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a> <span title="(key: String)Boolean">contains</span> <a href="#akka.actor;FSM.setTimer.name" title="String">name</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.actor;FSM.timers" title="(key: String)akka.actor.FSM.Timer">timers</a><span class="delimiter">(</span><a href="#akka.actor;FSM.setTimer.name" title="String">name</a><span class="delimiter">)</span>.<a href="#akka.actor.FSM;Timer.cancel" title="()Unit">cancel</a>
+    <span class="delimiter">}</span>
+    val <a title="akka.actor.FSM.Timer" id="akka.actor;FSM.setTimer.timer">timer</a> = <a href="#akka.actor.FSM.Timer.readResolve" title="(name: String, msg: Any, repeat: Boolean, generation: Int)(context: akka.actor.ActorContext)akka.actor.FSM.Timer">Timer</a><span class="delimiter">(</span><a href="#akka.actor;FSM.setTimer.name" title="String">name</a>, <a href="#akka.actor;FSM.setTimer.msg" title="Any">msg</a>, <a href="#akka.actor;FSM.setTimer$default$4" title="Boolean">repeat</a>, <a href="#akka.actor;FSM.timerGen" title="=&gt; Iterator[Int]">timerGen</a>.<span title="()Int">next</span><span class="delimiter">)</span><span class="delimiter">(</span><a href="Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a><span class="delimiter">)</span>
+    <a href="#akka.actor;FSM.setTimer.timer" title="akka.actor.FSM.Timer">timer</a>.<a href="#akka.actor.FSM;Timer.schedule" title="(actor: akka.actor.ActorRef, timeout: scala.concurrent.duration.FiniteDuration)Unit">schedule</a><span class="delimiter">(</span><a href="Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.actor;FSM.setTimer.timeout" title="scala.concurrent.duration.FiniteDuration">timeout</a><span class="delimiter">)</span>
+    <a href="#akka.actor;FSM.timers" title="(key: String, value: akka.actor.FSM.Timer)Unit">timers</a><span class="delimiter">(</span><a href="#akka.actor;FSM.setTimer.name" title="String">name</a><span class="delimiter">)</span> = <a href="#akka.actor;FSM.setTimer.timer" title="akka.actor.FSM.Timer">timer</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Cancel named timer, ensuring that the message is not subsequently delivered (no race).
+   * @param name of the timer to cancel
+   */</span>
+  final def <a title="(name: String)Unit" id="akka.actor;FSM.cancelTimer">cancelTimer</a><span class="delimiter">(</span><a title="String" id="akka.actor;FSM.cancelTimer.name">name</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;FSM.debugEvent" title="=&gt; Boolean">debugEvent</a><span class="delimiter">)</span>
+      <a href="Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.debug(cc2e600322)" title="(message: String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;canceling timer \'&quot;)" class="string">&quot;canceling timer '&quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;FSM.cancelTimer.name" title="String">name</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot;\'&quot;)" class="string">&quot;'&quot;</span><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a> <span title="(key: String)Boolean">contains</span> <a href="#akka.actor;FSM.cancelTimer.name" title="String">name</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.actor;FSM.timers" title="(key: String)akka.actor.FSM.Timer">timers</a><span class="delimiter">(</span><a href="#akka.actor;FSM.cancelTimer.name" title="String">name</a><span class="delimiter">)</span>.<a href="#akka.actor.FSM;Timer.cancel" title="()Unit">cancel</a>
+      <a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a> <span title="(key: String)FSM.this.timers.type">-=</span> <a href="#akka.actor;FSM.cancelTimer.name" title="String">name</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Inquire whether the named timer is still active. Returns true unless the
+   * timer does not exist, has previously been canceled or if it was a
+   * single-shot timer whose message was already received.
+   */</span>
+  final def <a title="(name: String)Boolean" id="akka.actor;FSM.isTimerActive">isTimerActive</a><span class="delimiter">(</span><a title="String" id="akka.actor;FSM.isTimerActive.name">name</a>: <span title="String">String</span><span class="delimiter">)</span>: <span title="Boolean">Boolean</span> = <a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a> <span title="(key: String)Boolean">contains</span> <a href="#akka.actor;FSM.isTimerActive.name" title="String">name</a>
+
+  <span class="comment">/**
+   * Set state timeout explicitly. This method can safely be used from within a
+   * state handler.
+   */</span>
+  final def <a title="(state: S, timeout: FSM.this.Timeout)Unit" id="akka.actor;FSM.setStateTimeout">setStateTimeout</a><span class="delimiter">(</span><a title="S" id="akka.actor;FSM.setStateTimeout.state">state</a>: <a href="#akka.actor;FSM;S" title="S">S</a>, <a title="FSM.this.Timeout" id="akka.actor;FSM.setStateTimeout.timeout">timeout</a>: <span title="FSM.this.Timeout">Timeout</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.actor;FSM.stateTimeouts" title="(key: S, value: Option[scala.concurrent.duration.FiniteDuration])Unit">stateTimeouts</a><span class="delimiter">(</span><a href="#akka.actor;FSM.setStateTimeout.state" title="S">state</a><span class="delimiter">)</span> = <a href="#akka.actor;FSM.setStateTimeout.timeout" title="FSM.this.Timeout">timeout</a>
+
+  <span class="comment">/**
+   * INTERNAL API, used for testing.
+   */</span>
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> final def <a title="=&gt; Boolean" id="akka.actor;FSM.isStateTimerActive">isStateTimerActive</a> = <a href="#akka.actor;FSM.timeoutFuture_=" title="=&gt; Option[akka.actor.Cancellable]">timeoutFuture</a>.<span title="=&gt; Boolean">isDefined</span>
+
+  <span class="comment">/**
+   * Set handler which is called upon each state transition, i.e. not when
+   * staying in the same state. This may use the pair extractor defined in the
+   * FSM companion object like so:
+   *
+   * &lt;pre&gt;
+   * onTransition {
+   *   case Old -&amp;gt; New =&amp;gt; doSomething
+   * }
+   * &lt;/pre&gt;
+   *
+   * It is also possible to supply a 2-ary function object:
+   *
+   * &lt;pre&gt;
+   * onTransition(handler _)
+   *
+   * private def handler(from: S, to: S) { ... }
+   * &lt;/pre&gt;
+   *
+   * The underscore is unfortunately necessary to enable the nicer syntax shown
+   * above (it uses the implicit conversion total2pf under the hood).
+   *
+   * &lt;b&gt;Multiple handlers may be installed, and every one of them will be
+   * called, not only the first one matching.&lt;/b&gt;
+   */</span>
+  final def <a title="(transitionHandler: FSM.this.TransitionHandler)Unit" id="akka.actor;FSM.onTransition">onTransition</a><span class="delimiter">(</span><a title="FSM.this.TransitionHandler" id="akka.actor;FSM.onTransition.transitionHandler">transitionHandler</a>: <span title="FSM.this.TransitionHandler">TransitionHandler</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.actor;FSM.transitionEvent_=" title="(x$1: List[FSM.this.TransitionHandler])Unit">transitionEvent</a> <span title="(elem: FSM.this.TransitionHandler)(implicit bf: scala.collection.generic.CanBuildFrom[List[FSM.this.TransitionHandler],FSM.this.TransitionHandler,List[FSM.this.TransitionHandler]])List[FSM.this.TransitionHandler]">:+=</span> <a href="#akka.actor;FSM.onTransition.transitionHandler" title="FSM.this.TransitionHandler">transitionHandler</a>
+
+  <span class="comment">/**
+   * Convenience wrapper for using a total function instead of a partial
+   * function literal. To be used with onTransition.
+   */</span>
+  implicit final def <a title="implicit akka.actor.FSM.total2pf : (transitionHandler: (S, S) =&gt; Unit)FSM.this.TransitionHandler" id="akka.actor;FSM.total2pf">total2pf</a><span class="delimiter">(</span><a title="(S, S) =&gt; Unit" id="akka.actor;FSM.total2pf.transitionHandler">transitionHandler</a>: <span class="delimiter">(</span>S, S<span class="delimiter">)</span> ⇒ Unit<span class="delimiter">)</span>: <span title="FSM.this.TransitionHandler">TransitionHandler</span> =
+    new <a title="&lt;$anon: ((S, S)) =&gt; Unit&gt; extends AnyRef with FSM.this.TransitionHandler" id="akka.actor;FSM.total2pf;$anon">TransitionHandler</a> <span class="delimiter">{</span>
+      def <a title="(in: (S, S))Boolean" id="akka.actor;FSM.total2pf;$anon.isDefinedAt">isDefinedAt</a><span class="delimiter">(</span><a title="(S, S)" id="akka.actor;FSM.total2pf;$anon.isDefinedAt.in">in</a>: <span title="(S, S)" class="delimiter">(</span>S, S<span class="delimiter">)</span><span class="delimiter">)</span> = true
+      def <a title="(in: (S, S))Unit" id="akka.actor;FSM.total2pf;$anon.apply">apply</a><span class="delimiter">(</span><a title="(S, S)" id="akka.actor;FSM.total2pf;$anon.apply.in">in</a>: <span title="(S, S)" class="delimiter">(</span>S, S<span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span> <a href="#akka.actor;FSM.total2pf.transitionHandler" title="(v1: S, v2: S)Unit">transitionHandler</a><span class="delimiter">(</span><a href="#akka.actor;FSM.total2pf;$anon.apply.in" title="(S, S)">in</a>.<span title="=&gt; S">_1</span>, <a href="#akka.actor;FSM.total2pf;$anon.apply.in" title="(S, S)">in</a>.<span title="=&gt; S">_2</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Set handler which is called upon termination of this FSM actor. Calling
+   * this method again will overwrite the previous contents.
+   */</span>
+  final def <a title="(terminationHandler: PartialFunction[FSM.this.StopEvent,Unit])Unit" id="akka.actor;FSM.onTermination">onTermination</a><span class="delimiter">(</span><a title="PartialFunction[FSM.this.StopEvent,Unit]" id="akka.actor;FSM.onTermination.terminationHandler">terminationHandler</a>: <span title="PartialFunction[FSM.this.StopEvent,Unit]">PartialFunction</span><span class="delimiter">[</span>StopEvent, Unit<span class="delimiter">]</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.actor;FSM.terminateEvent_=" title="(x$1: PartialFunction[FSM.this.StopEvent,Unit])Unit">terminateEvent</a> = <a href="#akka.actor;FSM.onTermination.terminationHandler" title="PartialFunction[FSM.this.StopEvent,Unit]">terminationHandler</a>
+
+  <span class="comment">/**
+   * Set handler which is called upon reception of unhandled messages. Calling
+   * this method again will overwrite the previous contents.
+   *
+   * The current state may be queried using ``stateName``.
+   */</span>
+  final def <a title="(stateFunction: FSM.this.StateFunction)Unit" id="akka.actor;FSM.whenUnhandled">whenUnhandled</a><span class="delimiter">(</span><a title="FSM.this.StateFunction" id="akka.actor;FSM.whenUnhandled.stateFunction">stateFunction</a>: <span title="FSM.this.StateFunction">StateFunction</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+    <a href="#akka.actor;FSM.handleEvent_=" title="(x$1: FSM.this.StateFunction)Unit">handleEvent</a> = <a href="#akka.actor;FSM.whenUnhandled.stateFunction" title="FSM.this.StateFunction">stateFunction</a> <span title="(that: PartialFunction[FSM.this.Event,FSM.this.State])PartialFunction[FSM.this.Event,FSM.this.State]">orElse</span> <a href="#akka.actor;FSM.handleEventDefault" title="=&gt; FSM.this.StateFunction">handleEventDefault</a>
+
+  <span class="comment">/**
+   * Verify existence of initial state and setup timers. This should be the
+   * last call within the constructor, or [[akka.actor.Actor#preStart]] and
+   * [[akka.actor.Actor#postRestart]]
+   *
+   * An initial `currentState -&gt; currentState` notification will be triggered by calling this method.
+   *
+   * @see [[#startWith]]
+   */</span>
+  final def <a title="()Unit" id="akka.actor;FSM.initialize">initialize</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.actor;FSM.makeTransition" title="(nextState: FSM.this.State)Unit">makeTransition</a><span class="delimiter">(</span><a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Return current state name (i.e. object of type S)
+   */</span>
+  final def <a title="=&gt; S" id="akka.actor;FSM.stateName">stateName</a>: <a href="#akka.actor;FSM;S" title="S">S</a> = <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a>
+
+  <span class="comment">/**
+   * Return current state data (i.e. object of type D)
+   */</span>
+  final def <a title="=&gt; D" id="akka.actor;FSM.stateData">stateData</a>: <a href="#akka.actor;FSM;D" title="D">D</a> = <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a>
+
+  <span class="comment">/**
+   * Return next state data (available in onTransition handlers)
+   */</span>
+  final def <a title="=&gt; D" id="akka.actor;FSM.nextStateData">nextStateData</a> = <a href="#akka.actor;FSM.nextState_=" title="=&gt; FSM.this.State">nextState</a> match <span class="delimiter">{</span>
+    case null ⇒ throw new <span title="IllegalStateException">IllegalStateException</span><span class="delimiter">(</span><span title="String(&quot;nextStateData is only available during onTransition&quot;)" class="string">&quot;nextStateData is only available during onTransition&quot;</span><span class="delimiter">)</span>
+    case <a title="FSM.this.State" id="akka.actor;FSM.nextStateData.x">x</a>    ⇒ <a href="#akka.actor;FSM.nextStateData.x" title="FSM.this.State">x</a>.<a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/*
+   * ****************************************************************
+   *                PRIVATE IMPLEMENTATION DETAILS
+   * ****************************************************************
+   */</span>
+
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="=&gt; Boolean" id="akka.actor;FSM.debugEvent">debugEvent</a>: <span title="Boolean">Boolean</span> = false
+
+  <span class="comment">/*
+   * FSM State data and current timeout handling
+   */</span>
+  private var <a title="FSM.this.State" id="akka.actor;FSM.currentState_=">currentState</a>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a> = _
+  private var <a title="Option[akka.actor.Cancellable]" id="akka.actor;FSM.timeoutFuture_=">timeoutFuture</a>: <span title="Option[akka.actor.Cancellable]">Option</span><span class="delimiter">[</span>Cancellable<span class="delimiter">]</span> = <span title="None.type">None</span>
+  private var <a title="FSM.this.State" id="akka.actor;FSM.nextState_=">nextState</a>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a> = _
+  private var <a title="Long" id="akka.actor;FSM.generation_=">generation</a>: <span title="Long">Long</span> = <span title="Long(0L)" class="long">0L</span>
+
+  <span class="comment">/*
+   * Timer handling
+   */</span>
+  private val <a title="scala.collection.mutable.Map[String,akka.actor.FSM.Timer]" id="akka.actor;FSM.timers">timers</a> = mutable.<span title="[A, B](elems: (A, B)*)scala.collection.mutable.Map[A,B]">Map</span><span title="(elems: (String, akka.actor.FSM.Timer)*)scala.collection.mutable.Map[String,akka.actor.FSM.Timer]" class="delimiter">[</span><span title="String">String</span>, <a href="#akka.actor.FSM.Timer.readResolve" title="akka.actor.FSM.Timer">Timer</a><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  private val timerGen = <span title="=&gt; collection.Iterator.type">Iterator</span> <a title="Iterator[Int]" id="akka.actor;FSM.timerGen">from</a> <span title="Int(0)" class="int">0</span>
+
+  <span class="comment">/*
+   * State definitions
+   */</span>
+  private val <a title="scala.collection.mutable.Map[S,PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]]" id="akka.actor;FSM.stateFunctions">stateFunctions</a> = mutable.<span title="[A, B](elems: (A, B)*)scala.collection.mutable.Map[A,B]">Map</span><span title="(elems: (S, FSM.this.StateFunction)*)scala.collection.mutable.Map[S,FSM.this.StateFunction]" class="delimiter">[</span><a href="#akka.actor;FSM;S" title="S">S</a>, <span title="FSM.this.StateFunction">StateFunction</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+  private val <a title="scala.collection.mutable.Map[S,Option[scala.concurrent.duration.FiniteDuration]]" id="akka.actor;FSM.stateTimeouts">stateTimeouts</a> = mutable.<span title="[A, B](elems: (A, B)*)scala.collection.mutable.Map[A,B]">Map</span><span title="(elems: (S, FSM.this.Timeout)*)scala.collection.mutable.Map[S,FSM.this.Timeout]" class="delimiter">[</span><a href="#akka.actor;FSM;S" title="S">S</a>, <span title="FSM.this.Timeout">Timeout</span><span class="delimiter">]</span><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  private def <a title="(name: S, function: FSM.this.StateFunction, timeout: FSM.this.Timeout)Unit" id="akka.actor;FSM.register">register</a><span class="delimiter">(</span><a title="S" id="akka.actor;FSM.register.name">name</a>: <a href="#akka.actor;FSM;S" title="S">S</a>, <a title="FSM.this.StateFunction" id="akka.actor;FSM.register.function">function</a>: <span title="FSM.this.StateFunction">StateFunction</span>, <a title="FSM.this.Timeout" id="akka.actor;FSM.register.timeout">timeout</a>: <span title="FSM.this.Timeout">Timeout</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;FSM.stateFunctions" title="=&gt; scala.collection.mutable.Map[S,PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]]">stateFunctions</a> <span title="(key: S)Boolean">contains</span> <a href="#akka.actor;FSM.register.name" title="S">name</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.actor;FSM.stateFunctions" title="(key: S, value: PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]])Unit">stateFunctions</a><span class="delimiter">(</span><a href="#akka.actor;FSM.register.name" title="S">name</a><span class="delimiter">)</span> = <a href="#akka.actor;FSM.stateFunctions" title="(key: S)PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]">stateFunctions</a><span class="delimiter">(</span><a href="#akka.actor;FSM.register.name" title="S">name</a><span class="delimiter">)</span> <span title="(that: PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]])PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]">orElse</span> <a href="#akka.actor;FSM.register.function" title="FSM.this.StateFunction">function</a>
+      <a href="#akka.actor;FSM.stateTimeouts" title="(key: S, value: Option[scala.concurrent.duration.FiniteDuration])Unit">stateTimeouts</a><span class="delimiter">(</span><a href="#akka.actor;FSM.register.name" title="S">name</a><span class="delimiter">)</span> = <a href="#akka.actor;FSM.register.timeout" title="FSM.this.Timeout">timeout</a> <span title="(alternative: =&gt; Option[scala.concurrent.duration.FiniteDuration])Option[scala.concurrent.duration.FiniteDuration]">orElse</span> <a href="#akka.actor;FSM.stateTimeouts" title="(key: S)Option[scala.concurrent.duration.FiniteDuration]">stateTimeouts</a><span class="delimiter">(</span><a href="#akka.actor;FSM.register.name" title="S">name</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span> else <span class="delimiter">{</span>
+      <a href="#akka.actor;FSM.stateFunctions" title="(key: S, value: PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]])Unit">stateFunctions</a><span class="delimiter">(</span><a href="#akka.actor;FSM.register.name" title="S">name</a><span class="delimiter">)</span> = <a href="#akka.actor;FSM.register.function" title="FSM.this.StateFunction">function</a>
+      <a href="#akka.actor;FSM.stateTimeouts" title="(key: S, value: Option[scala.concurrent.duration.FiniteDuration])Unit">stateTimeouts</a><span class="delimiter">(</span><a href="#akka.actor;FSM.register.name" title="S">name</a><span class="delimiter">)</span> = <a href="#akka.actor;FSM.register.timeout" title="FSM.this.Timeout">timeout</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/*
+   * unhandled event handler
+   */</span>
+  private val <a title="FSM.this.StateFunction" id="akka.actor;FSM.handleEventDefault">handleEventDefault</a>: <span title="FSM.this.StateFunction">StateFunction</span> = <a title="&lt;$anon: FSM.this.Event =&gt; FSM.this.State&gt; extends scala.runtime.AbstractPartialFunction[FSM.this.Event,FSM.this.State] with Serializable" id="akka.actor;FSM.handleEventDefault;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    case Event<span class="delimiter">(</span><a title="Any" id="akka.actor;FSM.handleEventDefault;$anonfun.isDefinedAt.value">value</a>, <a title="D" id="akka.actor;FSM.handleEventDefault;$anonfun.isDefinedAt.stateData">stateData</a><span class="delimiter">)</span> ⇒
+      <a href="Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.warning(cc2e600322)" title="(message: String)Unit">warning</a><span class="delimiter">(</span><span title="String(&quot;unhandled event &quot;)" class="string">&quot;unhandled event &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;FSM.handleEventDefault;$anonfun.isDefinedAt.value" title="Any">value</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; in state &quot;)" class="string">&quot; in state &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;FSM.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span>
+      <a href="#akka.actor;FSM.stay" title="()FSM.this.State">stay</a>
+  <span class="delimiter">}</span>
+  private var <a title="FSM.this.StateFunction" id="akka.actor;FSM.handleEvent_=">handleEvent</a>: <span title="FSM.this.StateFunction">StateFunction</span> = <a href="#akka.actor;FSM.handleEventDefault" title="=&gt; FSM.this.StateFunction">handleEventDefault</a>
+
+  <span class="comment">/*
+   * termination handling
+   */</span>
+  private var <a title="PartialFunction[FSM.this.StopEvent,Unit]" id="akka.actor;FSM.terminateEvent_=">terminateEvent</a>: <span title="PartialFunction[FSM.this.StopEvent,Unit]">PartialFunction</span><span class="delimiter">[</span>StopEvent, Unit<span class="delimiter">]</span> = <a href="#akka.actor.FSM.NullFunction" title="akka.actor.FSM.NullFunction.type">NullFunction</a>
+
+  <span class="comment">/*
+   * transition handling
+   */</span>
+  private var <a title="List[FSM.this.TransitionHandler]" id="akka.actor;FSM.transitionEvent_=">transitionEvent</a>: <span title="List[FSM.this.TransitionHandler]">List</span><span class="delimiter">[</span>TransitionHandler<span class="delimiter">]</span> = <span title="scala.collection.immutable.Nil.type">Nil</span>
+  private def <a title="(prev: S, next: S)Unit" id="akka.actor;FSM.handleTransition">handleTransition</a><span class="delimiter">(</span><a title="S" id="akka.actor;FSM.handleTransition.prev">prev</a>: <a href="#akka.actor;FSM;S" title="S">S</a>, <a title="S" id="akka.actor;FSM.handleTransition.next">next</a>: <a href="#akka.actor;FSM;S" title="S">S</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val <a title="(S, S)" id="akka.actor;FSM.handleTransition.tuple">tuple</a> = <span title="(_1: S, _2: S)(S, S)" class="delimiter">(</span><a href="#akka.actor;FSM.handleTransition.prev" title="S">prev</a>, <a href="#akka.actor;FSM.handleTransition.next" title="S">next</a><span class="delimiter">)</span>
+    for <span class="delimiter">(</span><a title="FSM.this.TransitionHandler" id="akka.actor;FSM.handleTransition.$anonfun.te">te</a> ← <a href="#akka.actor;FSM.transitionEvent_=" title="(f: FSM.this.TransitionHandler =&gt; Unit)Unit">transitionEvent</a><span class="delimiter">)</span> <span class="delimiter">{</span> if <span class="delimiter">(</span><a href="#akka.actor;FSM.handleTransition.$anonfun.te" title="FSM.this.TransitionHandler">te</a>.<span title="(x: (S, S))Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="#akka.actor;FSM.handleTransition.tuple" title="(S, S)">tuple</a><span class="delimiter">)</span><span class="delimiter">)</span> <a href="#akka.actor;FSM.handleTransition.$anonfun.te" title="(v1: (S, S))Unit">te</a><span class="delimiter">(</span><a href="#akka.actor;FSM.handleTransition.tuple" title="(S, S)">tuple</a><span class="delimiter">)</span> <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/*
+   * *******************************************
+   *       Main actor receive() method
+   * *******************************************
+   */</span>
+  override def <a title="=&gt; FSM.this.Receive" id="akka.actor;FSM.receive">receive</a>: <span title="FSM.this.Receive">Receive</span> = <a title="&lt;$anon: Any =&gt; Unit&gt; extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.actor;FSM.receive;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    case TimeoutMarker<span class="delimiter">(</span><span title="Long">gen</span><span class="delimiter">)</span> ⇒
+      if <span class="delimiter">(</span><a href="#akka.actor;FSM.generation_=" title="=&gt; Long">generation</a> <span title="(x: Long)Boolean">==</span> <span title="Long">gen</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.actor;FSM.processMsg" title="(value: Any, source: AnyRef)Unit">processMsg</a><span class="delimiter">(</span><a href="#akka.actor;FSM.StateTimeout" title="=&gt; akka.actor.FSM.StateTimeout.type">StateTimeout</a>, <span title="String(&quot;state timeout&quot;)" class="string">&quot;state timeout&quot;</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    case <a title="akka.actor.FSM.Timer" id="akka.actor;FSM.receive;$anonfun.isDefinedAt.t">t</a> @ Timer<span class="delimiter">(</span><a title="String" id="akka.actor;FSM.receive;$anonfun.isDefinedAt.name">name</a>, <a title="Any" id="akka.actor;FSM.receive;$anonfun.isDefinedAt.msg">msg</a>, <a title="Boolean" id="akka.actor;FSM.receive;$anonfun.isDefinedAt.repeat">repeat</a>, <span title="Int">gen</span><span class="delimiter">)</span> ⇒
+      if <span class="delimiter">(</span><span class="delimiter">(</span><a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a> <span title="(key: String)Boolean">contains</span> <a href="#akka.actor;FSM.receive;$anonfun.isDefinedAt.name" title="String">name</a><span class="delimiter">)</span> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <span class="delimiter">(</span><a href="#akka.actor;FSM.timers" title="(key: String)akka.actor.FSM.Timer">timers</a><span class="delimiter">(</span><a href="#akka.actor;FSM.receive;$anonfun.isDefinedAt.name" title="String">name</a><span class="delimiter">)</span>.<a href="#akka.actor.FSM;Timer.generation" title="=&gt; Int">generation</a> <span title="(x: Int)Boolean">==</span> <span title="Int">gen</span><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        if <span class="delimiter">(</span><a href="#akka.actor;FSM.timeoutFuture_=" title="=&gt; Option[akka.actor.Cancellable]">timeoutFuture</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#akka.actor;FSM.timeoutFuture_=" title="=&gt; Option[akka.actor.Cancellable]">timeoutFuture</a>.<span title="=&gt; akka.actor.Cancellable">get</span>.<a href="Scheduler.scala.html#akka.actor;Cancellable.cancel" title="()Boolean">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>
+          <a href="#akka.actor;FSM.timeoutFuture_=" title="(x$1: Option[akka.actor.Cancellable])Unit">timeoutFuture</a> = <span title="None.type">None</span>
+        <span class="delimiter">}</span>
+        <a href="#akka.actor;FSM.generation_=" title="(x$1: Long)Unit">generation</a> <span title="(x: Int)Long">+=</span> <span title="Int(1)" class="int">1</span>
+        if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.actor;FSM.receive;$anonfun.isDefinedAt.repeat" title="Boolean">repeat</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+          <a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a> <span title="(key: String)FSM.this.timers.type">-=</span> <a href="#akka.actor;FSM.receive;$anonfun.isDefinedAt.name" title="String">name</a>
+        <span class="delimiter">}</span>
+        <a href="#akka.actor;FSM.processMsg" title="(value: Any, source: AnyRef)Unit">processMsg</a><span class="delimiter">(</span><a href="#akka.actor;FSM.receive;$anonfun.isDefinedAt.msg" title="Any">msg</a>, <a href="#akka.actor;FSM.receive;$anonfun.isDefinedAt.t" title="akka.actor.FSM.Timer">t</a><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    case SubscribeTransitionCallBack<span class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span> ⇒
+      <span class="comment">// TODO Use context.watch(actor) and receive Terminated(actor) to clean up list</span>
+      <a href="../routing/Listeners.scala.html#akka.routing;Listeners.listeners" title="=&gt; java.util.Set[akka.actor.ActorRef]">listeners</a>.<span title="(x$1: akka.actor.ActorRef)Boolean">add</span><span class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span>
+      <span class="comment">// send current state back as reference point</span>
+      <a href="package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">actorRef</a> <a href="ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="#akka.actor.FSM.CurrentState.readResolve" title="(fsmRef: akka.actor.ActorRef, state: S)akka.actor.FSM.CurrentState[S]">CurrentState</a><span class="delimiter">(</span><a href="Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span>
+    case Listen<span class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span> ⇒
+      <span class="comment">// TODO Use context.watch(actor) and receive Terminated(actor) to clean up list</span>
+      <a href="../routing/Listeners.scala.html#akka.routing;Listeners.listeners" title="=&gt; java.util.Set[akka.actor.ActorRef]">listeners</a>.<span title="(x$1: akka.actor.ActorRef)Boolean">add</span><span class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span>
+      <span class="comment">// send current state back as reference point</span>
+      <a href="package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef">actorRef</a> <a href="ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="#akka.actor.FSM.CurrentState.readResolve" title="(fsmRef: akka.actor.ActorRef, state: S)akka.actor.FSM.CurrentState[S]">CurrentState</a><span class="delimiter">(</span><a href="Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span>
+    case UnsubscribeTransitionCallBack<span class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span> ⇒
+      <a href="../routing/Listeners.scala.html#akka.routing;Listeners.listeners" title="=&gt; java.util.Set[akka.actor.ActorRef]">listeners</a>.<span title="(x$1: Any)Boolean">remove</span><span title="Unit" class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span>
+    case Deafen<span class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span> ⇒
+      <a href="../routing/Listeners.scala.html#akka.routing;Listeners.listeners" title="=&gt; java.util.Set[akka.actor.ActorRef]">listeners</a>.<span title="(x$1: Any)Boolean">remove</span><span title="Unit" class="delimiter">(</span><span title="akka.actor.ActorRef">actorRef</span><span class="delimiter">)</span>
+    case <a title="Any" id="akka.actor;FSM.receive;$anonfun.isDefinedAt.value">value</a> ⇒ <span title="Boolean(true)" class="delimiter">{</span>
+      if <span class="delimiter">(</span><a href="#akka.actor;FSM.timeoutFuture_=" title="=&gt; Option[akka.actor.Cancellable]">timeoutFuture</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.actor;FSM.timeoutFuture_=" title="=&gt; Option[akka.actor.Cancellable]">timeoutFuture</a>.<span title="=&gt; akka.actor.Cancellable">get</span>.<a href="Scheduler.scala.html#akka.actor;Cancellable.cancel" title="()Boolean">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#akka.actor;FSM.timeoutFuture_=" title="(x$1: Option[akka.actor.Cancellable])Unit">timeoutFuture</a> = <span title="None.type">None</span>
+      <span class="delimiter">}</span>
+      <a href="#akka.actor;FSM.generation_=" title="(x$1: Long)Unit">generation</a> <span title="(x: Int)Long">+=</span> <span title="Int(1)" class="int">1</span>
+      <a href="#akka.actor;FSM.processMsg" title="(value: Any, source: AnyRef)Unit">processMsg</a><span class="delimiter">(</span><a href="#akka.actor;FSM.receive;$anonfun.isDefinedAt.value" title="Any">value</a>, <a href="Actor.scala.html#akka.actor;Actor.sender" title="()akka.actor.ActorRef">sender</a><span class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="(value: Any, source: AnyRef)Unit" id="akka.actor;FSM.processMsg">processMsg</a><span class="delimiter">(</span><a title="Any" id="akka.actor;FSM.processMsg.value">value</a>: <span title="Any">Any</span>, <a title="AnyRef" id="akka.actor;FSM.processMsg.source">source</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    val <a title="akka.actor.FSM.Event[D]" id="akka.actor;FSM.processMsg.event">event</a> = <a href="#akka.actor.FSM.Event.readResolve" title="(event: Any, stateData: D)akka.actor.FSM.Event[D]">Event</a><span class="delimiter">(</span><a href="#akka.actor;FSM.processMsg.value" title="Any">value</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a><span class="delimiter">)</span>
+    <a href="#akka.actor;FSM.processEvent" title="(event: FSM.this.Event, source: AnyRef)Unit">processEvent</a><span class="delimiter">(</span><a href="#akka.actor;FSM.processMsg.event" title="akka.actor.FSM.Event[D]">event</a>, <a href="#akka.actor;FSM.processMsg.source" title="AnyRef">source</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(event: FSM.this.Event, source: AnyRef)Unit" id="akka.actor;FSM.processEvent">processEvent</a><span class="delimiter">(</span><a title="FSM.this.Event" id="akka.actor;FSM.processEvent.event">event</a>: <a href="#akka.actor.FSM.Event.readResolve" title="FSM.this.Event">Event</a>, <a title="AnyRef" id="akka.actor;FSM.processEvent.source">source</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    val <a title="PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]" id="akka.actor;FSM.processEvent.stateFunc">stateFunc</a> = <a href="#akka.actor;FSM.stateFunctions" title="(key: S)PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]">stateFunctions</a><span class="delimiter">(</span><a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span>
+    val <a title="akka.actor.FSM.State[S,D]" id="akka.actor;FSM.processEvent.nextState">nextState</a> = if <span class="delimiter">(</span><a href="#akka.actor;FSM.processEvent.stateFunc" title="PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]">stateFunc</a> <span title="(x: akka.actor.FSM.Event[D])Boolean">isDefinedAt</span> <a href="#akka.actor;FSM.processEvent.event" title="FSM.this.Event">event</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.actor;FSM.processEvent.stateFunc" title="(v1: akka.actor.FSM.Event[D])akka.actor.FSM.State[S,D]">stateFunc</a><span class="delimiter">(</span><a href="#akka.actor;FSM.processEvent.event" title="FSM.this.Event">event</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span> else <span class="delimiter">{</span>
+      <span class="comment">// handleEventDefault ensures that this is always defined</span>
+      <a href="#akka.actor;FSM.handleEvent_=" title="(v1: FSM.this.Event)FSM.this.State">handleEvent</a><span class="delimiter">(</span><a href="#akka.actor;FSM.processEvent.event" title="FSM.this.Event">event</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+    <a href="#akka.actor;FSM.applyState" title="(nextState: FSM.this.State)Unit">applyState</a><span class="delimiter">(</span><a href="#akka.actor;FSM.processEvent.nextState" title="akka.actor.FSM.State[S,D]">nextState</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(nextState: FSM.this.State)Unit" id="akka.actor;FSM.applyState">applyState</a><span class="delimiter">(</span><a title="FSM.this.State" id="akka.actor;FSM.applyState.nextState">nextState</a>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <a href="#akka.actor;FSM.applyState.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM.State.apply$default$4" title="=&gt; Option[akka.actor.FSM.Reason]">stopReason</a> match <span class="delimiter">{</span>
+      case <span title="None.type">None</span> ⇒ <a href="#akka.actor;FSM.makeTransition" title="(nextState: FSM.this.State)Unit">makeTransition</a><span class="delimiter">(</span><a href="#akka.actor;FSM.applyState.nextState" title="FSM.this.State">nextState</a><span class="delimiter">)</span>
+      case _ ⇒
+        <a href="#akka.actor;FSM.applyState.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM.State.apply$default$5" title="=&gt; List[Any]">replies</a>.<span title="=&gt; List[Any]">reverse</span> <span title="(f: Any =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span> <a title="Any" id="akka.actor;FSM.applyState.$anonfun.r">r</a> ⇒ <a href="Actor.scala.html#akka.actor;Actor.sender" title="()akka.actor.ActorRef">sender</a><a href="package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef" class="delimiter">(</a><span class="delimiter">)</span> <a href="ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="#akka.actor;FSM.applyState.$anonfun.r" title="Any">r</a> <span class="delimiter">}</span>
+        <a href="#akka.actor;FSM.terminate" title="(nextState: FSM.this.State)Unit">terminate</a><span class="delimiter">(</span><a href="#akka.actor;FSM.applyState.nextState" title="FSM.this.State">nextState</a><span class="delimiter">)</span>
+        <a href="Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="ActorRefProvider.scala.html#akka.actor;ActorRefFactory.stop" title="(actor: akka.actor.ActorRef)Unit">stop</a><span class="delimiter">(</span><a href="Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(nextState: FSM.this.State)Unit" id="akka.actor;FSM.makeTransition">makeTransition</a><span class="delimiter">(</span><a title="FSM.this.State" id="akka.actor;FSM.makeTransition.nextState">nextState</a>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><span title="=&gt; Boolean">!</span><a href="#akka.actor;FSM.stateFunctions" title="=&gt; scala.collection.mutable.Map[S,PartialFunction[akka.actor.FSM.Event[D],akka.actor.FSM.State[S,D]]]">stateFunctions</a>.<span title="(key: S)Boolean">contains</span><span class="delimiter">(</span><a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.actor;FSM.terminate" title="(nextState: FSM.this.State)Unit">terminate</a><span class="delimiter">(</span><a href="#akka.actor;FSM.stay" title="()FSM.this.State">stay</a> <a href="#akka.actor.FSM;State.withStopReason" title="(reason: akka.actor.FSM.Reason)akka.actor.FSM.State[S,D]">withStopReason</a> <a href="#akka.actor.FSM.Failure.readResolve" title="(cause: Any)akka.actor.FSM.Failure">Failure</a><span class="delimiter">(</span><span title="implicit scala.Predef.augmentString : (x: String)scala.collection.immutable.StringOps" class="string">&quot;Next state %s does not exist&quot;</span>.<span title="(args: Any*)String">format</span><span class="delimiter">(</span><a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span> else <span class="delimiter">{</span>
+      <a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM.State.apply$default$5" title="=&gt; List[Any]">replies</a>.<span title="=&gt; List[Any]">reverse</span> <span title="(f: Any =&gt; Unit)Unit">foreach</span> <span class="delimiter">{</span> <a title="Any" id="akka.actor;FSM.makeTransition.$anonfun.r">r</a> ⇒ <a href="Actor.scala.html#akka.actor;Actor.sender" title="()akka.actor.ActorRef">sender</a><a href="package.scala.html#akka.actor.package.actorRef2Scala" title="implicit akka.actor.package.actorRef2Scala : (ref: akka.actor.ActorRef)akka.actor.ScalaActorRef" class="delimiter">(</a><span class="delimiter">)</span> <a href="ActorRef.scala.html#akka.actor;ScalaActorRef.!" title="(message: Any)(implicit sender: akka.actor.ActorRef)Unit">!</a> <a href="#akka.actor;FSM.makeTransition.$anonfun.r" title="Any">r</a> <span class="delimiter">}</span>
+      if <span class="delimiter">(</span><a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a> <span title="(x$1: Any)Boolean">!=</span> <a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a> <span title="(x: Boolean)Boolean">||</span> <a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM;State.notifies" title="=&gt; Boolean">notifies</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+        this.<a href="#akka.actor;FSM.nextState_=" title="(x$1: FSM.this.State)Unit">nextState</a> = <a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>
+        <a href="#akka.actor;FSM.handleTransition" title="(prev: S, next: S)Unit">handleTransition</a><span class="delimiter">(</span><a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a>, <a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span>
+        <a href="../routing/Listeners.scala.html#akka.routing;Listeners.gossip" title="(msg: Any)(implicit sender: akka.actor.ActorRef)Unit">gossip</a><a href="Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef" class="delimiter">(</a><a href="#akka.actor.FSM.Transition.readResolve" title="(fsmRef: akka.actor.ActorRef, from: S, to: S)akka.actor.FSM.Transition[S]">Transition</a><span class="delimiter">(</span><a href="Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a>, <a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        this.<a href="#akka.actor;FSM.nextState_=" title="(x$1: FSM.this.State)Unit">nextState</a> = null
+      <span class="delimiter">}</span>
+      <a href="#akka.actor;FSM.currentState_=" title="(x$1: FSM.this.State)Unit">currentState</a> = <a href="#akka.actor;FSM.makeTransition.nextState" title="FSM.this.State">nextState</a>
+
+      def <a title="(d: scala.concurrent.duration.FiniteDuration)Some[akka.actor.Cancellable]" id="akka.actor;FSM.makeTransition.scheduleTimeout">scheduleTimeout</a><span class="delimiter">(</span><a title="scala.concurrent.duration.FiniteDuration" id="akka.actor;FSM.makeTransition.scheduleTimeout.d">d</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>: <span title="Some[akka.actor.Cancellable]">Some</span><span class="delimiter">[</span>Cancellable<span class="delimiter">]</span> = <span class="delimiter">{</span>
+        import <a href="Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.dispatcher
+        <span title="(x: akka.actor.Cancellable)Some[akka.actor.Cancellable]">Some</span><span class="delimiter">(</span><a href="Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a>.<a href="ActorSystem.scala.html#akka.actor;ActorSystem.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>.<a href="Scheduler.scala.html#akka.actor;Scheduler.scheduleOnce(a2d55b51db)" title="(delay: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">scheduleOnce</a><a href="ActorCell.scala.html#akka.actor;ActorContext.dispatcher" title="=&gt; scala.concurrent.ExecutionContextExecutor" class="delimiter">(</a><a href="#akka.actor;FSM.makeTransition.scheduleTimeout.d" title="scala.concurrent.duration.FiniteDuration">d</a>, <a href="Actor.scala.html#akka.actor;Actor.self" title="=&gt; akka.actor.ActorRef">self</a>, <a href="#akka.actor.FSM.TimeoutMarker.readResolve" title="(generation: Long)akka.actor.FSM.TimeoutMarker">TimeoutMarker</a><span class="delimiter">(</span><a href="#akka.actor;FSM.generation_=" title="=&gt; Long">generation</a><span class="delimiter">)</span><span class="delimiter">)</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+
+      <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM.State.apply$default$3" title="=&gt; Option[scala.concurrent.duration.FiniteDuration]">timeout</a> match <span class="delimiter">{</span>
+        case <a href="#akka.actor.FSM.SomeMaxFiniteDuration" title="=&gt; Some[scala.concurrent.duration.FiniteDuration]">SomeMaxFiniteDuration</a>                    ⇒ <span class="comment">// effectively disable stateTimeout</span>
+        case Some<span class="delimiter">(</span><a title="scala.concurrent.duration.FiniteDuration" id="akka.actor;FSM.makeTransition.d">d</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span> if <a href="#akka.actor;FSM.makeTransition.d" title="scala.concurrent.duration.FiniteDuration">d</a>.<span title="=&gt; Long">length</span> <span title="(x: Int)Boolean">&gt;=</span> <span title="Int(0)" class="int">0</span> ⇒ <a href="#akka.actor;FSM.timeoutFuture_=" title="(x$1: Option[akka.actor.Cancellable])Unit">timeoutFuture</a> = <a href="#akka.actor;FSM.makeTransition.scheduleTimeout" title="(d: scala.concurrent.duration.FiniteDuration)Some[akka.actor.Cancellable]">scheduleTimeout</a><span class="delimiter">(</span><a href="#akka.actor;FSM.makeTransition.d" title="scala.concurrent.duration.FiniteDuration">d</a><span class="delimiter">)</span>
+        case _ ⇒
+          val <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.actor;FSM.makeTransition.timeout">timeout</a> = <a href="#akka.actor;FSM.stateTimeouts" title="(key: S)Option[scala.concurrent.duration.FiniteDuration]">stateTimeouts</a><span class="delimiter">(</span><a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a><span class="delimiter">)</span>
+          if <span class="delimiter">(</span><a href="#akka.actor;FSM.makeTransition.timeout" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <a href="#akka.actor;FSM.timeoutFuture_=" title="(x$1: Option[akka.actor.Cancellable])Unit">timeoutFuture</a> = <a href="#akka.actor;FSM.makeTransition.scheduleTimeout" title="(d: scala.concurrent.duration.FiniteDuration)Some[akka.actor.Cancellable]">scheduleTimeout</a><span class="delimiter">(</span><a href="#akka.actor;FSM.makeTransition.timeout" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>.<span title="=&gt; scala.concurrent.duration.FiniteDuration">get</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Call `onTermination` hook; if you want to retain this behavior when
+   * overriding make sure to call `super.postStop()`.
+   *
+   * Please note that this method is called by default from `preRestart()`,
+   * so override that one if `onTermination` shall not be called during
+   * restart.
+   */</span>
+  override def <a title="()Unit" id="akka.actor;FSM.postStop">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    <span class="comment">/*
+     * setting this instance’s state to terminated does no harm during restart
+     * since the new instance will initialize fresh using startWith()
+     */</span>
+    <a href="#akka.actor;FSM.terminate" title="(nextState: FSM.this.State)Unit">terminate</a><span class="delimiter">(</span><a href="#akka.actor;FSM.stay" title="()FSM.this.State">stay</a> <a href="#akka.actor.FSM;State.withStopReason" title="(reason: akka.actor.FSM.Reason)akka.actor.FSM.State[S,D]">withStopReason</a> <a href="#akka.actor.FSM.Shutdown.readResolve" title="akka.actor.FSM.Shutdown.type">Shutdown</a><span class="delimiter">)</span>
+    super.<a href="Actor.scala.html#akka.actor;Actor.postStop" title="()Unit">postStop</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  private def <a title="(nextState: FSM.this.State)Unit" id="akka.actor;FSM.terminate">terminate</a><span class="delimiter">(</span><a title="FSM.this.State" id="akka.actor;FSM.terminate.nextState">nextState</a>: <a href="#akka.actor.FSM.State.readResolve" title="FSM.this.State">State</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM.State.apply$default$4" title="=&gt; Option[akka.actor.FSM.Reason]">stopReason</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a title="akka.actor.FSM.Reason" id="akka.actor;FSM.terminate.reason">reason</a> = <a href="#akka.actor;FSM.terminate.nextState" title="FSM.this.State">nextState</a>.<a href="#akka.actor.FSM.State.apply$default$4" title="=&gt; Option[akka.actor.FSM.Reason]">stopReason</a>.<span title="=&gt; akka.actor.FSM.Reason">get</span>
+      <a href="#akka.actor;FSM.logTermination" title="(reason: akka.actor.FSM.Reason)Unit">logTermination</a><span class="delimiter">(</span><a href="#akka.actor;FSM.terminate.reason" title="akka.actor.FSM.Reason">reason</a><span class="delimiter">)</span>
+      for <span class="delimiter">(</span><a title="akka.actor.FSM.Timer" id="akka.actor;FSM.terminate.$anonfun.timer">timer</a> ← <a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a>.<span title="(f: akka.actor.FSM.Timer =&gt; Unit)Unit">values</span><span class="delimiter">)</span> <a href="#akka.actor;FSM.terminate.$anonfun.timer" title="akka.actor.FSM.Timer">timer</a>.<a href="#akka.actor.FSM;Timer.cancel" title="()Unit">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#akka.actor;FSM.timers" title="=&gt; scala.collection.mutable.Map[String,akka.actor.FSM.Timer]">timers</a>.<span title="()Unit">clear</span><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#akka.actor;FSM.timeoutFuture_=" title="=&gt; Option[akka.actor.Cancellable]">timeoutFuture</a>.<span title="(f: akka.actor.Cancellable =&gt; Boolean)Unit">foreach</span> <span class="delimiter">{</span> <a href="#akka.actor;FSM.terminate.$anonfun.x$2" title="akka.actor.Cancellable">_</a>.<a href="Scheduler.scala.html#akka.actor;Cancellable.cancel" title="()Boolean">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">}</span>
+      <a href="#akka.actor;FSM.currentState_=" title="(x$1: FSM.this.State)Unit">currentState</a> = <a href="#akka.actor;FSM.terminate.nextState" title="FSM.this.State">nextState</a>
+
+      val <a title="akka.actor.FSM.StopEvent[S,D]" id="akka.actor;FSM.terminate.stopEvent">stopEvent</a> = <a href="#akka.actor.FSM.StopEvent.readResolve" title="(reason: akka.actor.FSM.Reason, currentState: S, stateData: D)akka.actor.FSM.StopEvent[S,D]">StopEvent</a><span class="delimiter">(</span><a href="#akka.actor;FSM.terminate.reason" title="akka.actor.FSM.Reason">reason</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateName" title="=&gt; S">stateName</a>, <a href="#akka.actor;FSM.currentState_=" title="=&gt; FSM.this.State">currentState</a>.<a href="#akka.actor.FSM;State.stateData" title="=&gt; D">stateData</a><span class="delimiter">)</span>
+      if <span class="delimiter">(</span><a href="#akka.actor;FSM.terminateEvent_=" title="=&gt; PartialFunction[FSM.this.StopEvent,Unit]">terminateEvent</a>.<span title="(x: FSM.this.StopEvent)Boolean">isDefinedAt</span><span class="delimiter">(</span><a href="#akka.actor;FSM.terminate.stopEvent" title="akka.actor.FSM.StopEvent[S,D]">stopEvent</a><span class="delimiter">)</span><span class="delimiter">)</span>
+        <a href="#akka.actor;FSM.terminateEvent_=" title="(v1: FSM.this.StopEvent)Unit">terminateEvent</a><span class="delimiter">(</span><a href="#akka.actor;FSM.terminate.stopEvent" title="akka.actor.FSM.StopEvent[S,D]">stopEvent</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * By default [[FSM.Failure]] is logged at error level and other reason
+   * types are not logged. It is possible to override this behavior.
+   */</span>
+  protected def <a title="(reason: akka.actor.FSM.Reason)Unit" id="akka.actor;FSM.logTermination">logTermination</a><span class="delimiter">(</span><a title="akka.actor.FSM.Reason" id="akka.actor;FSM.logTermination.reason">reason</a>: <a href="#akka.actor.FSM;Reason" title="akka.actor.FSM.Reason">Reason</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="#akka.actor;FSM.logTermination.reason" title="akka.actor.FSM.Reason">reason</a> match <span class="delimiter">{</span>
+    case Failure<span class="delimiter">(</span><a title="Throwable" id="akka.actor;FSM.logTermination.ex">ex</a>: <span title="Throwable">Throwable</span><span class="delimiter">)</span> ⇒ <a href="Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.error(de736aeaab)" title="(cause: Throwable, message: String)Unit">error</a><span class="delimiter">(</span><a href="#akka.actor;FSM.logTermination.ex" title="Throwable">ex</a>, <span title="String(&quot;terminating due to Failure&quot;)" class="string">&quot;terminating due to Failure&quot;</span><span class="delimiter">)</span>
+    case Failure<span class="delimiter">(</span><a title="AnyRef" id="akka.actor;FSM.logTermination.msg">msg</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>   ⇒ <a href="Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.error(cc2e600322)" title="(message: String)Unit">error</a><span class="delimiter">(</span><a href="#akka.actor;FSM.logTermination.msg" title="AnyRef">msg</a>.<span title="()String">toString</span><span class="delimiter">)</span>
+    case _                      ⇒
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Stackable trait for [[akka.actor.FSM]] which adds a rolling event log and
+ * debug logging capabilities (analogous to [[akka.event.LoggingReceive]]).
+ *
+ * @since 1.2
+ */</span>
+trait <a title="trait LoggingFSM[S, D] extends AnyRef with akka.actor.FSM[S,D]" id="akka.actor;LoggingFSM">LoggingFSM</a><span class="delimiter">[</span><a title="" id="akka.actor;LoggingFSM;S">S</a>, <a title="" id="akka.actor;LoggingFSM;D">D</a><span class="delimiter">]</span> extends <a href="#akka.actor;FSM" title="akka.actor.FSM[S,D]">FSM</a><span class="delimiter">[</span>S, D<span class="delimiter">]</span> <span class="delimiter">{</span> this: Actor ⇒
+
+  import <a href="#akka.actor.FSM" title="akka.actor.FSM.type">FSM</a>._
+
+  def <a title="=&gt; Int" id="akka.actor;LoggingFSM.logDepth">logDepth</a>: <span title="Int">Int</span> = <span title="Int(0)" class="int">0</span>
+
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> override val <a title="Boolean" id="akka.actor;LoggingFSM.debugEvent">debugEvent</a> = <a href="Actor.scala.html#akka.actor;Actor.context" title="=&gt; akka.actor.ActorContext">context</a>.<a href="ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a>.<a href="ActorSystem.scala.html#akka.actor;ActorSystem.settings" title="=&gt; akka.actor.ActorSystem.Settings">settings</a>.<a href="ActorSystem.scala.html#akka.actor.ActorSystem;Settings.FsmDebugEvent" title="=&gt; Boolean">FsmDebugEvent</a>
+
+  private val <a title="Array[LoggingFSM.this.Event]" id="akka.actor;LoggingFSM.events">events</a> = new <span title="Array[LoggingFSM.this.Event]">Array</span><span class="delimiter">[</span>Event<span class="delimiter">]</span><span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.logDepth" title="=&gt; Int">logDepth</a><span class="delimiter">)</span>
+  private val <a title="Array[AnyRef]" id="akka.actor;LoggingFSM.states">states</a> = new <span title="Array[AnyRef]">Array</span><span class="delimiter">[</span>AnyRef<span class="delimiter">]</span><span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.logDepth" title="=&gt; Int">logDepth</a><span class="delimiter">)</span>
+  private var <a title="Int" id="akka.actor;LoggingFSM.pos_=">pos</a> = <span title="Int(0)" class="int">0</span>
+  private var <a title="Boolean" id="akka.actor;LoggingFSM.full_=">full</a> = false
+
+  private def <a title="()Unit" id="akka.actor;LoggingFSM.advance">advance</a><span class="delimiter">(</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+    val n = <a href="#akka.actor;LoggingFSM.pos_=" title="=&gt; Int">pos</a> <a title="Int" id="akka.actor;LoggingFSM.advance.n">+</a> <span title="Int(1)" class="int">1</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.advance.n" title="Int">n</a> <span title="(x: Int)Boolean">==</span> <a href="#akka.actor;LoggingFSM.logDepth" title="=&gt; Int">logDepth</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.actor;LoggingFSM.full_=" title="(x$1: Boolean)Unit">full</a> = true
+      <a href="#akka.actor;LoggingFSM.pos_=" title="(x$1: Int)Unit">pos</a> = <span title="Int(0)" class="int">0</span>
+    <span class="delimiter">}</span> else <span class="delimiter">{</span>
+      <a href="#akka.actor;LoggingFSM.pos_=" title="(x$1: Int)Unit">pos</a> = <a href="#akka.actor;LoggingFSM.advance.n" title="Int">n</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  private<span class="delimiter">[</span>akka<span class="delimiter">]</span> abstract override def <a title="(event: LoggingFSM.this.Event, source: AnyRef)Unit" id="akka.actor;LoggingFSM.processEvent">processEvent</a><span class="delimiter">(</span><a title="LoggingFSM.this.Event" id="akka.actor;LoggingFSM.processEvent.event">event</a>: <a href="#akka.actor.FSM.Event.readResolve" title="LoggingFSM.this.Event">Event</a>, <a title="AnyRef" id="akka.actor;LoggingFSM.processEvent.source">source</a>: <span title="AnyRef">AnyRef</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.debugEvent" title="=&gt; Boolean">debugEvent</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      val <a title="String" id="akka.actor;LoggingFSM.processEvent.srcstr">srcstr</a> = <a href="#akka.actor;LoggingFSM.processEvent.source" title="AnyRef">source</a> match <span class="delimiter">{</span>
+        case <a title="String" id="akka.actor;LoggingFSM.processEvent.srcstr.s">s</a>: <span title="String">String</span>            ⇒ <a href="#akka.actor;LoggingFSM.processEvent.srcstr.s" title="String">s</a>
+        case Timer<span class="delimiter">(</span><a title="String" id="akka.actor;LoggingFSM.processEvent.srcstr.name">name</a>, _, _, _<span class="delimiter">)</span> ⇒ <span title="String(&quot;timer &quot;)" class="string">&quot;timer &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;LoggingFSM.processEvent.srcstr.name" title="String">name</a>
+        case <a title="akka.actor.ActorRef" id="akka.actor;LoggingFSM.processEvent.srcstr.a">a</a>: <a href="ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>          ⇒ <a href="#akka.actor;LoggingFSM.processEvent.srcstr.a" title="akka.actor.ActorRef">a</a>.<a href="ActorRef.scala.html#akka.actor;ActorRef.toString" title="()String">toString</a>
+        case _                    ⇒ <span title="String(&quot;unknown&quot;)" class="string">&quot;unknown&quot;</span>
+      <span class="delimiter">}</span>
+      <a href="Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.debug(cc2e600322)" title="(message: String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;processing &quot;)" class="string">&quot;processing &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;LoggingFSM.processEvent.event" title="LoggingFSM.this.Event">event</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; from &quot;)" class="string">&quot; from &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;LoggingFSM.processEvent.srcstr" title="String">srcstr</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    if <span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.logDepth" title="=&gt; Int">logDepth</a> <span title="(x: Int)Boolean">&gt;</span> <span title="Int(0)" class="int">0</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.actor;LoggingFSM.states" title="(i: Int, x: AnyRef)Unit">states</a><span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.pos_=" title="=&gt; Int">pos</a><span class="delimiter">)</span> = <a href="#akka.actor;FSM.stateName" title="=&gt; S">stateName</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="AnyRef" class="delimiter">[</span><span title="AnyRef">AnyRef</span><span class="delimiter">]</span>
+      <a href="#akka.actor;LoggingFSM.events" title="(i: Int, x: LoggingFSM.this.Event)Unit">events</a><span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.pos_=" title="=&gt; Int">pos</a><span class="delimiter">)</span> = <a href="#akka.actor;LoggingFSM.processEvent.event" title="LoggingFSM.this.Event">event</a>
+      <a href="#akka.actor;LoggingFSM.advance" title="()Unit">advance</a><span class="delimiter">(</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    val <a title="S" id="akka.actor;LoggingFSM.processEvent.oldState">oldState</a> = <a href="#akka.actor;FSM.stateName" title="=&gt; S">stateName</a>
+    super.<a href="#akka.actor;FSM.processEvent" title="(event: LoggingFSM.this.Event, source: AnyRef)Unit">processEvent</a><span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.processEvent.event" title="LoggingFSM.this.Event">event</a>, <a href="#akka.actor;LoggingFSM.processEvent.source" title="AnyRef">source</a><span class="delimiter">)</span>
+    val <a title="S" id="akka.actor;LoggingFSM.processEvent.newState">newState</a> = <a href="#akka.actor;FSM.stateName" title="=&gt; S">stateName</a>
+
+    if <span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.debugEvent" title="=&gt; Boolean">debugEvent</a> <span title="(x: Boolean)Boolean">&amp;&amp;</span> <a href="#akka.actor;LoggingFSM.processEvent.oldState" title="S">oldState</a> <span title="(x$1: Any)Boolean">!=</span> <a href="#akka.actor;LoggingFSM.processEvent.newState" title="S">newState</a><span class="delimiter">)</span>
+      <a href="Actor.scala.html#akka.actor;ActorLogging.log" title="=&gt; akka.event.LoggingAdapter">log</a>.<a href="../event/Logging.scala.html#akka.event;LoggingAdapter.debug(cc2e600322)" title="(message: String)Unit">debug</a><span class="delimiter">(</span><span title="String(&quot;transition &quot;)" class="string">&quot;transition &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;LoggingFSM.processEvent.oldState" title="S">oldState</a> <span title="(x$1: Any)String">+</span> <span title="String(&quot; -&gt; &quot;)" class="string">&quot; -&gt; &quot;</span> <span title="(x$1: Any)String">+</span> <a href="#akka.actor;LoggingFSM.processEvent.newState" title="S">newState</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Retrieve current rolling log in oldest-first order. The log is filled with
+   * each incoming event before processing by the user supplied state handler.
+   * The log entries are lost when this actor is restarted.
+   */</span>
+  protected def <a title="=&gt; IndexedSeq[akka.actor.FSM.LogEntry[S,D]]" id="akka.actor;LoggingFSM.getLog">getLog</a>: <span title="IndexedSeq[akka.actor.FSM.LogEntry[S,D]]">IndexedSeq</span><span class="delimiter">[</span>LogEntry<span class="delimiter">[</span>S, D<span class="delimiter">]</span><span class="delimiter">]</span> = <span class="delimiter">{</span>
+    val log = <a href="#akka.actor;LoggingFSM.events" title="(xs: Array[LoggingFSM.this.Event])scala.collection.mutable.ArrayOps[LoggingFSM.this.Event]">events</a> <span title="(xs: Array[(LoggingFSM.this.Event, AnyRef)])scala.collection.mutable.ArrayOps[(LoggingFSM.this.Event, AnyRef)]">zip</span> <a href="#akka.actor;LoggingFSM.states" title="(xs: Array[AnyRef])scala.collection.mutable.WrappedArray[AnyRef]">states</a> <span title="(xs: Array[(LoggingFSM.this.Event, AnyRef)])scala.collection.mutable.ArrayOps[(LoggingFSM.this.Event, AnyRef)]">filter</span> <span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.getLog.log.$anonfun.x$3" title="(LoggingFSM.this.Event, AnyRef)">_</a>.<span title="=&gt; LoggingFSM.this.Event">_1</span> <span title="(x$1: AnyRef)Boolean">ne</span> null<span class="delimiter">)</span> <a title="Array[akka.actor.FSM.LogEntry[S,D]]" id="akka.actor;LoggingFSM.getLog.log">map</a> <span class="delimiter">(</span><a title="(LoggingFSM.this.Event, AnyRef)" id="akka.actor;LoggingFSM.getLog.log.$anonfun.x">x</a> ⇒ <a href="#akka.actor.FSM.LogEntry.readResolve" title="(stateName: S, stateData: D, event: Any)akka.actor.FSM.LogEntry[S,D]">LogEntry</a><span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.getLog.log.$anonfun.x" title="(LoggingFSM.this.Event, AnyRef)">x</a>.<span title="=&gt; AnyRef">_2</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="S" class="delimiter">[</span><a href="#akka.actor;LoggingFSM;S" title="S">S</a><span class="delimiter">]</span>, <a href="#akka.actor;LoggingFSM.getLog.log.$anonfun.x" title="(LoggingFSM.this.Event, AnyRef)">x</a>.<span title="=&gt; LoggingFSM.this.Event">_1</span>.<a href="#akka.actor.FSM;Event.stateData" title="=&gt; D">stateData</a>, <a href="#akka.actor;LoggingFSM.getLog.log.$anonfun.x" title="(LoggingFSM.this.Event, AnyRef)">x</a>.<span title="=&gt; LoggingFSM.this.Event">_1</span>.<a href="#akka.actor.FSM;Event.event" title="=&gt; Any">event</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    if <span class="delimiter">(</span><a href="#akka.actor;LoggingFSM.full_=" title="=&gt; Boolean">full</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span title="(elems: Nothing*)IndexedSeq[Nothing]">IndexedSeq</span><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(that: scala.collection.GenTraversableOnce[akka.actor.FSM.LogEntry[S,D]])(implicit bf: scala.collection.generic.CanBuildFrom[IndexedSeq[Nothing],akka.actor.FSM.LogEntry[S,D],IndexedSeq[akka.actor.FSM.LogEntry[S,D]]])IndexedSeq[akka.actor.FSM.LogEntry[S,D]]">++</span> <a href="#akka.actor;LoggingFSM.getLog.log" title="(xs: Array[akka.actor.FSM.LogEntry[S,D]])scala.collection.mutable.ArrayOps[akka.actor.FSM.LogEntry[S,D]]">log</a>.<span title="(n: Int)Array[akka.actor.FSM.LogEntry[S,D]]">drop</span><span title="(xs: Array[akka.actor.FSM.LogEntry[S,D]])scala.collection.mutable.ArrayOps[akka.actor.FSM.LogEntry[S,D]]" class="delimiter">(</span><a href="#akka.actor;LoggingFSM.pos_=" title="=&gt; Int">pos</a><span class="delimiter">)</span> <span title="(that: scala.collection.GenTraversableOnce[akka.actor.FSM.LogEntry[S,D]])(implicit bf: scala.collection.generic.CanBuildFrom[IndexedSeq[akka.actor.FSM.LogEntry[S,D]],akka.actor.FSM.LogEntry[S,D],IndexedSeq[akka.actor.FSM.LogEntry[S,D]]])IndexedSeq[akka.actor.FSM.LogEntry[S,D]]">++</span> <a href="#akka.actor;LoggingFSM.getLog.log" title="(xs: Array[akka.actor.FSM.LogEntry[S,D]])scala.collection.mutable.ArrayOps[akka.actor.FSM.LogEntry[S,D]]">log</a>.<span title="(n: Int)Array[akka.actor.FSM.LogEntry[S,D]]">take</span><span title="(xs: Array[akka.actor.FSM.LogEntry[S,D]])scala.collection.mutable.ArrayOps[akka.actor.FSM.LogEntry[S,D]]" class="delimiter">(</span><a href="#akka.actor;LoggingFSM.pos_=" title="=&gt; Int">pos</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span> else <span class="delimiter">{</span>
+      <span title="(elems: Nothing*)IndexedSeq[Nothing]">IndexedSeq</span><span class="delimiter">(</span><span class="delimiter">)</span> <span title="(that: scala.collection.GenTraversableOnce[akka.actor.FSM.LogEntry[S,D]])(implicit bf: scala.collection.generic.CanBuildFrom[IndexedSeq[Nothing],akka.actor.FSM.LogEntry[S,D],IndexedSeq[akka.actor.FSM.LogEntry[S,D]]])IndexedSeq[akka.actor.FSM.LogEntry[S,D]]">++</span> <a href="#akka.actor;LoggingFSM.getLog.log" title="(xs: Array[akka.actor.FSM.LogEntry[S,D]])scala.collection.mutable.ArrayOps[akka.actor.FSM.LogEntry[S,D]]">log</a>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,293 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>cluster-metrics/akka/cluster/metrics/MetricsCollector.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2015 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+package akka.cluster.metrics
+
+import akka.actor.ActorSystem
+import akka.actor.ExtendedActorSystem
+import akka.event.Logging
+import akka.event.LoggingAdapter
+import akka.ConfigurationException
+import akka.actor.Address
+import java.lang.management.MemoryMXBean
+import java.lang.management.ManagementFactory
+import java.lang.management.OperatingSystemMXBean
+import java.lang.management.MemoryUsage
+import java.lang.<span title="System.type">System</span>.<span class="delimiter">{</span> currentTimeMillis ⇒ newTimestamp <span class="delimiter">}</span>
+import akka.cluster.Cluster
+import java.io.Closeable
+import org.hyperic.sigar.SigarProxy
+
+<span class="comment">/**
+ * Metrics sampler.
+ *
+ * Implementations of cluster system metrics collectors extend this trait.
+ */</span>
+trait <a title="trait MetricsCollector extends Object with java.io.Closeable" id="akka.cluster.metrics;MetricsCollector">MetricsCollector</a> extends <span title="java.io.Closeable">Closeable</span> <span class="delimiter">{</span>
+  <span class="comment">/**
+   * Samples and collects new data points.
+   * This method is invoked periodically and should return
+   * current metrics for this node.
+   */</span>
+  def <a title="()akka.cluster.metrics.NodeMetrics" id="akka.cluster.metrics;MetricsCollector.sample">sample</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="Metric.scala.html#akka.cluster.metrics;NodeMetrics" title="akka.cluster.metrics.NodeMetrics">NodeMetrics</a>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * INTERNAL API
+ *
+ * Factory to create configured [[MetricsCollector]].
+ *
+ * Metrics collector instantiation priority order:
+ * 1) Provided custom collector
+ * 2) Internal [[SigarMetricsCollector]]
+ * 3) Internal [[JmxMetricsCollector]]
+ */</span>
+private<span class="delimiter">[</span>metrics<span class="delimiter">]</span> object <a title="akka.cluster.metrics.MetricsCollector.type" id="akka.cluster.metrics.MetricsCollector">MetricsCollector</a> <a href="#akka.cluster.metrics.MetricsCollector" title="akka.cluster.metrics.MetricsCollector.type" class="delimiter">{</a>
+
+  <span class="comment">/** Try to create collector instance in the order of priority. */</span>
+  def <a title="(system: akka.actor.ActorSystem)akka.cluster.metrics.MetricsCollector" id="akka.cluster.metrics.MetricsCollector.apply">apply</a><span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.cluster.metrics.MetricsCollector.apply.system">system</a>: <a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span>: <a href="#akka.cluster.metrics;MetricsCollector" title="akka.cluster.metrics.MetricsCollector">MetricsCollector</a> = <span class="delimiter">{</span>
+    val <a title="akka.event.LoggingAdapter" id="akka.cluster.metrics.MetricsCollector.apply.log">log</a> = <a href="../../../../actor/akka/event/Logging.scala.html#akka.event.Logging.apply(882ba4a885)" title="(system: akka.actor.ActorSystem, logSource: String)(implicit evidence$3: akka.event.LogSource[String])akka.event.LoggingAdapter">Logging</a><a href="../../../../actor/akka/event/Logging.scala.html#akka.event.LogSource.fromString" title="=&gt; akka.event.LogSource[String]" class="delimiter">(</a><a href="#akka.cluster.metrics.MetricsCollector.apply.system" title="akka.actor.ActorSystem">system</a>, <span title="()Class[_]">getClass</span>.<span title="()String">getName</span><span class="delimiter">)</span>
+    val <a title="akka.cluster.metrics.ClusterMetricsSettings" id="akka.cluster.metrics.MetricsCollector.apply.settings">settings</a> = <a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings" title="(config: com.typesafe.config.Config)akka.cluster.metrics.ClusterMetricsSettings">ClusterMetricsSettings</a><span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.system" title="akka.actor.ActorSystem">system</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem.settings" title="=&gt; akka.actor.ActorSystem.Settings">settings</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor.ActorSystem;Settings.config" title="=&gt; com.typesafe.config.Config">config</a><span class="delimiter">)</span>
+    import <a href="#akka.cluster.metrics.MetricsCollector.apply.settings" title="akka.cluster.metrics.ClusterMetricsSettings">settings</a>._
+
+    val <a title="String" id="akka.cluster.metrics.MetricsCollector.apply.collectorCustom">collectorCustom</a> = <a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorProvider" title="=&gt; String">CollectorProvider</a>
+    val <a title="String" id="akka.cluster.metrics.MetricsCollector.apply.collectorSigar">collectorSigar</a> = classOf<span title="Class[akka.cluster.metrics.SigarMetricsCollector](classOf[akka.cluster.metrics.SigarMetricsCollector])" class="delimiter">[</span>SigarMetricsCollector<span class="delimiter">]</span>.<span title="()String">getName</span>
+    val <a title="String" id="akka.cluster.metrics.MetricsCollector.apply.collectorJMX">collectorJMX</a> = classOf<span title="Class[akka.cluster.metrics.JmxMetricsCollector](classOf[akka.cluster.metrics.JmxMetricsCollector])" class="delimiter">[</span>JmxMetricsCollector<span class="delimiter">]</span>.<span title="()String">getName</span>
+
+    val <a title="Boolean" id="akka.cluster.metrics.MetricsCollector.apply.useCustom">useCustom</a> = <span title="=&gt; Boolean">!</span><a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorFallback" title="=&gt; Boolean">CollectorFallback</a>
+    val useInternal = <a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorFallback" title="=&gt; Boolean">CollectorFallback</a> <a title="Boolean" id="akka.cluster.metrics.MetricsCollector.apply.useInternal">&amp;&amp;</a> <a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorProvider" title="=&gt; String">CollectorProvider</a> <span title="(x$1: Any)Boolean">==</span> <span title="String(&quot;&quot;)" class="string">&quot;&quot;</span>
+
+    def <a title="(provider: String)scala.util.Try[akka.cluster.metrics.MetricsCollector]" id="akka.cluster.metrics.MetricsCollector.apply.create">create</a><span class="delimiter">(</span><a title="String" id="akka.cluster.metrics.MetricsCollector.apply.create.provider">provider</a>: <span title="String">String</span><span class="delimiter">)</span> = <a href="Provision.scala.html#akka.cluster.metrics.TryNative.apply" title="(r: =&gt; akka.cluster.metrics.MetricsCollector)scala.util.Try[akka.cluster.metrics.MetricsCollector]">TryNative</a> <span class="delimiter">{</span>
+      <a href="#akka.cluster.metrics.MetricsCollector.apply.log" title="akka.event.LoggingAdapter">log</a>.<a href="../../../../actor/akka/event/Logging.scala.html#akka.event;LoggingAdapter.debug(cc2e600322)" title="(message: String)Unit">debug</a><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;Trying &quot;)">Trying $</span><span class="delimiter">{</span><a href="#akka.cluster.metrics.MetricsCollector.apply.create.provider" title="String">provider</a><span class="delimiter">}</span><span title="String(&quot;.&quot;)" class="string">.&quot;</span><span class="delimiter">)</span>
+      <a href="#akka.cluster.metrics.MetricsCollector.apply.system" title="akka.actor.ActorSystem">system</a>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="akka.actor.ExtendedActorSystem" class="delimiter">[</span><a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem" title="akka.actor.ExtendedActorSystem">ExtendedActorSystem</a><span class="delimiter">]</span>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ExtendedActorSystem.dynamicAccess" title="=&gt; akka.actor.DynamicAccess">dynamicAccess</a>
+        .<a href="../../../../actor/akka/actor/DynamicAccess.scala.html#akka.actor;DynamicAccess.createInstanceFor(b43a2b150b)" title="[T](fqcn: String, args: scala.collection.immutable.Seq[(Class[_], AnyRef)])(implicit evidence$3: scala.reflect.ClassTag[T])scala.util.Try[T]">createInstanceFor</a><span title="(fqcn: String, args: scala.collection.immutable.Seq[(Class[_], AnyRef)])(implicit evidence$3: scala.reflect.ClassTag[akka.cluster.metrics.MetricsCollector])scala.util.Try[akka.cluster.metrics.MetricsCollector]" class="delimiter">[</span><a href="#akka.cluster.metrics;MetricsCollector" title="akka.cluster.metrics.MetricsCollector">MetricsCollector</a><span class="delimiter">]</span><span title="(runtimeClass1: Class[_])scala.reflect.ClassTag[akka.cluster.metrics.MetricsCollector]" class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.create.provider" title="String">provider</a>, <span title="(xs: (Class[akka.actor.ActorSystem], akka.actor.ActorSystem)*)List[(Class[akka.actor.ActorSystem], akka.actor.ActorSystem)]">List</span><span class="delimiter">(</span>classOf<span title="(self: Class[akka.actor.ActorSystem])ArrowAssoc[Class[akka.actor.ActorSystem]]" class="delimiter">[</span>ActorSystem<span class="delimiter">]</span> <span title="(y: akka.actor.ActorSystem)(Class[akka.actor.ActorSystem], akka.actor.ActorSystem)">-&gt;</span> <a href="#akka.cluster.metrics.MetricsCollector.apply.system" title="akka.actor.ActorSystem">system</a><span class="delimiter">)</span><span class="delimiter">)</span>.<span title="=&gt; akka.cluster.metrics.MetricsCollector">get</span>
+    <span class="delimiter">}</span>
+
+    val <a title="scala.util.Try[akka.cluster.metrics.MetricsCollector]" id="akka.cluster.metrics.MetricsCollector.apply.collector">collector</a> = if <span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.useCustom" title="Boolean">useCustom</a><span class="delimiter">)</span>
+      <a href="#akka.cluster.metrics.MetricsCollector.apply.create" title="(provider: String)scala.util.Try[akka.cluster.metrics.MetricsCollector]">create</a><span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.collectorCustom" title="String">collectorCustom</a><span class="delimiter">)</span>
+    else if <span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.useInternal" title="Boolean">useInternal</a><span class="delimiter">)</span>
+      <a href="#akka.cluster.metrics.MetricsCollector.apply.create" title="(provider: String)scala.util.Try[akka.cluster.metrics.MetricsCollector]">create</a><span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.collectorSigar" title="String">collectorSigar</a><span class="delimiter">)</span> <span title="(default: =&gt; scala.util.Try[akka.cluster.metrics.MetricsCollector])scala.util.Try[akka.cluster.metrics.MetricsCollector]">orElse</span> <a href="#akka.cluster.metrics.MetricsCollector.apply.create" title="(provider: String)scala.util.Try[akka.cluster.metrics.MetricsCollector]">create</a><span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.collectorJMX" title="String">collectorJMX</a><span class="delimiter">)</span>
+    else <span class="comment">// Use complete fall back chain.</span>
+      <a href="#akka.cluster.metrics.MetricsCollector.apply.create" title="(provider: String)scala.util.Try[akka.cluster.metrics.MetricsCollector]">create</a><span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.collectorCustom" title="String">collectorCustom</a><span class="delimiter">)</span> <span title="(default: =&gt; scala.util.Try[akka.cluster.metrics.MetricsCollector])scala.util.Try[akka.cluster.metrics.MetricsCollector]">orElse</span> <a href="#akka.cluster.metrics.MetricsCollector.apply.create" title="(provider: String)scala.util.Try[akka.cluster.metrics.MetricsCollector]">create</a><span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.collectorSigar" title="String">collectorSigar</a><span class="delimiter">)</span> <span title="(default: =&gt; scala.util.Try[akka.cluster.metrics.MetricsCollector])scala.util.Try[akka.cluster.metrics.MetricsCollector]">orElse</span> <a href="#akka.cluster.metrics.MetricsCollector.apply.create" title="(provider: String)scala.util.Try[akka.cluster.metrics.MetricsCollector]">create</a><span class="delimiter">(</span><a href="#akka.cluster.metrics.MetricsCollector.apply.collectorJMX" title="String">collectorJMX</a><span class="delimiter">)</span>
+
+    <a href="#akka.cluster.metrics.MetricsCollector.apply.collector" title="scala.util.Try[akka.cluster.metrics.MetricsCollector]">collector</a>.<span title="(f: PartialFunction[Throwable,akka.cluster.metrics.MetricsCollector])scala.util.Try[akka.cluster.metrics.MetricsCollector]">recover</span> <a title="&lt;$anon: Throwable =&gt; Nothing&gt; extends scala.runtime.AbstractPartialFunction[Throwable,Nothing] with Serializable" id="akka.cluster.metrics.MetricsCollector.apply;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+      case <a title="Throwable" id="akka.cluster.metrics.MetricsCollector.apply;$anonfun.isDefinedAt.e">e</a> ⇒ throw new <a href="../../../../actor/akka/AkkaException.scala.html#akka;ConfigurationException" title="akka.ConfigurationException">ConfigurationException</a><span class="delimiter">(</span><span title="(args: Any*)String">s</span>&quot;<span title="String(&quot;Could not create metrics collector: &quot;)">Could not create metrics collector: $</span><span class="delimiter">{</span><a href="#akka.cluster.metrics.MetricsCollector.apply;$anonfun.isDefinedAt.e" title="Throwable">e</a><span class="delimiter">}</span><span title="String(&quot;&quot;)" class="string">&quot;</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>.<span title="=&gt; akka.cluster.metrics.MetricsCollector">get</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Loads JVM and system metrics through JMX monitoring beans.
+ *
+ * @param address The [[akka.actor.Address]] of the node being sampled
+ * @param decayFactor how quickly the exponential weighting of past data is decayed
+ */</span>
+class <a title="class JmxMetricsCollector extends Object with akka.cluster.metrics.MetricsCollector" id="akka.cluster.metrics;JmxMetricsCollector">JmxMetricsCollector</a><a href="#akka.cluster.metrics;JmxMetricsCollector" title="akka.cluster.metrics.JmxMetricsCollector" class="delimiter">(</a><a title="akka.actor.Address" id="akka.cluster.metrics;JmxMetricsCollector.address">address</a>: <a href="../../../../actor/akka/actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a>, <a title="Double" id="akka.cluster.metrics;JmxMetricsCollector.decayFactor">decayFactor</a>: <span title="Double">Double</span><span class="delimiter">)</span> extends <a href="#akka.cluster.metrics;MetricsCollector" title="akka.cluster.metrics.MetricsCollector">MetricsCollector</a> <span class="delimiter">{</span>
+  import <a href="Metric.scala.html#akka.cluster.metrics.StandardMetrics" title="akka.cluster.metrics.StandardMetrics.type">StandardMetrics</a>._
+
+  private def this<span class="delimiter">(</span><a title="akka.actor.Address" id="akka.cluster.metrics;JmxMetricsCollector.<init>(a4cd9699c3).address">address</a>: <a href="../../../../actor/akka/actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a>, <a title="akka.cluster.metrics.ClusterMetricsSettings" id="akka.cluster.metrics;JmxMetricsCollector.<init>(a4cd9699c3).settings">settings</a>: <a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings" title="akka.cluster.metrics.ClusterMetricsSettings">ClusterMetricsSettings</a><span class="delimiter">)</span> =
+    this<span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.<init>(a4cd9699c3).address" title="akka.actor.Address">address</a>,
+      <a href="EWMA.scala.html#akka.cluster.metrics.EWMA" title="akka.cluster.metrics.EWMA.type">EWMA</a>.<a href="EWMA.scala.html#akka.cluster.metrics.EWMA.alpha" title="(halfLife: scala.concurrent.duration.FiniteDuration, collectInterval: scala.concurrent.duration.FiniteDuration)Double">alpha</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.<init>(a4cd9699c3).settings" title="akka.cluster.metrics.ClusterMetricsSettings">settings</a>.<a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorMovingAverageHalfLife" title="=&gt; scala.concurrent.duration.FiniteDuration">CollectorMovingAverageHalfLife</a>, <a href="#akka.cluster.metrics;JmxMetricsCollector.<init>(a4cd9699c3).settings" title="akka.cluster.metrics.ClusterMetricsSettings">settings</a>.<a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorSampleInterval" title="=&gt; scala.concurrent.duration.FiniteDuration">CollectorSampleInterval</a><span class="delimiter">)</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * This constructor is used when creating an instance from configured FQCN
+   */</span>
+  def this<span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.cluster.metrics;JmxMetricsCollector.<init>(96114d85f4).system">system</a>: <a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span> = this<span class="delimiter">(</span><a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.Cluster">Cluster</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.<init>(96114d85f4).system" title="akka.actor.ActorSystem">system</a><span class="delimiter">)</span>.<a href="../../../../cluster/akka/cluster/Cluster.scala.html#akka.cluster;Cluster.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a>, <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.metrics.ClusterMetricsExtension">ClusterMetricsExtension</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.<init>(96114d85f4).system" title="akka.actor.ActorSystem">system</a><span class="delimiter">)</span>.<a href="ClusterMetricsExtension.scala.html#akka.cluster.metrics;ClusterMetricsExtension.settings" title="=&gt; akka.cluster.metrics.ClusterMetricsSettings">settings</a><span class="delimiter">)</span>
+
+  private val <a title="Some[Double]" id="akka.cluster.metrics;JmxMetricsCollector.decayFactorOption">decayFactorOption</a> = <span title="(x: Double)Some[Double]">Some</span><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.decayFactor" title="Double">decayFactor</a><span class="delimiter">)</span>
+
+  private val <a title="java.lang.management.MemoryMXBean" id="akka.cluster.metrics;JmxMetricsCollector.memoryMBean">memoryMBean</a>: <span title="java.lang.management.MemoryMXBean">MemoryMXBean</span> = <span title="java.lang.management.ManagementFactory.type">ManagementFactory</span>.<span title="()java.lang.management.MemoryMXBean">getMemoryMXBean</span>
+
+  private val <a title="java.lang.management.OperatingSystemMXBean" id="akka.cluster.metrics;JmxMetricsCollector.osMBean">osMBean</a>: <span title="java.lang.management.OperatingSystemMXBean">OperatingSystemMXBean</span> = <span title="java.lang.management.ManagementFactory.type">ManagementFactory</span>.<span title="()java.lang.management.OperatingSystemMXBean">getOperatingSystemMXBean</span>
+
+  <span class="comment">/**
+   * Samples and collects new data points.
+   * Creates a new instance each time.
+   */</span>
+  def <a title="()akka.cluster.metrics.NodeMetrics" id="akka.cluster.metrics;JmxMetricsCollector.sample">sample</a><span class="delimiter">(</span><span class="delimiter">)</span>: <a href="Metric.scala.html#akka.cluster.metrics;NodeMetrics" title="akka.cluster.metrics.NodeMetrics">NodeMetrics</a> = <a href="Metric.scala.html#akka.cluster.metrics;NodeMetrics" title="(address: akka.actor.Address, timestamp: Long, metrics: Set[akka.cluster.metrics.Metric])akka.cluster.metrics.NodeMetrics">NodeMetrics</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.address" title="akka.actor.Address">address</a>, <span title="()Long">newTimestamp</span>, <a href="#akka.cluster.metrics;JmxMetricsCollector.metrics" title="()Set[akka.cluster.metrics.Metric]">metrics</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Generate metrics set.
+   * Creates a new instance each time.
+   */</span>
+  def <a title="()Set[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;JmxMetricsCollector.metrics">metrics</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Set[akka.cluster.metrics.Metric]">Set</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    val <a title="java.lang.management.MemoryUsage" id="akka.cluster.metrics;JmxMetricsCollector.metrics.heap">heap</a> = <a href="#akka.cluster.metrics;JmxMetricsCollector.heapMemoryUsage" title="=&gt; java.lang.management.MemoryUsage">heapMemoryUsage</a>
+    <span title="(elems: Option[akka.cluster.metrics.Metric]*)scala.collection.immutable.Set[Option[akka.cluster.metrics.Metric]]">Set</span><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.systemLoadAverage" title="=&gt; Option[akka.cluster.metrics.Metric]">systemLoadAverage</a>, <a href="#akka.cluster.metrics;JmxMetricsCollector.heapUsed" title="(heap: java.lang.management.MemoryUsage)Option[akka.cluster.metrics.Metric]">heapUsed</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.metrics.heap" title="java.lang.management.MemoryUsage">heap</a><span class="delimiter">)</span>, <a href="#akka.cluster.metrics;JmxMetricsCollector.heapCommitted" title="(heap: java.lang.management.MemoryUsage)Option[akka.cluster.metrics.Metric]">heapCommitted</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.metrics.heap" title="java.lang.management.MemoryUsage">heap</a><span class="delimiter">)</span>, <a href="#akka.cluster.metrics;JmxMetricsCollector.heapMax" title="(heap: java.lang.management.MemoryUsage)Option[akka.cluster.metrics.Metric]">heapMax</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;JmxMetricsCollector.metrics.heap" title="java.lang.management.MemoryUsage">heap</a><span class="delimiter">)</span>, <a href="#akka.cluster.metrics;JmxMetricsCollector.processors" title="=&gt; Option[akka.cluster.metrics.Metric]">processors</a><span class="delimiter">)</span>.<a href="#akka.cluster.metrics;JmxMetricsCollector.metrics.$anonfun.xo" title="(implicit asTraversable: Option[akka.cluster.metrics.Metric] =&gt; scala.collection.GenTraversableOnce[akka.cluster.metrics.Metric])scala.collection.immutable.Set[akka.cluster.metrics.Metric]">flatten</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * (JMX) Returns the OS-specific average load on the CPUs in the system, for the past 1 minute.
+   * On some systems the JMX OS system load average may not be available, in which case a -1 is
+   * returned from JMX, and None is returned from this method.
+   * Creates a new instance each time.
+   */</span>
+  def <a title="=&gt; Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;JmxMetricsCollector.systemLoadAverage">systemLoadAverage</a>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;system-load-average&quot;)">SystemLoadAverage</span>,
+    value = <a href="#akka.cluster.metrics;JmxMetricsCollector.osMBean" title="=&gt; java.lang.management.OperatingSystemMXBean">osMBean</a>.<span title="implicit scala.Predef.double2Double : (x: Double)Double">getSystemLoadAverage</span>,
+    decayFactor = <span title="None.type">None</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * (JMX) Returns the number of available processors
+   * Creates a new instance each time.
+   */</span>
+  def <a title="=&gt; Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;JmxMetricsCollector.processors">processors</a>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;processors&quot;)">Processors</span>,
+    value = <a href="#akka.cluster.metrics;JmxMetricsCollector.osMBean" title="=&gt; java.lang.management.OperatingSystemMXBean">osMBean</a>.<span title="implicit scala.Predef.int2Integer : (x: Int)Integer">getAvailableProcessors</span>,
+    decayFactor = <span title="None.type">None</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Current heap to be passed in to heapUsed, heapCommitted and heapMax
+   */</span>
+  def <a title="=&gt; java.lang.management.MemoryUsage" id="akka.cluster.metrics;JmxMetricsCollector.heapMemoryUsage">heapMemoryUsage</a>: <span title="java.lang.management.MemoryUsage">MemoryUsage</span> = <a href="#akka.cluster.metrics;JmxMetricsCollector.memoryMBean" title="=&gt; java.lang.management.MemoryMXBean">memoryMBean</a>.<span title="()java.lang.management.MemoryUsage">getHeapMemoryUsage</span>
+
+  <span class="comment">/**
+   * (JMX) Returns the current sum of heap memory used from all heap memory pools (in bytes).
+   * Creates a new instance each time.
+   */</span>
+  def <a title="(heap: java.lang.management.MemoryUsage)Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;JmxMetricsCollector.heapUsed">heapUsed</a><span class="delimiter">(</span><a title="java.lang.management.MemoryUsage" id="akka.cluster.metrics;JmxMetricsCollector.heapUsed.heap">heap</a>: <span title="java.lang.management.MemoryUsage">MemoryUsage</span><span class="delimiter">)</span>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;heap-memory-used&quot;)">HeapMemoryUsed</span>,
+    value = <a href="#akka.cluster.metrics;JmxMetricsCollector.heapUsed.heap" title="java.lang.management.MemoryUsage">heap</a>.<span title="implicit scala.Predef.long2Long : (x: Long)Long">getUsed</span>,
+    decayFactor = <a href="#akka.cluster.metrics;JmxMetricsCollector.decayFactorOption" title="=&gt; Some[Double]">decayFactorOption</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * (JMX) Returns the current sum of heap memory guaranteed to be available to the JVM
+   * from all heap memory pools (in bytes).
+   * Creates a new instance each time.
+   */</span>
+  def <a title="(heap: java.lang.management.MemoryUsage)Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;JmxMetricsCollector.heapCommitted">heapCommitted</a><span class="delimiter">(</span><a title="java.lang.management.MemoryUsage" id="akka.cluster.metrics;JmxMetricsCollector.heapCommitted.heap">heap</a>: <span title="java.lang.management.MemoryUsage">MemoryUsage</span><span class="delimiter">)</span>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;heap-memory-committed&quot;)">HeapMemoryCommitted</span>,
+    value = <a href="#akka.cluster.metrics;JmxMetricsCollector.heapCommitted.heap" title="java.lang.management.MemoryUsage">heap</a>.<span title="implicit scala.Predef.long2Long : (x: Long)Long">getCommitted</span>,
+    decayFactor = <a href="#akka.cluster.metrics;JmxMetricsCollector.decayFactorOption" title="=&gt; Some[Double]">decayFactorOption</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * (JMX) Returns the maximum amount of memory (in bytes) that can be used
+   * for JVM memory management. If not defined the metrics value is None, i.e.
+   * never negative.
+   * Creates a new instance each time.
+   */</span>
+  def <a title="(heap: java.lang.management.MemoryUsage)Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;JmxMetricsCollector.heapMax">heapMax</a><span class="delimiter">(</span><a title="java.lang.management.MemoryUsage" id="akka.cluster.metrics;JmxMetricsCollector.heapMax.heap">heap</a>: <span title="java.lang.management.MemoryUsage">MemoryUsage</span><span class="delimiter">)</span>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;heap-memory-max&quot;)">HeapMemoryMax</span>,
+    value = <a href="#akka.cluster.metrics;JmxMetricsCollector.heapMax.heap" title="java.lang.management.MemoryUsage">heap</a>.<span title="implicit scala.Predef.long2Long : (x: Long)Long">getMax</span>,
+    decayFactor = <span title="None.type">None</span><span class="delimiter">)</span>
+
+  override def <a title="()Unit" id="akka.cluster.metrics;JmxMetricsCollector.close">close</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="Unit" class="delimiter">(</span><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Loads metrics through Hyperic SIGAR and JMX monitoring beans. This
+ * loads wider and more accurate range of metrics compared to JmxMetricsCollector
+ * by using SIGAR's native OS library.
+ *
+ * The constructor will by design throw exception if org.hyperic.sigar.Sigar can't be loaded, due
+ * to missing classes or native libraries.
+ *
+ * @param address The [[akka.actor.Address]] of the node being sampled
+ * @param decayFactor how quickly the exponential weighting of past data is decayed
+ * @param sigar the org.hyperic.Sigar instance
+ */</span>
+class <a title="class SigarMetricsCollector extends akka.cluster.metrics.JmxMetricsCollector" id="akka.cluster.metrics;SigarMetricsCollector">SigarMetricsCollector</a><a href="#akka.cluster.metrics;SigarMetricsCollector" title="akka.cluster.metrics.SigarMetricsCollector" class="delimiter">(</a><a title="akka.actor.Address" id="akka.cluster.metrics;SigarMetricsCollector.address">address</a>: <a href="../../../../actor/akka/actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a>, <a title="Double" id="akka.cluster.metrics;SigarMetricsCollector.decayFactor">decayFactor</a>: <span title="Double">Double</span>, <a title="org.hyperic.sigar.SigarProxy" id="akka.cluster.metrics;SigarMetricsCollector.sigar">sigar</a>: <span title="org.hyperic.sigar.SigarProxy">SigarProxy</span><span class="delimiter">)</span>
+  extends <a href="#akka.cluster.metrics;JmxMetricsCollector" title="akka.cluster.metrics.JmxMetricsCollector">JmxMetricsCollector</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.address" title="akka.actor.Address">address</a>, <a href="#akka.cluster.metrics;SigarMetricsCollector.decayFactor" title="Double">decayFactor</a><span class="delimiter">)</span> <span class="delimiter">{</span>
+
+  import <a href="Metric.scala.html#akka.cluster.metrics.StandardMetrics" title="akka.cluster.metrics.StandardMetrics.type">StandardMetrics</a>._
+  import org.hyperic.sigar.CpuPerc
+
+  def this<span class="delimiter">(</span><a title="akka.actor.Address" id="akka.cluster.metrics;SigarMetricsCollector.<init>(4184122e20).address">address</a>: <a href="../../../../actor/akka/actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a>, <a title="akka.cluster.metrics.ClusterMetricsSettings" id="akka.cluster.metrics;SigarMetricsCollector.<init>(4184122e20).settings">settings</a>: <a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings" title="akka.cluster.metrics.ClusterMetricsSettings">ClusterMetricsSettings</a>, <a title="org.hyperic.sigar.SigarProxy" id="akka.cluster.metrics;SigarMetricsCollector.<init>(4184122e20).sigar">sigar</a>: <span title="org.hyperic.sigar.SigarProxy">SigarProxy</span><span class="delimiter">)</span> =
+    this<span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(4184122e20).address" title="akka.actor.Address">address</a>,
+      <a href="EWMA.scala.html#akka.cluster.metrics.EWMA" title="akka.cluster.metrics.EWMA.type">EWMA</a>.<a href="EWMA.scala.html#akka.cluster.metrics.EWMA.alpha" title="(halfLife: scala.concurrent.duration.FiniteDuration, collectInterval: scala.concurrent.duration.FiniteDuration)Double">alpha</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(4184122e20).settings" title="akka.cluster.metrics.ClusterMetricsSettings">settings</a>.<a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorMovingAverageHalfLife" title="=&gt; scala.concurrent.duration.FiniteDuration">CollectorMovingAverageHalfLife</a>, <a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(4184122e20).settings" title="akka.cluster.metrics.ClusterMetricsSettings">settings</a>.<a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings.CollectorSampleInterval" title="=&gt; scala.concurrent.duration.FiniteDuration">CollectorSampleInterval</a><span class="delimiter">)</span>,
+      <a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(4184122e20).sigar" title="org.hyperic.sigar.SigarProxy">sigar</a><span class="delimiter">)</span>
+
+  def this<span class="delimiter">(</span><a title="akka.actor.Address" id="akka.cluster.metrics;SigarMetricsCollector.<init>(7f38ff21ee).address">address</a>: <a href="../../../../actor/akka/actor/Address.scala.html#akka.actor;Address" title="akka.actor.Address">Address</a>, <a title="akka.cluster.metrics.ClusterMetricsSettings" id="akka.cluster.metrics;SigarMetricsCollector.<init>(7f38ff21ee).settings">settings</a>: <a href="ClusterMetricsSettings.scala.html#akka.cluster.metrics;ClusterMetricsSettings" title="akka.cluster.metrics.ClusterMetricsSettings">ClusterMetricsSettings</a><span class="delimiter">)</span> =
+    this<span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(7f38ff21ee).address" title="akka.actor.Address">address</a>, <a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(7f38ff21ee).settings" title="akka.cluster.metrics.ClusterMetricsSettings">settings</a>, <a href="Provision.scala.html#akka.cluster.metrics;DefaultSigarProvider" title="(settings: akka.cluster.metrics.ClusterMetricsSettings)akka.cluster.metrics.DefaultSigarProvider">DefaultSigarProvider</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(7f38ff21ee).settings" title="akka.cluster.metrics.ClusterMetricsSettings">settings</a><span class="delimiter">)</span>.<a href="Provision.scala.html#akka.cluster.metrics;SigarProvider.createSigarInstance" title="=&gt; org.hyperic.sigar.SigarProxy">createSigarInstance</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * This constructor is used when creating an instance from configured FQCN
+   */</span>
+  def this<span class="delimiter">(</span><a title="akka.actor.ActorSystem" id="akka.cluster.metrics;SigarMetricsCollector.<init>(244252a67d).system">system</a>: <a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem" title="akka.actor.ActorSystem">ActorSystem</a><span class="delimiter">)</span> = this<span class="delimiter">(</span><a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.Cluster">Cluster</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(244252a67d).system" title="akka.actor.ActorSystem">system</a><span class="delimiter">)</span>.<a href="../../../../cluster/akka/cluster/Cluster.scala.html#akka.cluster;Cluster.selfAddress" title="=&gt; akka.actor.Address">selfAddress</a>, <a href="../../../../actor/akka/actor/Extension.scala.html#akka.actor;ExtensionId.apply" title="(system: akka.actor.ActorSystem)akka.cluster.metrics.ClusterMetricsExtension">ClusterMetricsExtension</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.<init>(244252a67d).system" title="akka.actor.ActorSystem">system</a><span class="delimiter">)</span>.<a href="ClusterMetricsExtension.scala.html#akka.cluster.metrics;ClusterMetricsExtension.settings" title="=&gt; akka.cluster.metrics.ClusterMetricsSettings">settings</a><span class="delimiter">)</span>
+
+  private val <a title="Some[Double]" id="akka.cluster.metrics;SigarMetricsCollector.decayFactorOption">decayFactorOption</a> = <span title="(x: Double)Some[Double]">Some</span><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.decayFactor" title="Double">decayFactor</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Verify at the end of construction that Sigar is operational.
+   */</span>
+  <a href="#akka.cluster.metrics;SigarMetricsCollector.metrics" title="()Set[akka.cluster.metrics.Metric]">metrics</a><span class="delimiter">(</span><span class="delimiter">)</span>
+
+  <span class="comment">// Construction complete.</span>
+
+  override def <a title="()Set[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;SigarMetricsCollector.metrics">metrics</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Set[akka.cluster.metrics.Metric]">Set</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <span class="delimiter">{</span>
+    <span class="comment">// Must obtain cpuPerc in one shot. See https://github.com/akka/akka/issues/16121</span>
+    val <a title="org.hyperic.sigar.CpuPerc" id="akka.cluster.metrics;SigarMetricsCollector.metrics.cpuPerc">cpuPerc</a> = <a href="#akka.cluster.metrics;SigarMetricsCollector.sigar" title="org.hyperic.sigar.SigarProxy">sigar</a>.<span title="()org.hyperic.sigar.CpuPerc">getCpuPerc</span>
+    super.<a href="#akka.cluster.metrics;JmxMetricsCollector.metrics" title="()Set[akka.cluster.metrics.Metric]">metrics</a> <span title="(elems: scala.collection.GenTraversableOnce[akka.cluster.metrics.Metric])scala.collection.immutable.Set[akka.cluster.metrics.Metric]">++</span> <span title="(elems: Option[akka.cluster.metrics.Metric]*)scala.collection.immutable.Set[Option[akka.cluster.metrics.Metric]]">Set</span><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.cpuCombined" title="(cpuPerc: org.hyperic.sigar.CpuPerc)Option[akka.cluster.metrics.Metric]">cpuCombined</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.metrics.cpuPerc" title="org.hyperic.sigar.CpuPerc">cpuPerc</a><span class="delimiter">)</span>, <a href="#akka.cluster.metrics;SigarMetricsCollector.cpuStolen" title="(cpuPerc: org.hyperic.sigar.CpuPerc)Option[akka.cluster.metrics.Metric]">cpuStolen</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.metrics.cpuPerc" title="org.hyperic.sigar.CpuPerc">cpuPerc</a><span class="delimiter">)</span><span class="delimiter">)</span>.<a href="#akka.cluster.metrics;SigarMetricsCollector.metrics.$anonfun.xo" title="(implicit asTraversable: Option[akka.cluster.metrics.Metric] =&gt; scala.collection.GenTraversableOnce[akka.cluster.metrics.Metric])scala.collection.immutable.Set[akka.cluster.metrics.Metric]">flatten</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * (SIGAR) Returns the OS-specific average load on the CPUs in the system, for the past 1 minute.
+   *
+   * Creates a new instance each time.
+   */</span>
+  override def <a title="=&gt; Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;SigarMetricsCollector.systemLoadAverage">systemLoadAverage</a>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;system-load-average&quot;)">SystemLoadAverage</span>,
+    value = <a href="#akka.cluster.metrics;SigarMetricsCollector.sigar" title="org.hyperic.sigar.SigarProxy">sigar</a>.<span title="()Array[Double]">getLoadAverage</span><span title="(i: Int)Double" class="delimiter">(</span><span class="delimiter">)</span><span class="delimiter">(</span><span title="Int(0)" class="int">0</span><span class="delimiter">)</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Number" class="delimiter">[</span><span title="Number">Number</span><span class="delimiter">]</span>,
+    decayFactor = <span title="None.type">None</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * (SIGAR) Returns the combined CPU sum of User + Sys + Nice + Wait, in percentage. This metric can describe
+   * the amount of time the CPU spent executing code during n-interval and how much more it could
+   * theoretically. Note that 99% CPU utilization can be optimal or indicative of failure.
+   *
+   * In the data stream, this will sometimes return with a valid metric value, and sometimes as a NaN or Infinite.
+   * Documented bug &lt;a href=&quot;https://bugzilla.redhat.com/show_bug.cgi?id=749121&quot;&gt;749121&lt;/a&gt; and several others.
+   *
+   * Creates a new instance each time.
+   */</span>
+  def <a title="(cpuPerc: org.hyperic.sigar.CpuPerc)Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;SigarMetricsCollector.cpuCombined">cpuCombined</a><span class="delimiter">(</span><a title="org.hyperic.sigar.CpuPerc" id="akka.cluster.metrics;SigarMetricsCollector.cpuCombined.cpuPerc">cpuPerc</a>: <span title="org.hyperic.sigar.CpuPerc">CpuPerc</span><span class="delimiter">)</span>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;cpu-combined&quot;)">CpuCombined</span>,
+    value = <a href="#akka.cluster.metrics;SigarMetricsCollector.cpuCombined.cpuPerc" title="org.hyperic.sigar.CpuPerc">cpuPerc</a>.<span title="()Double">getCombined</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Number" class="delimiter">[</span><span title="Number">Number</span><span class="delimiter">]</span>,
+    decayFactor = <a href="#akka.cluster.metrics;SigarMetricsCollector.decayFactorOption" title="=&gt; Some[Double]">decayFactorOption</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * (SIGAR) Returns the stolen CPU time. Relevant to virtual hosting environments.
+   * For details please see: &lt;a href=&quot;http://en.wikipedia.org/wiki/CPU_time#Subdivision&quot;&gt;Wikipedia - CPU time subdivision&lt;/a&gt; and
+   * &lt;a href=&quot;https://www.datadoghq.com/2013/08/understanding-aws-stolen-cpu-and-how-it-affects-your-apps/&quot;&gt;Understanding AWS stolen CPU and how it affects your apps&lt;/a&gt;
+   *
+   * Creates a new instance each time.
+   */</span>
+  def <a title="(cpuPerc: org.hyperic.sigar.CpuPerc)Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;SigarMetricsCollector.cpuStolen">cpuStolen</a><span class="delimiter">(</span><a title="org.hyperic.sigar.CpuPerc" id="akka.cluster.metrics;SigarMetricsCollector.cpuStolen.cpuPerc">cpuPerc</a>: <span title="org.hyperic.sigar.CpuPerc">CpuPerc</span><span class="delimiter">)</span>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;cpu-stolen&quot;)">CpuStolen</span>,
+    value = <a href="#akka.cluster.metrics;SigarMetricsCollector.cpuStolen.cpuPerc" title="org.hyperic.sigar.CpuPerc">cpuPerc</a>.<span title="()Double">getStolen</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Number" class="delimiter">[</span><span title="Number">Number</span><span class="delimiter">]</span>,
+    decayFactor = <a href="#akka.cluster.metrics;SigarMetricsCollector.decayFactorOption" title="=&gt; Some[Double]">decayFactorOption</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * (SIGAR) Returns the idle CPU time.
+   * Amount of CPU time left after combined and stolen are removed.
+   *
+   * Creates a new instance each time.
+   */</span>
+  def <a title="(cpuPerc: org.hyperic.sigar.CpuPerc)Option[akka.cluster.metrics.Metric]" id="akka.cluster.metrics;SigarMetricsCollector.cpuIdle">cpuIdle</a><span class="delimiter">(</span><a title="org.hyperic.sigar.CpuPerc" id="akka.cluster.metrics;SigarMetricsCollector.cpuIdle.cpuPerc">cpuPerc</a>: <span title="org.hyperic.sigar.CpuPerc">CpuPerc</span><span class="delimiter">)</span>: <span title="Option[akka.cluster.metrics.Metric]">Option</span><span class="delimiter">[</span>Metric<span class="delimiter">]</span> = <a href="Metric.scala.html#akka.cluster.metrics.Metric" title="akka.cluster.metrics.Metric.type">Metric</a>.<a href="Metric.scala.html#akka.cluster.metrics.Metric.create(30ff12545c)" title="(name: String, value: Number, decayFactor: Option[Double])Option[akka.cluster.metrics.Metric]">create</a><span class="delimiter">(</span>
+    name = <span title="String(&quot;cpu-idle&quot;)">CpuIdle</span>,
+    value = <a href="#akka.cluster.metrics;SigarMetricsCollector.cpuIdle.cpuPerc" title="org.hyperic.sigar.CpuPerc">cpuPerc</a>.<span title="()Double">getIdle</span>.<span title="[T0]=&gt; T0">asInstanceOf</span><span title="Number" class="delimiter">[</span><span title="Number">Number</span><span class="delimiter">]</span>,
+    decayFactor = <a href="#akka.cluster.metrics;SigarMetricsCollector.decayFactorOption" title="=&gt; Some[Double]">decayFactorOption</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Releases any native resources associated with this instance.
+   */</span>
+  override def <a title="()Unit" id="akka.cluster.metrics;SigarMetricsCollector.close">close</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <a href="Provision.scala.html#akka.cluster.metrics.SigarProvider" title="akka.cluster.metrics.SigarProvider.type">SigarProvider</a>.<a href="Provision.scala.html#akka.cluster.metrics.SigarProvider.close" title="(sigar: org.hyperic.sigar.SigarProxy)Unit">close</a><span class="delimiter">(</span><a href="#akka.cluster.metrics;SigarMetricsCollector.sigar" title="org.hyperic.sigar.SigarProxy">sigar</a><span class="delimiter">)</span>
+
+<span class="delimiter">}</span>
+
+        </pre>
+    </body>
+</html>

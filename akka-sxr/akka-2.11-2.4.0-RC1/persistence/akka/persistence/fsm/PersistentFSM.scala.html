@@ -1,0 +1,396 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" ></meta>
+        <title>persistence/akka/persistence/fsm/PersistentFSM.scala</title>
+        <script type="text/javascript" src="../../../../jquery-all.js"></script>
+        <script type="text/javascript" src="../../../../linked.js"></script>
+        <link rel="stylesheet" type="text/css" href="../../../../style.css" title="Style"></link>
+    </head>
+    <body>
+        <pre>
+<span class="comment">/**
+ * Copyright (C) 2009-2014 Typesafe Inc. &lt;http://www.typesafe.com&gt;
+ */</span>
+
+package akka.persistence.fsm
+
+import akka.actor._
+import akka.persistence.fsm.<a href="#akka.persistence.fsm.PersistentFSM" title="akka.persistence.fsm.PersistentFSM.type">PersistentFSM</a>.<span class="delimiter">{</span> State, FSMState <span class="delimiter">}</span>
+import akka.persistence.serialization.Message
+import akka.persistence.<span class="delimiter">{</span> PersistentActor, RecoveryCompleted <span class="delimiter">}</span>
+
+import scala.annotation.varargs
+import scala.collection.immutable
+import scala.concurrent.duration.<span class="delimiter">{</span> Duration, FiniteDuration <span class="delimiter">}</span>
+import scala.reflect.ClassTag
+
+<span class="comment">/**
+ * A FSM implementation with persistent state.
+ *
+ * Supports the usual [[akka.actor.FSM]] functionality with additional persistence features.
+ * `PersistentFSM` is identified by 'persistenceId' value.
+ * State changes are persisted atomically together with domain events, which means that either both succeed or both fail,
+ * i.e. a state transition event will not be stored if persistence of an event related to that change fails.
+ * Persistence execution order is: persist -&amp;gt; wait for ack -&amp;gt; apply state.
+ * Incoming messages are deferred until the state is applied.
+ * State Data is constructed based on domain events, according to user's implementation of applyEvent function.
+ *
+ * This is an EXPERIMENTAL feature and is subject to change until it has received more real world testing.
+ */</span>
+trait <a title="trait PersistentFSM[S &lt;: akka.persistence.fsm.PersistentFSM.FSMState, D, E] extends AnyRef with akka.persistence.PersistentActor with akka.persistence.fsm.PersistentFSMBase[S,D,E] with akka.actor.ActorLogging" id="akka.persistence.fsm;PersistentFSM">PersistentFSM</a><span class="delimiter">[</span><a title=" &lt;: akka.persistence.fsm.PersistentFSM.FSMState" id="akka.persistence.fsm;PersistentFSM;S">S</a> &lt;: FSMState, <a title="" id="akka.persistence.fsm;PersistentFSM;D">D</a>, <a title="" id="akka.persistence.fsm;PersistentFSM;E">E</a><span class="delimiter">]</span> extends <a href="../PersistentActor.scala.html#akka.persistence;PersistentActor" title="akka.persistence.PersistentActor">PersistentActor</a> with <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase" title="akka.persistence.fsm.PersistentFSMBase[S,D,E]">PersistentFSMBase</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> with <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;ActorLogging" title="akka.actor.ActorLogging">ActorLogging</a> <span class="delimiter">{</span>
+  import akka.persistence.fsm.<a href="#akka.persistence.fsm.PersistentFSM" title="akka.persistence.fsm.PersistentFSM.type">PersistentFSM</a>._
+
+  <span class="comment">/**
+   * Enables to pass a ClassTag of a domain event base type from the implementing class
+   *
+   * @return [[scala.reflect.ClassTag]] of domain event base type
+   */</span>
+  implicit def <a title="=&gt; scala.reflect.ClassTag[E]" id="akka.persistence.fsm;PersistentFSM.domainEventClassTag">domainEventClassTag</a>: <span title="scala.reflect.ClassTag[E]">ClassTag</span><span class="delimiter">[</span>E<span class="delimiter">]</span>
+
+  <span class="comment">/**
+   * Domain event's [[scala.reflect.ClassTag]]
+   * Used for identifying domain events during recovery
+   */</span>
+  val <a title="scala.reflect.ClassTag[E]" id="akka.persistence.fsm;PersistentFSM.domainEventTag">domainEventTag</a> = <a href="#akka.persistence.fsm;PersistentFSM.domainEventClassTag" title="=&gt; scala.reflect.ClassTag[E]">domainEventClassTag</a>
+
+  <span class="comment">/**
+   * Map from state identifier to state instance
+   */</span>
+  lazy val <a title="Map[String,S]" id="akka.persistence.fsm;PersistentFSM.statesMap">statesMap</a>: <span title="Map[String,S]">Map</span><span class="delimiter">[</span>String, S<span class="delimiter">]</span> = <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.stateNames" title="=&gt; Iterable[S]">stateNames</a>.<span title="(f: S =&gt; (String, S))(implicit bf: scala.collection.generic.CanBuildFrom[Iterable[S],(String, S),Iterable[(String, S)]])Iterable[(String, S)]">map</span><span title="scala.collection.generic.CanBuildFrom[scala.collection.Iterable.Coll,(String, S),Iterable[(String, S)]]" class="delimiter">(</span><a title="S" id="akka.persistence.fsm;PersistentFSM.statesMap.$anonfun.name">name</a> ⇒ <span title="(_1: String, _2: S)(String, S)" class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.statesMap.$anonfun.name" title="S">name</a>.<a href="#akka.persistence.fsm.PersistentFSM;FSMState.identifier" title="=&gt; String">identifier</a>, <a href="#akka.persistence.fsm;PersistentFSM.statesMap.$anonfun.name" title="S">name</a><span class="delimiter">)</span><span class="delimiter">)</span>.<span title="(implicit ev: &lt;:&lt;[(String, S),(String, S)])scala.collection.immutable.Map[String,S]">toMap</span>
+
+  <span class="comment">/**
+   * Override this handler to define the action on Domain Event
+   *
+   * @param domainEvent domain event to apply
+   * @param currentData state data of the previous state
+   * @return updated state data
+   */</span>
+  def <a title="(domainEvent: E, currentData: D)D" id="akka.persistence.fsm;PersistentFSM.applyEvent">applyEvent</a><span class="delimiter">(</span><a title="E" id="akka.persistence.fsm;PersistentFSM.applyEvent.domainEvent">domainEvent</a>: <a href="#akka.persistence.fsm;PersistentFSM;E" title="E">E</a>, <a title="D" id="akka.persistence.fsm;PersistentFSM.applyEvent.currentData">currentData</a>: <a href="#akka.persistence.fsm;PersistentFSM;D" title="D">D</a><span class="delimiter">)</span>: <a href="#akka.persistence.fsm;PersistentFSM;D" title="D">D</a>
+
+  <span class="comment">/**
+   * Override this handler to define the action on recovery completion
+   */</span>
+  def <a title="()Unit" id="akka.persistence.fsm;PersistentFSM.onRecoveryCompleted">onRecoveryCompleted</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span title="Unit" class="delimiter">{</span><span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * After recovery events are handled as in usual FSM actor
+   */</span>
+  override def <a title="=&gt; PersistentFSM.this.Receive" id="akka.persistence.fsm;PersistentFSM.receiveCommand">receiveCommand</a>: <span title="PersistentFSM.this.Receive">Receive</span> = <span class="delimiter">{</span>
+    super<span class="delimiter">[</span>PersistentFSMBase<span class="delimiter">]</span>.<a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.receive" title="=&gt; PersistentFSM.this.Receive">receive</a>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Discover the latest recorded state
+   */</span>
+  override def <a title="=&gt; PersistentFSM.this.Receive" id="akka.persistence.fsm;PersistentFSM.receiveRecover">receiveRecover</a>: <span title="PersistentFSM.this.Receive">Receive</span> = <a title="&lt;$anon: Any =&gt; Unit&gt; extends scala.runtime.AbstractPartialFunction[Any,Unit] with Serializable" id="akka.persistence.fsm;PersistentFSM.receiveRecover;$anonfun.isDefinedAt.defaultCase$" class="delimiter">{</a>
+    case <a href="#akka.persistence.fsm;PersistentFSM.domainEventTag" title="(x: Any)Option[E]">domainEventTag</a><span class="delimiter">(</span><a title="E" id="akka.persistence.fsm;PersistentFSM.receiveRecover;$anonfun.isDefinedAt.event">event</a><span class="delimiter">)</span>                      ⇒ <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.startWith" title="(stateName: S, stateData: D, timeout: PersistentFSM.this.Timeout)Unit">startWith</a><span title="Boolean(true)" class="delimiter">(</span><a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.stateName" title="=&gt; S">stateName</a>, <a href="#akka.persistence.fsm;PersistentFSM.applyEvent" title="(domainEvent: E, currentData: D)D">applyEvent</a><span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.receiveRecover;$anonfun.isDefinedAt.event" title="E">event</a>, <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.stateData" title="=&gt; D">stateData</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    case StateChangeEvent<span class="delimiter">(</span><a title="String" id="akka.persistence.fsm;PersistentFSM.receiveRecover;$anonfun.isDefinedAt.stateIdentifier">stateIdentifier</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.persistence.fsm;PersistentFSM.receiveRecover;$anonfun.isDefinedAt.timeout">timeout</a><span class="delimiter">)</span> ⇒ <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.startWith" title="(stateName: S, stateData: D, timeout: PersistentFSM.this.Timeout)Unit">startWith</a><span title="Boolean(true)" class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.statesMap" title="(key: String)S">statesMap</a><span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.receiveRecover;$anonfun.isDefinedAt.stateIdentifier" title="String">stateIdentifier</a><span class="delimiter">)</span>, <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.stateData" title="=&gt; D">stateData</a>, <a href="#akka.persistence.fsm;PersistentFSM.receiveRecover;$anonfun.isDefinedAt.timeout" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a><span class="delimiter">)</span>
+    case <a href="../PersistentActor.scala.html#akka.persistence.RecoveryCompleted" title="akka.persistence.RecoveryCompleted.type">RecoveryCompleted</a> ⇒
+      <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.initialize" title="()Unit">initialize</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <a href="#akka.persistence.fsm;PersistentFSM.onRecoveryCompleted" title="()Unit">onRecoveryCompleted</a><span class="delimiter">(</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Persist FSM State and FSM State Data
+   */</span>
+  override private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(nextState: PersistentFSM.this.State)Unit" id="akka.persistence.fsm;PersistentFSM.applyState">applyState</a><span class="delimiter">(</span><a title="PersistentFSM.this.State" id="akka.persistence.fsm;PersistentFSM.applyState.nextState">nextState</a>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="PersistentFSM.this.State">State</a><span class="delimiter">)</span>: <span title="Unit">Unit</span> = <span class="delimiter">{</span>
+    var <a title="scala.collection.immutable.Seq[Any]" id="akka.persistence.fsm;PersistentFSM.applyState.eventsToPersist">eventsToPersist</a>: immutable.<span title="scala.collection.immutable.Seq[Any]">Seq</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> = <a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a>.<a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8.domainEvents" title="=&gt; Seq[E]">domainEvents</a>.<span title="=&gt; List[E]">toList</span>
+
+    <span class="comment">//Prevent StateChangeEvent persistence when staying in the same state, except when state defines a timeout</span>
+    if <span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a>.<a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8" title="=&gt; Boolean">notifies</a> <span title="(x: Boolean)Boolean">||</span> <a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a>.<a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8.timeout" title="=&gt; Option[scala.concurrent.duration.FiniteDuration]">timeout</a>.<span title="=&gt; Boolean">nonEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm;PersistentFSM.applyState.eventsToPersist" title="scala.collection.immutable.Seq[Any]">eventsToPersist</a> = <a href="#akka.persistence.fsm;PersistentFSM.applyState.eventsToPersist" title="scala.collection.immutable.Seq[Any]">eventsToPersist</a> <span title="(elem: Any)(implicit bf: scala.collection.generic.CanBuildFrom[scala.collection.immutable.Seq[Any],Any,scala.collection.immutable.Seq[Any]])scala.collection.immutable.Seq[Any]">:+</span> <a href="#akka.persistence.fsm.PersistentFSM.StateChangeEvent.readResolve" title="(stateIdentifier: String, timeout: Option[scala.concurrent.duration.FiniteDuration])akka.persistence.fsm.PersistentFSM.StateChangeEvent">StateChangeEvent</a><span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a>.<a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8.stateName" title="=&gt; S">stateName</a>.<a href="#akka.persistence.fsm.PersistentFSM;FSMState.identifier" title="=&gt; String">identifier</a>, <a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a>.<a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8.timeout" title="=&gt; Option[scala.concurrent.duration.FiniteDuration]">timeout</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    if <span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.eventsToPersist" title="scala.collection.immutable.Seq[Any]">eventsToPersist</a>.<span title="=&gt; Boolean">isEmpty</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+      <span class="comment">//If there are no events to persist, just apply the state</span>
+      super.<a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.applyState" title="(nextState: PersistentFSM.this.State)Unit">applyState</a><span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span> else <span class="delimiter">{</span>
+      <span class="comment">//Persist the events and apply the new state after all event handlers were executed</span>
+      var <a title="D" id="akka.persistence.fsm;PersistentFSM.applyState.nextData">nextData</a>: <a href="#akka.persistence.fsm;PersistentFSM;D" title="D">D</a> = <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.stateData" title="=&gt; D">stateData</a>
+      var <a title="Int" id="akka.persistence.fsm;PersistentFSM.applyState.handlersExecutedCounter">handlersExecutedCounter</a> = <span title="Int(0)" class="int">0</span>
+
+      def <a title="()Unit" id="akka.persistence.fsm;PersistentFSM.applyState.applyStateOnLastHandler">applyStateOnLastHandler</a><span class="delimiter">(</span><span class="delimiter">)</span> = <span class="delimiter">{</span>
+        <a href="#akka.persistence.fsm;PersistentFSM.applyState.handlersExecutedCounter" title="Int">handlersExecutedCounter</a> <span title="(x: Int)Int">+=</span> <span title="Int(1)" class="int">1</span>
+        if <span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.handlersExecutedCounter" title="Int">handlersExecutedCounter</a> <span title="(x: Int)Boolean">==</span> <a href="#akka.persistence.fsm;PersistentFSM.applyState.eventsToPersist" title="scala.collection.immutable.Seq[Any]">eventsToPersist</a>.<span title="=&gt; Int">size</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+          super.<a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.applyState" title="(nextState: PersistentFSM.this.State)Unit">applyState</a><span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a> <a href="#akka.persistence.fsm.PersistentFSM;State.using" title="(nextStateData: D)akka.persistence.fsm.PersistentFSM.State[S,D,E]">using</a> <a href="#akka.persistence.fsm;PersistentFSM.applyState.nextData" title="D">nextData</a><span class="delimiter">)</span>
+          <a href="#akka.persistence.fsm;PersistentFSM.applyState.nextState" title="PersistentFSM.this.State">nextState</a>.<a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8.afterTransitionDo" title="(v1: D)Unit">afterTransitionDo</a><span class="delimiter">(</span><a href="PersistentFSMBase.scala.html#akka.persistence.fsm;PersistentFSMBase.stateData" title="=&gt; D">stateData</a><span class="delimiter">)</span>
+        <span class="delimiter">}</span>
+      <span class="delimiter">}</span>
+
+      <a href="../Eventsourced.scala.html#akka.persistence;Eventsourced.persistAll" title="[A](events: scala.collection.immutable.Seq[A])(handler: A =&gt; Unit)Unit">persistAll</a><span title="(events: scala.collection.immutable.Seq[Any])(handler: Any =&gt; Unit)Unit" class="delimiter">[</span><span title="Any">Any</span><span class="delimiter">]</span><span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.eventsToPersist" title="scala.collection.immutable.Seq[Any]">eventsToPersist</a><span class="delimiter">)</span> <a href="#akka.persistence.fsm;PersistentFSM.applyState.$anonfun.x0$1" title="Unit" class="delimiter">{</a>
+        case <a href="#akka.persistence.fsm;PersistentFSM.domainEventTag" title="(x: Any)Option[E]">domainEventTag</a><span class="delimiter">(</span><a title="E" id="akka.persistence.fsm;PersistentFSM.applyState.$anonfun.event">event</a><span class="delimiter">)</span> ⇒
+          <a href="#akka.persistence.fsm;PersistentFSM.applyState.nextData" title="D">nextData</a> = <a href="#akka.persistence.fsm;PersistentFSM.applyEvent" title="(domainEvent: E, currentData: D)D">applyEvent</a><span class="delimiter">(</span><a href="#akka.persistence.fsm;PersistentFSM.applyState.$anonfun.event" title="E">event</a>, <a href="#akka.persistence.fsm;PersistentFSM.applyState.nextData" title="D">nextData</a><span class="delimiter">)</span>
+          <a href="#akka.persistence.fsm;PersistentFSM.applyState.applyStateOnLastHandler" title="()Unit">applyStateOnLastHandler</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        case StateChangeEvent<span class="delimiter">(</span><a title="String" id="akka.persistence.fsm;PersistentFSM.applyState.$anonfun.stateIdentifier">stateIdentifier</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.persistence.fsm;PersistentFSM.applyState.$anonfun.timeout">timeout</a><span class="delimiter">)</span> ⇒
+          <a href="#akka.persistence.fsm;PersistentFSM.applyState.applyStateOnLastHandler" title="()Unit">applyStateOnLastHandler</a><span class="delimiter">(</span><span class="delimiter">)</span>
+      <span class="delimiter">}</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+<span class="delimiter">}</span>
+
+object <a title="akka.persistence.fsm.PersistentFSM.type" id="akka.persistence.fsm.PersistentFSM">PersistentFSM</a> <a href="#akka.persistence.fsm.PersistentFSM" title="akka.persistence.fsm.PersistentFSM.type" class="delimiter">{</a>
+  <span class="comment">/**
+   * Base persistent event class
+   */</span>
+  private<span class="delimiter">[</span>persistence<span class="delimiter">]</span> sealed trait <a title="trait PersistentFsmEvent extends AnyRef with akka.persistence.serialization.Message" id="akka.persistence.fsm.PersistentFSM;PersistentFsmEvent">PersistentFsmEvent</a> extends <a href="../serialization/MessageSerializer.scala.html#akka.persistence.serialization;Message" title="akka.persistence.serialization.Message">Message</a>
+
+  <span class="comment">/**
+   * Persisted on state change
+   *
+   * @param stateIdentifier FSM state identifier
+   * @param timeout FSM state timeout
+   */</span>
+  private<span class="delimiter">[</span>persistence<span class="delimiter">]</span> case class <a title="class StateChangeEvent extends AnyRef with akka.persistence.fsm.PersistentFSM.PersistentFsmEvent with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.StateChangeEvent.readResolve">StateChangeEvent</a><span title="Product" class="delimiter">(</span><a title="String" id="akka.persistence.fsm.PersistentFSM;StateChangeEvent.stateIdentifier">stateIdentifier</a>: <span title="String">String</span>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.persistence.fsm.PersistentFSM;StateChangeEvent.timeout">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span><span class="delimiter">)</span> extends <a href="#akka.persistence.fsm.PersistentFSM;PersistentFsmEvent" title="akka.persistence.fsm.PersistentFSM.PersistentFsmEvent">PersistentFsmEvent</a>
+
+  <span class="comment">/**
+   * FSMState base trait, makes possible for simple default serialization by conversion to String
+   */</span>
+  trait <a title="trait FSMState extends AnyRef" id="akka.persistence.fsm.PersistentFSM;FSMState">FSMState</a> <span class="delimiter">{</span>
+    def <a title="=&gt; String" id="akka.persistence.fsm.PersistentFSM;FSMState.identifier">identifier</a>: <span title="String">String</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * A partial function value which does not match anything and can be used to
+   * “reset” `whenUnhandled` and `onTermination` handlers.
+   *
+   * {{{
+   * onTermination(FSM.NullFunction)
+   * }}}
+   */</span>
+  object <a title="akka.persistence.fsm.PersistentFSM.NullFunction.type" id="akka.persistence.fsm.PersistentFSM.NullFunction">NullFunction</a> extends <span title="PartialFunction[Any,Nothing]">PartialFunction</span><span class="delimiter">[</span>Any, Nothing<span class="delimiter">]</span> <span class="delimiter">{</span>
+    def <a title="(o: Any)Boolean" id="akka.persistence.fsm.PersistentFSM.NullFunction.isDefinedAt">isDefinedAt</a><span class="delimiter">(</span><a title="Any" id="akka.persistence.fsm.PersistentFSM.NullFunction.isDefinedAt.o">o</a>: <span title="Any">Any</span><span class="delimiter">)</span> = false
+    def <a title="(o: Any)Nothing" id="akka.persistence.fsm.PersistentFSM.NullFunction.apply">apply</a><span class="delimiter">(</span><a title="Any" id="akka.persistence.fsm.PersistentFSM.NullFunction.apply.o">o</a>: <span title="Any">Any</span><span class="delimiter">)</span> = sys.<span title="(message: String)Nothing">error</span><span class="delimiter">(</span><span title="String(&quot;undefined&quot;)" class="string">&quot;undefined&quot;</span><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Message type which is sent directly to the subscribed actor in
+   * [[akka.actor.FSM.SubscribeTransitionCallBack]] before sending any
+   * [[akka.actor.FSM.Transition]] messages.
+   */</span>
+  final case class <a href="#akka.persistence.fsm.PersistentFSM;CurrentState.productElement.x$1" title="class CurrentState[S] extends AnyRef with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.CurrentState.readResolve">CurrentState</a><span class="delimiter">[</span><a title="" id="akka.persistence.fsm.PersistentFSM;CurrentState;S">S</a><span class="delimiter">]</span><a href="#akka.persistence.fsm.PersistentFSM.CurrentState.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.persistence.fsm.PersistentFSM;CurrentState.fsmRef">fsmRef</a>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>, <a title="S" id="akka.persistence.fsm.PersistentFSM;CurrentState.state">state</a>: <a href="#akka.persistence.fsm.PersistentFSM;CurrentState;S" title="S">S</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.persistence.fsm.PersistentFSM;CurrentState.timeout">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Message type which is used to communicate transitions between states to
+   * all subscribed listeners (use [[akka.actor.FSM.SubscribeTransitionCallBack]]).
+   */</span>
+  final case class <a href="#akka.persistence.fsm.PersistentFSM;Transition.productElement.x$1" title="class Transition[S] extends AnyRef with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.Transition.readResolve">Transition</a><span class="delimiter">[</span><a title="" id="akka.persistence.fsm.PersistentFSM;Transition;S">S</a><span class="delimiter">]</span><a href="#akka.persistence.fsm.PersistentFSM.Transition.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.persistence.fsm.PersistentFSM;Transition.fsmRef">fsmRef</a>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>, <a title="S" id="akka.persistence.fsm.PersistentFSM;Transition.from">from</a>: <a href="#akka.persistence.fsm.PersistentFSM;Transition;S" title="S">S</a>, <a title="S" id="akka.persistence.fsm.PersistentFSM;Transition.to">to</a>: <a href="#akka.persistence.fsm.PersistentFSM;Transition;S" title="S">S</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.persistence.fsm.PersistentFSM;Transition.timeout">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Send this to an [[akka.actor.FSM]] to request first the [[PersistentFSM.CurrentState]]
+   * and then a series of [[PersistentFSM.Transition]] updates. Cancel the subscription
+   * using [[PersistentFSM.UnsubscribeTransitionCallBack]].
+   */</span>
+  final case class <a title="class SubscribeTransitionCallBack extends AnyRef with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.SubscribeTransitionCallBack.readResolve">SubscribeTransitionCallBack</a><a href="#akka.persistence.fsm.PersistentFSM.SubscribeTransitionCallBack.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.persistence.fsm.PersistentFSM;SubscribeTransitionCallBack.actorRef">actorRef</a>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Unsubscribe from [[akka.actor.FSM.Transition]] notifications which was
+   * effected by sending the corresponding [[akka.actor.FSM.SubscribeTransitionCallBack]].
+   */</span>
+  final case class <a title="class UnsubscribeTransitionCallBack extends AnyRef with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.UnsubscribeTransitionCallBack.readResolve">UnsubscribeTransitionCallBack</a><a href="#akka.persistence.fsm.PersistentFSM.UnsubscribeTransitionCallBack.readResolve" title="Product" class="delimiter">(</a><a title="akka.actor.ActorRef" id="akka.persistence.fsm.PersistentFSM;UnsubscribeTransitionCallBack.actorRef">actorRef</a>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Reason why this [[akka.actor.FSM]] is shutting down.
+   */</span>
+  sealed trait <a title="trait Reason extends AnyRef" id="akka.persistence.fsm.PersistentFSM;Reason">Reason</a>
+
+  <span class="comment">/**
+   * Default reason if calling `stop()`.
+   */</span>
+  case object <a href="#akka.persistence.fsm.PersistentFSM.Normal.productElement.x$1" title="akka.persistence.fsm.PersistentFSM.Normal.type" id="akka.persistence.fsm.PersistentFSM.Normal.readResolve">Normal</a> extends <a href="#akka.persistence.fsm.PersistentFSM;Reason" title="akka.persistence.fsm.PersistentFSM.Reason">Reason</a>
+
+  <span class="comment">/**
+   * Reason given when someone was calling `system.stop(fsm)` from outside;
+   * also applies to `Stop` supervision directive.
+   */</span>
+  case object <a href="#akka.persistence.fsm.PersistentFSM.Shutdown.productElement.x$1" title="akka.persistence.fsm.PersistentFSM.Shutdown.type" id="akka.persistence.fsm.PersistentFSM.Shutdown.readResolve">Shutdown</a> extends <a href="#akka.persistence.fsm.PersistentFSM;Reason" title="akka.persistence.fsm.PersistentFSM.Reason">Reason</a>
+
+  <span class="comment">/**
+   * Signifies that the [[akka.actor.FSM]] is shutting itself down because of
+   * an error, e.g. if the state to transition into does not exist. You can use
+   * this to communicate a more precise cause to the `onTermination` block.
+   */</span>
+  final case class <a title="class Failure extends AnyRef with akka.persistence.fsm.PersistentFSM.Reason with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.Failure.readResolve">Failure</a><span title="Product" class="delimiter">(</span><a title="Any" id="akka.persistence.fsm.PersistentFSM;Failure.cause">cause</a>: <span title="Any">Any</span><span class="delimiter">)</span> extends <a href="#akka.persistence.fsm.PersistentFSM;Reason" title="akka.persistence.fsm.PersistentFSM.Reason">Reason</a>
+
+  <span class="comment">/**
+   * This case object is received in case of a state timeout.
+   */</span>
+  case object <a href="#akka.persistence.fsm.PersistentFSM.StateTimeout.productElement.x$1" title="akka.persistence.fsm.PersistentFSM.StateTimeout.type" id="akka.persistence.fsm.PersistentFSM.StateTimeout.readResolve">StateTimeout</a>
+
+  <span class="comment">/** INTERNAL API */</span>
+  private<span class="delimiter">[</span>persistence<span class="delimiter">]</span> final case class <a title="class TimeoutMarker extends AnyRef with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.TimeoutMarker.readResolve">TimeoutMarker</a><a href="#akka.persistence.fsm.PersistentFSM.TimeoutMarker.readResolve" title="Product" class="delimiter">(</a><a title="Long" id="akka.persistence.fsm.PersistentFSM;TimeoutMarker.generation">generation</a>: <span title="Long">Long</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * INTERNAL API
+   */</span>
+  <span class="comment">// FIXME: what about the cancellable?</span>
+  private<span class="delimiter">[</span>persistence<span class="delimiter">]</span> final case class <a title="class Timer extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.Timer.readResolve">Timer</a><span title="Product" class="delimiter">(</span><a title="String" id="akka.persistence.fsm.PersistentFSM;Timer.name">name</a>: <span title="String">String</span>, <a title="Any" id="akka.persistence.fsm.PersistentFSM;Timer.msg">msg</a>: <span title="Any">Any</span>, <a title="Boolean" id="akka.persistence.fsm.PersistentFSM;Timer.repeat">repeat</a>: <span title="Boolean">Boolean</span>, <a title="Int" id="akka.persistence.fsm.PersistentFSM;Timer.generation">generation</a>: <span title="Int">Int</span><span class="delimiter">)</span><span class="delimiter">(</span><a title="akka.actor.ActorContext" id="akka.persistence.fsm.PersistentFSM;Timer.context">context</a>: <a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext" title="akka.actor.ActorContext">ActorContext</a><span class="delimiter">)</span>
+    extends <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a> <span class="delimiter">{</span>
+    private var <a title="Option[akka.actor.Cancellable]" id="akka.persistence.fsm.PersistentFSM;Timer.ref_=">ref</a>: <span title="Option[akka.actor.Cancellable]">Option</span><span class="delimiter">[</span>Cancellable<span class="delimiter">]</span> = _
+    private val <a title="akka.actor.Scheduler" id="akka.persistence.fsm.PersistentFSM;Timer.scheduler">scheduler</a> = <a href="#akka.persistence.fsm.PersistentFSM;Timer.context" title="akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.system" title="=&gt; akka.actor.ActorSystem">system</a>.<a href="../../../../actor/akka/actor/ActorSystem.scala.html#akka.actor;ActorSystem.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>
+    private implicit val <a title="scala.concurrent.ExecutionContextExecutor" id="akka.persistence.fsm.PersistentFSM;Timer.executionContext">executionContext</a> = <a href="#akka.persistence.fsm.PersistentFSM;Timer.context" title="akka.actor.ActorContext">context</a>.<a href="../../../../actor/akka/actor/ActorCell.scala.html#akka.actor;ActorContext.dispatcher" title="=&gt; scala.concurrent.ExecutionContextExecutor">dispatcher</a>
+
+    def <a title="(actor: akka.actor.ActorRef, timeout: scala.concurrent.duration.FiniteDuration)Unit" id="akka.persistence.fsm.PersistentFSM;Timer.schedule">schedule</a><span class="delimiter">(</span><a title="akka.actor.ActorRef" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.actor">actor</a>: <a href="../../../../actor/akka/actor/ActorRef.scala.html#akka.actor;ActorRef" title="akka.actor.ActorRef">ActorRef</a>, <a title="scala.concurrent.duration.FiniteDuration" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.timeout">timeout</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+      <a href="#akka.persistence.fsm.PersistentFSM;Timer.ref_=" title="(x$1: Option[akka.actor.Cancellable])Unit">ref</a> = <span title="(x: akka.actor.Cancellable)Some[akka.actor.Cancellable]">Some</span><span class="delimiter">(</span>
+        if <span class="delimiter">(</span><a href="#akka.persistence.fsm.PersistentFSM;Timer.repeat" title="=&gt; Boolean">repeat</a><span class="delimiter">)</span> <a href="#akka.persistence.fsm.PersistentFSM;Timer.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>.<a href="../../../../actor/akka/actor/Scheduler.scala.html#akka.actor;Scheduler.schedule(abf8206fc2)" title="(initialDelay: scala.concurrent.duration.FiniteDuration, interval: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">schedule</a><a href="#akka.persistence.fsm.PersistentFSM;Timer.executionContext" title="scala.concurrent.ExecutionContextExecutor" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.x$8" class="delimiter">(</a><a href="#akka.persistence.fsm.PersistentFSM;Timer.schedule.timeout" title="scala.concurrent.duration.FiniteDuration" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.x$3">timeout</a>, <a href="#akka.persistence.fsm.PersistentFSM;Timer.schedule.timeout" title="scala.concurrent.duration.FiniteDuration" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.x$4">timeout</a>, <a href="#akka.persistence.fsm.PersistentFSM;Timer.schedule.actor" title="akka.actor.ActorRef" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.x$5">actor</a>, this<span class="delimiter">)</span>
+        else <a href="#akka.persistence.fsm.PersistentFSM;Timer.scheduler" title="=&gt; akka.actor.Scheduler">scheduler</a>.<a href="../../../../actor/akka/actor/Scheduler.scala.html#akka.actor;Scheduler.scheduleOnce(a2d55b51db)" title="(delay: scala.concurrent.duration.FiniteDuration, receiver: akka.actor.ActorRef, message: Any)(implicit executor: scala.concurrent.ExecutionContext, implicit sender: akka.actor.ActorRef)akka.actor.Cancellable">scheduleOnce</a><a href="#akka.persistence.fsm.PersistentFSM;Timer.executionContext" title="scala.concurrent.ExecutionContextExecutor" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.x$13" class="delimiter">(</a><a href="#akka.persistence.fsm.PersistentFSM;Timer.schedule.timeout" title="scala.concurrent.duration.FiniteDuration" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.x$9">timeout</a>, <a href="#akka.persistence.fsm.PersistentFSM;Timer.schedule.actor" title="akka.actor.ActorRef" id="akka.persistence.fsm.PersistentFSM;Timer.schedule.x$10">actor</a>, this<span class="delimiter">)</span><span class="delimiter">)</span>
+
+    def <a title="()Unit" id="akka.persistence.fsm.PersistentFSM;Timer.cancel">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>: <span title="Unit">Unit</span> =
+      if <span class="delimiter">(</span><a href="#akka.persistence.fsm.PersistentFSM;Timer.ref_=" title="=&gt; Option[akka.actor.Cancellable]">ref</a>.<span title="=&gt; Boolean">isDefined</span><span class="delimiter">)</span> <span class="delimiter">{</span>
+        <a href="#akka.persistence.fsm.PersistentFSM;Timer.ref_=" title="=&gt; Option[akka.actor.Cancellable]">ref</a>.<span title="=&gt; akka.actor.Cancellable">get</span>.<a href="../../../../actor/akka/actor/Scheduler.scala.html#akka.actor;Cancellable.cancel" title="()Boolean">cancel</a><span class="delimiter">(</span><span class="delimiter">)</span>
+        <a href="#akka.persistence.fsm.PersistentFSM;Timer.ref_=" title="(x$1: Option[akka.actor.Cancellable])Unit">ref</a> = <span title="None.type">None</span>
+      <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * This extractor is just convenience for matching a (S, S) pair, including a
+   * reminder what the new state is.
+   */</span>
+  object <a title="akka.persistence.fsm.PersistentFSM.-&gt;.type" id="akka.persistence.fsm.PersistentFSM.->">-&gt;</a> <a href="#akka.persistence.fsm.PersistentFSM.->" title="akka.persistence.fsm.PersistentFSM.-&gt;.type" class="delimiter">{</a>
+    def <a title="[S](in: (S, S))Some[(S, S)]" id="akka.persistence.fsm.PersistentFSM.->.unapply">unapply</a><span class="delimiter">[</span><a title="" id="akka.persistence.fsm.PersistentFSM.->.unapply;S">S</a><span class="delimiter">]</span><span class="delimiter">(</span><a title="(S, S)" id="akka.persistence.fsm.PersistentFSM.->.unapply.in">in</a>: <span title="(S, S)" class="delimiter">(</span>S, S<span class="delimiter">)</span><span class="delimiter">)</span> = <span title="(x: (S, S))Some[(S, S)]">Some</span><span class="delimiter">(</span><a href="#akka.persistence.fsm.PersistentFSM.->.unapply.in" title="(S, S)">in</a><span class="delimiter">)</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * Log Entry of the [[akka.actor.LoggingFSM]], can be obtained by calling `getLog`.
+   */</span>
+  final case class <a href="#akka.persistence.fsm.PersistentFSM;LogEntry.productElement.x$1" title="class LogEntry[S, D] extends AnyRef with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.LogEntry.readResolve">LogEntry</a><span class="delimiter">[</span><a title="" id="akka.persistence.fsm.PersistentFSM;LogEntry;S">S</a>, <a title="" id="akka.persistence.fsm.PersistentFSM;LogEntry;D">D</a><span class="delimiter">]</span><a href="#akka.persistence.fsm.PersistentFSM.LogEntry.readResolve" title="Product" class="delimiter">(</a><a title="S" id="akka.persistence.fsm.PersistentFSM;LogEntry.stateName">stateName</a>: <a href="#akka.persistence.fsm.PersistentFSM;LogEntry;S" title="S">S</a>, <a title="D" id="akka.persistence.fsm.PersistentFSM;LogEntry.stateData">stateData</a>: <a href="#akka.persistence.fsm.PersistentFSM;LogEntry;D" title="D">D</a>, <a title="Any" id="akka.persistence.fsm.PersistentFSM;LogEntry.event">event</a>: <span title="Any">Any</span><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * This captures all of the managed state of the [[akka.actor.FSM]]: the state
+   * name, the state data, possibly custom timeout, stop reason, replies
+   * accumulated while processing the last message, possibly domain event and handler
+   * to be executed after FSM moves to the new state (also triggered when staying in the same state)
+   */</span>
+  final case class <a href="#akka.persistence.fsm.PersistentFSM;State.productElement.x$1" title="class State[S, D, E] extends AnyRef with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.State.readResolve">State</a><span class="delimiter">[</span><a title="" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8;S">S</a>, <a title="" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8;D">D</a>, <a title="" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8;E">E</a><span class="delimiter">]</span><a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="Product" class="delimiter">(</a>
+    <a title="S" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8.stateName">stateName</a>: <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8;S" title="S">S</a>,
+    <a title="D" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8.stateData">stateData</a>: <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8;D" title="D">D</a>,
+    <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8.timeout">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span> = <span title="None.type">None</span>,
+    <a title="Option[akka.persistence.fsm.PersistentFSM.Reason]" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8.stopReason">stopReason</a>: <span title="Option[akka.persistence.fsm.PersistentFSM.Reason]">Option</span><span class="delimiter">[</span>Reason<span class="delimiter">]</span> = <span title="None.type">None</span>,
+    <a title="List[Any]" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8.replies">replies</a>: <span title="List[Any]">List</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> = <span title="scala.collection.immutable.Nil.type">Nil</span>,
+    <a title="Seq[E]" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8.domainEvents">domainEvents</a>: <span title="Seq[E]">Seq</span><span class="delimiter">[</span>E<span class="delimiter">]</span> = <span title="scala.collection.immutable.Nil.type">Nil</span>,
+    <a title="D =&gt; Unit" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8.afterTransitionDo">afterTransitionDo</a>: D ⇒ Unit = <span class="delimiter">{</span> _: <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8;D" title="D">D</a> ⇒ <span class="delimiter">}</span><span class="delimiter">)</span><span class="delimiter">(</span>private<span class="delimiter">[</span>akka<span class="delimiter">]</span> val <a title="Boolean" id="akka.persistence.fsm.PersistentFSM.State.apply$default$8">notifies</a>: <span title="Boolean">Boolean</span> = true<span class="delimiter">)</span> <span class="delimiter">{</span>
+
+    <span class="comment">/**
+     * Copy object and update values if needed.
+     */</span>
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(stateName: S, stateData: D, timeout: Option[scala.concurrent.duration.FiniteDuration], stopReason: Option[akka.persistence.fsm.PersistentFSM.Reason], replies: List[Any], notifies: Boolean, domainEvents: Seq[E], afterTransitionDo: D =&gt; Unit)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.copy">copy</a><span class="delimiter">(</span><a title="S" id="akka.persistence.fsm.PersistentFSM;State.copy$default$1">stateName</a>: <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8;S" title="S">S</a> = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S">stateName</a>, <a title="D" id="akka.persistence.fsm.PersistentFSM;State.copy$default$2">stateData</a>: <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8;D" title="D">D</a> = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$2" title="D">stateData</a>, <a title="Option[scala.concurrent.duration.FiniteDuration]" id="akka.persistence.fsm.PersistentFSM;State.copy$default$3">timeout</a>: <span title="Option[scala.concurrent.duration.FiniteDuration]">Option</span><span class="delimiter">[</span>FiniteDuration<span class="delimiter">]</span> = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$3" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a title="Option[akka.persistence.fsm.PersistentFSM.Reason]" id="akka.persistence.fsm.PersistentFSM;State.copy$default$4">stopReason</a>: <span title="Option[akka.persistence.fsm.PersistentFSM.Reason]">Option</span><span class="delimiter">[</span>Reason<span class="delimiter">]</span> = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$4" title="Option[akka.persistence.fsm.PersistentFSM.Reason]">stopReason</a>, <a title="List[Any]" id="akka.persistence.fsm.PersistentFSM;State.copy$default$5">replies</a>: <span title="List[Any]">List</span><span class="delimiter">[</span>Any<span class="delimiter">]</span> = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$5" title="List[Any]">replies</a>, <a title="Boolean" id="akka.persistence.fsm.PersistentFSM;State.copy$default$6">notifies</a>: <span title="Boolean">Boolean</span> = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$6" title="Boolean">notifies</a>, <a title="Seq[E]" id="akka.persistence.fsm.PersistentFSM;State.copy$default$7">domainEvents</a>: <span title="Seq[E]">Seq</span><span class="delimiter">[</span>E<span class="delimiter">]</span> = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$7" title="Seq[E]">domainEvents</a>, <a title="D =&gt; Unit" id="akka.persistence.fsm.PersistentFSM;State.copy$default$8">afterTransitionDo</a>: D ⇒ Unit = <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$8" title="D =&gt; Unit">afterTransitionDo</a><span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="(stateName: S, stateData: D, timeout: Option[scala.concurrent.duration.FiniteDuration], stopReason: Option[akka.persistence.fsm.PersistentFSM.Reason], replies: List[Any], domainEvents: Seq[E], afterTransitionDo: D =&gt; Unit)(notifies: Boolean)akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">(</span><a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S">stateName</a>, <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$2" title="D">stateData</a>, <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$3" title="Option[scala.concurrent.duration.FiniteDuration]">timeout</a>, <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$4" title="Option[akka.persistence.fsm.PersistentFSM.Reason]">stopReason</a>, <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$5" title="List[Any]">replies</a>, <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$7" title="Seq[E]">domainEvents</a>, <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$8" title="D =&gt; Unit">afterTransitionDo</a><span class="delimiter">)</span><span class="delimiter">(</span><a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$6" title="Boolean">notifies</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Modify state transition descriptor to include a state timeout for the
+     * next state. This timeout overrides any default timeout set for the next
+     * state.
+     *
+     * Use Duration.Inf to deactivate an existing timeout.
+     */</span>
+    def <a title="(timeout: scala.concurrent.duration.Duration)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.forMax">forMax</a><span class="delimiter">(</span><a title="scala.concurrent.duration.Duration" id="akka.persistence.fsm.PersistentFSM;State.forMax.timeout">timeout</a>: <span title="scala.concurrent.duration.Duration">Duration</span><span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <a href="#akka.persistence.fsm.PersistentFSM;State.forMax.timeout" title="scala.concurrent.duration.Duration">timeout</a> match <span class="delimiter">{</span>
+      case <a title="scala.concurrent.duration.FiniteDuration" id="akka.persistence.fsm.PersistentFSM;State.forMax.f">f</a>: <span title="scala.concurrent.duration.FiniteDuration">FiniteDuration</span> ⇒ <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.forMax.x$21">copy</a><span class="delimiter">(</span>timeout = <span title="(x: scala.concurrent.duration.FiniteDuration)Some[scala.concurrent.duration.FiniteDuration]">Some</span><a title="Some[scala.concurrent.duration.FiniteDuration] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.persistence.fsm.PersistentFSM;State.forMax.x$14" class="delimiter">(</a><a href="#akka.persistence.fsm.PersistentFSM;State.forMax.f" title="scala.concurrent.duration.FiniteDuration">f</a><span class="delimiter">)</span><span class="delimiter">)</span>
+      case _                 ⇒ <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.forMax.x$29">copy</a><span class="delimiter">(</span>timeout = <a title="None.type" id="akka.persistence.fsm.PersistentFSM;State.forMax.x$22">None</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Send reply to sender of the current message, if available.
+     *
+     * @return this state transition descriptor
+     */</span>
+    def <a title="(replyValue: Any)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.replying">replying</a><span class="delimiter">(</span><a title="Any" id="akka.persistence.fsm.PersistentFSM;State.replying.replyValue">replyValue</a>: <span title="Any">Any</span><span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.replying.x$37">copy</a><span class="delimiter">(</span>replies = <a href="#akka.persistence.fsm.PersistentFSM;State.replying.replyValue" title="Any">replyValue</a> <a href="#akka.persistence.fsm.PersistentFSM;State.replying.x$30.x$2" title="List[Any] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.persistence.fsm.PersistentFSM;State.replying.x$30">::</a> <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8.replies" title="=&gt; List[Any]">replies</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Modify state transition descriptor with new state data. The data will be
+     * set when transitioning to the new state.
+     */</span>
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(nextStateData: D)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.using">using</a><span class="delimiter">(</span>@deprecatedName<span class="delimiter">(</span><span class="symbol">'nextStateDate</span><span class="delimiter">)</span> <a title="D" id="akka.persistence.fsm.PersistentFSM;State.using.nextStateData">nextStateData</a>: <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8;D" title="D">D</a><span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.using.x$45">copy</a><span class="delimiter">(</span>stateData = <a href="#akka.persistence.fsm.PersistentFSM;State.using.nextStateData" title="D" id="akka.persistence.fsm.PersistentFSM;State.using.x$38">nextStateData</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * INTERNAL API.
+     */</span>
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(reason: akka.persistence.fsm.PersistentFSM.Reason)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.withStopReason">withStopReason</a><span class="delimiter">(</span><a title="akka.persistence.fsm.PersistentFSM.Reason" id="akka.persistence.fsm.PersistentFSM;State.withStopReason.reason">reason</a>: <a href="#akka.persistence.fsm.PersistentFSM;Reason" title="akka.persistence.fsm.PersistentFSM.Reason">Reason</a><span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.withStopReason.x$53">copy</a><span class="delimiter">(</span>stopReason = <span title="(x: akka.persistence.fsm.PersistentFSM.Reason)Some[akka.persistence.fsm.PersistentFSM.Reason]">Some</span><a title="Some[akka.persistence.fsm.PersistentFSM.Reason] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.persistence.fsm.PersistentFSM;State.withStopReason.x$46" class="delimiter">(</a><a href="#akka.persistence.fsm.PersistentFSM;State.withStopReason.reason" title="akka.persistence.fsm.PersistentFSM.Reason">reason</a><span class="delimiter">)</span><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    private<span class="delimiter">[</span>akka<span class="delimiter">]</span> def <a title="(notifies: Boolean)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.withNotification">withNotification</a><span class="delimiter">(</span><a title="Boolean" id="akka.persistence.fsm.PersistentFSM;State.withNotification.notifies">notifies</a>: <span title="Boolean">Boolean</span><span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.withNotification.x$61">copy</a><span class="delimiter">(</span>notifies = <a href="#akka.persistence.fsm.PersistentFSM;State.withNotification.notifies" title="Boolean" id="akka.persistence.fsm.PersistentFSM;State.withNotification.x$54">notifies</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Specify domain events to be applied when transitioning to the new state.
+     */</span>
+    @varargs def <a title="(events: E*)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.applying">applying</a><span class="delimiter">(</span><a title="E*" id="akka.persistence.fsm.PersistentFSM;State.applying.events">events</a>: <span title="E*">E</span>*<span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.applying.x$69">copy</a><span class="delimiter">(</span>domainEvents = <a href="#akka.persistence.fsm.PersistentFSM.State.apply$default$8.domainEvents" title="=&gt; Seq[E]">domainEvents</a> <a title="Seq[E] @scala.reflect.internal.annotations.uncheckedBounds" id="akka.persistence.fsm.PersistentFSM;State.applying.x$62">++</a> <a href="#akka.persistence.fsm.PersistentFSM;State.applying.events" title="E*">events</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+
+    <span class="comment">/**
+     * Register a handler to be triggered after the state has been persisted successfully
+     */</span>
+    def <a title="(handler: D =&gt; Unit)akka.persistence.fsm.PersistentFSM.State[S,D,E]" id="akka.persistence.fsm.PersistentFSM;State.andThen">andThen</a><span class="delimiter">(</span><a title="D =&gt; Unit" id="akka.persistence.fsm.PersistentFSM;State.andThen.handler">handler</a>: D ⇒ Unit<span class="delimiter">)</span>: <a href="#akka.persistence.fsm.PersistentFSM.State.readResolve" title="akka.persistence.fsm.PersistentFSM.State[S,D,E]">State</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> = <span class="delimiter">{</span>
+      <a href="#akka.persistence.fsm.PersistentFSM;State.copy$default$1" title="S" id="akka.persistence.fsm.PersistentFSM;State.andThen.x$77">copy</a><span class="delimiter">(</span>afterTransitionDo = <a href="#akka.persistence.fsm.PersistentFSM;State.andThen.handler" title="D =&gt; Unit @scala.reflect.internal.annotations.uncheckedBounds" id="akka.persistence.fsm.PersistentFSM;State.andThen.x$70">handler</a><span class="delimiter">)</span>
+    <span class="delimiter">}</span>
+  <span class="delimiter">}</span>
+
+  <span class="comment">/**
+   * All messages sent to the [[akka.actor.FSM]] will be wrapped inside an
+   * `Event`, which allows pattern matching to extract both state and data.
+   */</span>
+  final case class <a href="#akka.persistence.fsm.PersistentFSM;Event.productElement.x$1" title="class Event[D] extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.Event.readResolve">Event</a><span class="delimiter">[</span><a title="" id="akka.persistence.fsm.PersistentFSM;Event;D">D</a><span class="delimiter">]</span><span title="Product" class="delimiter">(</span><a title="Any" id="akka.persistence.fsm.PersistentFSM;Event.event">event</a>: <span title="Any">Any</span>, <a title="D" id="akka.persistence.fsm.PersistentFSM;Event.stateData">stateData</a>: <a href="#akka.persistence.fsm.PersistentFSM;Event;D" title="D">D</a><span class="delimiter">)</span> extends <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a>
+
+  <span class="comment">/**
+   * Case class representing the state of the [[akka.actor.FSM]] whithin the
+   * `onTermination` block.
+   */</span>
+  final case class <a href="#akka.persistence.fsm.PersistentFSM;StopEvent.productElement.x$1" title="class StopEvent[S, D] extends AnyRef with akka.actor.NoSerializationVerificationNeeded with Product with Serializable" id="akka.persistence.fsm.PersistentFSM.StopEvent.readResolve">StopEvent</a><span class="delimiter">[</span><a title="" id="akka.persistence.fsm.PersistentFSM;StopEvent;S">S</a>, <a title="" id="akka.persistence.fsm.PersistentFSM;StopEvent;D">D</a><span class="delimiter">]</span><span title="Product" class="delimiter">(</span><a title="akka.persistence.fsm.PersistentFSM.Reason" id="akka.persistence.fsm.PersistentFSM;StopEvent.reason">reason</a>: <a href="#akka.persistence.fsm.PersistentFSM;Reason" title="akka.persistence.fsm.PersistentFSM.Reason">Reason</a>, <a title="S" id="akka.persistence.fsm.PersistentFSM;StopEvent.currentState">currentState</a>: <a href="#akka.persistence.fsm.PersistentFSM;StopEvent;S" title="S">S</a>, <a title="D" id="akka.persistence.fsm.PersistentFSM;StopEvent.stateData">stateData</a>: <a href="#akka.persistence.fsm.PersistentFSM;StopEvent;D" title="D">D</a><span class="delimiter">)</span> extends <a href="../../../../actor/akka/actor/Actor.scala.html#akka.actor;NoSerializationVerificationNeeded" title="akka.actor.NoSerializationVerificationNeeded">NoSerializationVerificationNeeded</a>
+
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API: compatible with lambda expressions
+ *
+ * Persistent Finite State Machine actor abstract base class.
+ *
+ * This is an EXPERIMENTAL feature and is subject to change until it has received more real world testing.
+ */</span>
+abstract class <a title="class AbstractPersistentFSM[S &lt;: akka.persistence.fsm.PersistentFSM.FSMState, D, E] extends akka.persistence.fsm.AbstractPersistentFSMBase[S,D,E] with akka.persistence.fsm.PersistentFSM[S,D,E]" id="akka.persistence.fsm;AbstractPersistentFSM">AbstractPersistentFSM</a><span class="delimiter">[</span><a title=" &lt;: akka.persistence.fsm.PersistentFSM.FSMState" id="akka.persistence.fsm;AbstractPersistentFSM;S">S</a> &lt;: FSMState, <a title="" id="akka.persistence.fsm;AbstractPersistentFSM;D">D</a>, <a title="" id="akka.persistence.fsm;AbstractPersistentFSM;E">E</a><span class="delimiter">]</span> extends <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;AbstractPersistentFSMBase" title="akka.persistence.fsm.AbstractPersistentFSMBase[S,D,E]">AbstractPersistentFSMBase</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> with <a href="#akka.persistence.fsm;PersistentFSM" title="akka.persistence.fsm.PersistentFSM[S,D,E]">PersistentFSM</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span> <span class="delimiter">{</span>
+  import java.util.function.Consumer
+
+  <span class="comment">/**
+   * Adapter from Java 8 Functional Interface to Scala Function
+   * @param action - Java 8 lambda expression defining the action
+   * @return action represented as a Scala Functin
+   */</span>
+  final def <a title="(action: java.util.function.Consumer[D])D =&gt; Unit" id="akka.persistence.fsm;AbstractPersistentFSM.exec">exec</a><span class="delimiter">(</span><a title="java.util.function.Consumer[D]" id="akka.persistence.fsm;AbstractPersistentFSM.exec.action">action</a>: <span title="java.util.function.Consumer[D]">Consumer</span><span class="delimiter">[</span>D<span class="delimiter">]</span><span class="delimiter">)</span>: D ⇒ Unit =
+    <a title="D" id="akka.persistence.fsm;AbstractPersistentFSM.exec.$anonfun.data">data</a> ⇒ <a href="#akka.persistence.fsm;AbstractPersistentFSM.exec.action" title="java.util.function.Consumer[D]">action</a>.<span title="(x$1: D)Unit">accept</span><span class="delimiter">(</span><a href="#akka.persistence.fsm;AbstractPersistentFSM.exec.$anonfun.data" title="D">data</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Adapter from Java [[Class]] to [[scala.reflect.ClassTag]]
+   * @return domain event [[scala.reflect.ClassTag]]
+   */</span>
+  final override def <a title="=&gt; scala.reflect.ClassTag[E]" id="akka.persistence.fsm;AbstractPersistentFSM.domainEventClassTag">domainEventClassTag</a>: <span title="scala.reflect.ClassTag[E]">ClassTag</span><span class="delimiter">[</span>E<span class="delimiter">]</span> =
+    <span title="(runtimeClass1: Class[_])scala.reflect.ClassTag[E]">ClassTag</span><span class="delimiter">(</span><a href="#akka.persistence.fsm;AbstractPersistentFSM.domainEventClass" title="=&gt; Class[E]">domainEventClass</a><span class="delimiter">)</span>
+
+  <span class="comment">/**
+   * Domain event's [[Class]]
+   * Used for identifying domain events during recovery
+   */</span>
+  def <a title="=&gt; Class[E]" id="akka.persistence.fsm;AbstractPersistentFSM.domainEventClass">domainEventClass</a>: <span title="Class[E]">Class</span><span class="delimiter">[</span>E<span class="delimiter">]</span>
+<span class="delimiter">}</span>
+
+<span class="comment">/**
+ * Java API: compatible with lambda expressions
+ *
+ * Persistent Finite State Machine actor abstract base class with FSM Logging
+ *
+ * This is an EXPERIMENTAL feature and is subject to change until it has received more real world testing.
+ */</span>
+abstract class <a title="class AbstractPersistentLoggingFSM[S &lt;: akka.persistence.fsm.PersistentFSM.FSMState, D, E] extends akka.persistence.fsm.AbstractPersistentFSMBase[S,D,E] with akka.persistence.fsm.LoggingPersistentFSM[S,D,E] with akka.persistence.fsm.PersistentFSM[S,D,E]" id="akka.persistence.fsm;AbstractPersistentLoggingFSM">AbstractPersistentLoggingFSM</a><span class="delimiter">[</span><a title=" &lt;: akka.persistence.fsm.PersistentFSM.FSMState" id="akka.persistence.fsm;AbstractPersistentLoggingFSM;S">S</a> &lt;: FSMState, <a title="" id="akka.persistence.fsm;AbstractPersistentLoggingFSM;D">D</a>, <a title="" id="akka.persistence.fsm;AbstractPersistentLoggingFSM;E">E</a><span class="delimiter">]</span>
+  extends <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;AbstractPersistentFSMBase" title="akka.persistence.fsm.AbstractPersistentFSMBase[S,D,E]">AbstractPersistentFSMBase</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span>
+  with <a href="PersistentFSMBase.scala.html#akka.persistence.fsm;LoggingPersistentFSM" title="akka.persistence.fsm.LoggingPersistentFSM[S,D,E]">LoggingPersistentFSM</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span>
+  with <a href="#akka.persistence.fsm;PersistentFSM" title="akka.persistence.fsm.PersistentFSM[S,D,E]">PersistentFSM</a><span class="delimiter">[</span>S, D, E<span class="delimiter">]</span>
+
+        </pre>
+    </body>
+</html>
