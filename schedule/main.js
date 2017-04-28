@@ -58,7 +58,7 @@ $("#result").click(function(){
 
   let result = [];
 
-  for(let i = 1; i < max_day; i++){
+  for(let i = 0; i < max_day; i++){
     switch($(`input[name=${i}]:checked`).val()) {
       case "a":
         break;
@@ -91,7 +91,7 @@ $("#result").click(function(){
     "End Time"
   ].join(",") + "\n";
 
-  for(let i = 1; i < result.length; i++){
+  for(let i = 0; i < result.length; i++){
     const x = result[i]
     csv += [
       x["Subject"],
