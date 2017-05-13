@@ -1,13 +1,43 @@
+const queryParams = (function(){
+  const arg = new Object;
+  const pair = location.search.substring(1).split('&');
+  for(let i = 0; pair[i]; i++) {
+    const kv = pair[i].split('=');
+    const value = parseInt(kv[1]);
+    if(!Number.isNaN(value)) {
+      arg[kv[0]] = value;
+    }
+  }
+  return arg;
+})();
+
+const month = (function(){
+  const v = queryParams["month"];
+  if(v === undefined) {
+    const today = new Date();
+    return today.getMonth() + 1;
+  } else {
+    return v - 1;
+  }
+})();
+
+const year = (function(){
+  const v = queryParams["year"];
+  if(v === undefined) {
+    const today = new Date();
+    return today.getFullYear();
+  } else {
+    return v;
+  }
+})();
+
 (function(){
 const today = new Date();
-const year = today.getFullYear();
-let month = today.getMonth() + 1;
 let day_count = -(new Date( year, month )).getDay();
 const max_day = new Date(year, month + 1, 0).getDate();
 let youbi = -1;
-month = month + 1;
 let html = '<table border="1">';
-html += '<caption>' +year +'/' +month +'</caption>';
+html += '<caption>' +year +'/' + (month + 1) +'</caption>';
 html+= '<tr>';
 const dayOfWeeks = '日月火水木金土';
 for(let i = 0; i< dayOfWeeks.length; i++){
@@ -52,8 +82,6 @@ $("#calendar").html(html);
 
 $("#result").click(function(){
   const today = new Date();
-  const year = today.getFullYear();
-  const month = today.getMonth() + 1;
   const max_day = new Date(year, month + 1, 0).getDate();
 
   let result = [];
