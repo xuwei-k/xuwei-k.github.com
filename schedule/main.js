@@ -86,7 +86,7 @@ $("#result").click(function(){
 
   let result = [];
 
-  for(let i = 0; i < max_day; i++){
+  for(let i = 0; i <= max_day; i++){
     switch($(`input[name=${i}]:checked`).val()) {
       case "a":
         break;
