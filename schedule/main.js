@@ -1,3 +1,16 @@
+const download = function(filename, text) {
+  const element = document.createElement('a');
+  element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+  element.setAttribute('download', filename);
+
+  element.style.display = 'none';
+  document.body.appendChild(element);
+
+  element.click();
+
+  document.body.removeChild(element);
+}
+
 const queryParams = (function(){
   const arg = new Object;
   const pair = location.search.substring(1).split('&');
@@ -124,4 +137,6 @@ $("#result").click(function(){
   console.log(csv);
 
   $("#csv").html("<pre>" + csv + "</pre>");
+
+  download(`schedule-${year}-${month}.csv`, csv);
 });
