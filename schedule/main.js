@@ -70,8 +70,7 @@ while( true ){
     html += '<td>' + day_count + '<br /' +
     `<form id="${day_count}">` +
       `<input name="${day_count}" type="radio" value="a" checked="checked">休み</input><br />` +
-      `<input name="${day_count}" type="radio" value="b">日勤</input><br />` +
-      `<input name="${day_count}" type="radio" value="c">夜勤</input>` +
+      `<input name="${day_count}" type="radio" value="b">仕事</input><br />` +
     `</form></td>`
   }
 }
@@ -92,20 +91,11 @@ $("#result").click(function(){
         break;
       case "b":
         result.push({
-          "Subject" : "日勤",
+          "Subject" : "仕事",
           "Start Date" : `${month + 1}/${i}/${year}`,
-          "Start Time" : "8:15 AM",
+          "Start Time" : "8:30 AM",
           "End Date" : `${month + 1}/${i}/${year}`,
           "End Time" : "17:00"
-        })
-        break;
-      case "c":
-        result.push({
-          "Subject" : "夜勤",
-          "Start Date" : `${month + 1}/${i}/${year}`,
-          "Start Time" : "16:30",
-          "End Date" : `${month + 1}/${i + 1}/${year}`,
-          "End Time" : "9:00 AM"
         })
         break;
     }
