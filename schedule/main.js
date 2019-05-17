@@ -138,5 +138,5 @@ $("#result").click(function(){
 
   $("#csv").html("<pre>" + csv + "</pre>");
 
-  download(`schedule-${year}-${month}.csv`, csv);
+  download(`schedule-${year}-${month + 1}.csv`, csv);
 });
