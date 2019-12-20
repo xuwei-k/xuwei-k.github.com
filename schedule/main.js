@@ -44,13 +44,29 @@ const year = (function(){
   }
 })();
 
+const m2 = (function(){
+  if (month == 12) {
+    return 1;
+  } else {
+    return month + 1;
+  }
+})();
+
+const y2 = (function(){
+  if (m2 == 1 && queryParams["month"] === undefined) {
+    return year + 1;
+  } else {
+    return year;
+  }
+})();
+
 (function(){
 const today = new Date();
-let day_count = -(new Date( year, month )).getDay();
-const max_day = new Date(year, month + 1, 0).getDate();
+let day_count = -(new Date(y2, m2 - 1)).getDay();
+const max_day = new Date(y2, m2, 0).getDate();
 let youbi = -1;
 let html = '<table border="1">';
-html += '<caption>' +year +'/' + (month + 1) +'</caption>';
+html += '<caption>' + y2 + '/' + m2 + '</caption>';
 html+= '<tr>';
 const dayOfWeeks = '日月火水木金土';
 for(let i = 0; i< dayOfWeeks.length; i++){
@@ -94,7 +110,7 @@ $("#calendar").html(html);
 
 $("#result").click(function(){
   const today = new Date();
-  const max_day = new Date(year, month + 1, 0).getDate();
+  const max_day = new Date(y2, m2, 0).getDate();
 
   let result = [];
 
@@ -105,9 +121,9 @@ $("#result").click(function(){
       case "b":
         result.push({
           "Subject" : "仕事",
-          "Start Date" : `${month + 1}/${i}/${year}`,
+          "Start Date" : `${m2}/${i}/${y2}`,
           "Start Time" : "8:30 AM",
-          "End Date" : `${month + 1}/${i}/${year}`,
+          "End Date" : `${m2}/${i}/${y2}`,
           "End Time" : "17:00"
         })
         break;
@@ -138,5 +154,5 @@ $("#result").click(function(){
 
   $("#csv").html("<pre>" + csv + "</pre>");
 
-  download(`schedule-${year}-${month + 1}.csv`, csv);
+  download(`schedule-${y2}-${m2}.csv`, csv);
 });
