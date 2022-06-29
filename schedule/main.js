@@ -96,7 +96,14 @@ while( true ){
   if( day_count < 1 || max_day<day_count ){
     html += '<td>-</td>';
   } else {
-    html += '<td>' + day_count + '<br /' +
+    if (youbi == 0) {
+      html += '<td style="background-color: #FF97C2;">'
+    } else if (youbi == 6) {
+      html += '<td style="background-color: skyblue;">'
+    } else {
+      html += '<td>'
+    }
+    html += day_count +
     `<form id="${day_count}">` +
       `<input name="${day_count}" type="radio" value="a" checked="checked">休み</input><br />` +
       `<input name="${day_count}" type="radio" value="b">仕事</input><br />` +
